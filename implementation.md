@@ -32,19 +32,51 @@ The data channel is configured for reliable, ordered delivery with a maximum of 
 
 ### 2. File Chunking System
 
-**Chunk Size Management:**
-Files are divided into 16KB chunks to comply with WebRTC DataChannel size limitations. Each chunk includes a 64-byte header containing essential metadata for proper reconstruction and verification.
+**Dual-Loop Architecture:**
+The system implements a sophisticated dual-loop architecture optimizing for both network efficiency and storage management:
 
-**Chunk Metadata Structure:**
-Each chunk carries comprehensive metadata including a unique file identifier, its position in the sequence (chunk index), total number of chunks expected, the actual chunk size, SHA256 checksum for integrity verification, and a flag indicating if it's the final chunk. This metadata enables proper file reconstruction, progress tracking, and error detection.
+**CHUNKING LOOP (Sender Side):**
+```
+1. Initialize chunking state and storage buffer (64KB)
+2. Start file stream reader
+3. Read 16KB chunks from file (WebRTC DataChannel limit)
+4. Append chunks to storage buffer
+5. When storage buffer full (64KB):
+   - Calculate SHA-256 checksum for entire storage chunk
+   - Store chunk metadata in IndexedDB (NOT actual data)
+   - Send chunk metadata via WebRTC
+   - Send binary data via WebRTC DataChannel
+   - Monitor performance and adapt chunk sizes
+   - Reset storage buffer
+6. Repeat until EOF
+7. Process final partial buffer if needed
+```
 
-**Implementation Strategy:**
-- Read files in streaming fashion to avoid memory issues
-- Generate SHA256 hash for each chunk before sending
-- Stream chunks directly via WebRTC (no local storage of chunk data)
-- Store only chunk metadata in IndexedDB for resume capability
-- Write received chunks directly to file system immediately
-- Implement chunk ordering and duplicate detection
+**RECEIVING LOOP (Receiver Side):**
+```
+1. Initialize assembly state and receive buffer
+2. Receive 16KB chunks via WebRTC
+3. Append chunks to receive buffer
+4. When receive buffer complete:
+   - Calculate SHA-256 checksum for validation
+   - Validate checksum against received metadata
+   - Store validated metadata in IndexedDB
+   - Write chunk directly to file system
+   - Reset receive buffer
+5. Repeat until transfer complete
+6. Close file handle and mark assembly complete
+```
+
+**Storage Buffer Management:**
+- **Chunking Side**: 64KB storage buffers accumulate multiple 16KB network chunks before processing
+- **Assembly Side**: 64KB receive buffers validate and write chunks in optimized batches
+- **Memory Efficiency**: No storage of actual chunk data - only metadata cached in IndexedDB
+- **Direct Streaming**: File data flows directly from disk → WebRTC → disk without intermediate storage
+
+**Adaptive Performance Optimization:**
+- **Dynamic Chunk Sizing**: Monitors throughput and adjusts chunk sizes (8KB-32KB range)
+- **Performance Metrics**: Tracks bytes/second, adapts based on network conditions
+- **Buffer Optimization**: Balances memory usage with transfer efficiency
 
 ### 3. File System API Integration
 
@@ -63,18 +95,29 @@ Received files are written directly to the user's chosen location using writable
 ### 4. IndexedDB Schema Design
 
 **Database Structure:**
-The local storage system uses IndexedDB with a dedicated database for P2P file transfers. The database employs a versioned schema approach to handle future updates and migrations seamlessly.
+The local storage system uses IndexedDB with a dedicated database for P2P file transfers, storing only metadata and transfer state - never actual chunk data which streams directly via WebRTC.
 
 **Data Organization:**
-Three main object stores organize the data:
+Four main object stores organize the data:
 - **Transfers Store**: Tracks overall transfer operations using unique transfer IDs, with indexes for quick lookups by status, timestamp, and associated file ID
-- **Chunks Store**: Stores only chunk metadata (NOT actual chunk data) using composite keys (transfer ID + chunk index), with indexes for efficient retrieval by transfer ID and processing status
+- **Chunks Store**: Stores ONLY chunk metadata (validation checksums, transfer state, timestamps) using composite keys (transfer ID + chunk index), with indexes for efficient retrieval by transfer ID and processing status
 - **Files Store**: Maintains file metadata and references using unique file IDs, with indexes for searching by name, size, and creation timestamp
+- **Performance Store**: Tracks transfer performance metrics, adaptive chunk sizing history, and connection quality data
 
-**Data Models:**
-- **Transfer**: ID, file metadata, progress, status, peer info
-- **Chunk**: Transfer ID, index, checksum, status, size (NO data blob - chunks stream directly via WebRTC)
-- **File**: ID, name, size, type, handle reference
+**Storage Buffer Metadata Models:**
+- **Transfer**: ID, file metadata, storage buffer progress, status, peer info, performance metrics
+- **Chunk**: Transfer ID, storage chunk index, checksum, validation status, size, file offset, timestamp (NO binary data)
+- **File**: ID, name, size, type, handle reference, total storage chunks expected
+- **Performance**: Transfer ID, bytes/second, adaptive chunk sizes, buffer efficiency metrics
+
+**Data Flow Architecture:**
+```
+File System → Storage Buffer (64KB) → IndexedDB (metadata only) → WebRTC (binary data)
+                    ↓                           ↓                         ↓
+                SHA-256 Hash              Metadata Storage         Direct Streaming
+                    ↓                           ↓                         ↓
+             Checksum Storage          Progress Tracking          No Local Cache
+```
 
 ### 5. Security Implementation (TOFU)
 
@@ -150,25 +193,30 @@ Each error type has a corresponding recovery strategy:
 
 ### 10. Performance Optimization Techniques
 
-**Memory Management:**
-- Use streaming file reading for large files
-- Stream chunks directly without storing in IndexedDB
-- Write received chunks to file system immediately
-- Clear processed chunks from memory immediately
-- Never cache actual chunk data locally
-- Monitor memory usage and adjust chunk processing
+**Dual-Buffer Memory Management:**
+- **Storage Buffers**: 64KB buffers accumulate multiple 16KB network chunks for efficient processing
+- **Receive Buffers**: 64KB validation buffers ensure data integrity before file writing
+- **Zero-Copy Architecture**: Data streams directly from file system through WebRTC to destination file system
+- **Buffer Recycling**: Reuse buffer memory across chunks to minimize garbage collection
+- **No Chunk Caching**: Never store actual chunk data locally - only metadata and checksums
 
-**Transfer Optimization:**
-- Implement adaptive chunk sizing based on connection quality
-- Use parallel chunk processing where possible
-- Buffer management to prevent DataChannel overflow
-- Connection quality monitoring and adjustment
+**Adaptive Transfer Optimization:**
+- **Dynamic Chunk Sizing**: Real-time adjustment of chunk sizes (8KB-32KB) based on network performance
+- **Performance Monitoring**: Track bytes/second, connection quality, and buffer efficiency
+- **Network-Aware Adaptation**: Increase chunk sizes for high-throughput connections, decrease for unreliable networks
+- **Buffer Size Optimization**: Adjust storage buffer sizes based on device capabilities and transfer patterns
 
-**Background Processing:**
-- Use Web Workers for SHA256 hashing
-- Offload heavy computation from main thread
-- Implement progress reporting from workers
-- Handle worker lifecycle management
+**Storage Efficiency Strategy:**
+- **Metadata-Only IndexedDB**: Store only checksums, transfer state, and progress - never binary data
+- **Direct File System Streaming**: Write received chunks directly to destination files without intermediate storage
+- **Minimal Memory Footprint**: Process chunks immediately upon receipt, clear from memory after processing
+- **Progressive Cleanup**: Remove completed transfer metadata to prevent database bloat
+
+**Background Processing Architecture:**
+- **Web Workers Integration**: Offload SHA-256 hashing to background threads
+- **Streaming Hash Calculation**: Calculate checksums as data flows through buffers
+- **Parallel Validation**: Validate received chunks while processing new incoming data
+- **Non-Blocking I/O**: Use async file operations to prevent UI blocking during large transfers
 
 ### 11. Browser Compatibility Handling
 
