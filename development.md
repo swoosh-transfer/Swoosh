@@ -66,31 +66,34 @@ Web-based peer-to-peer file transfer application capable of handling 50GB+ trans
 - Validate metadata before accepting transfer
 
 ### 5. IndexedDB Storage System
-- [ ] Database schema design for file transfer data
-- [ ] Chunk storage and retrieval
+- [ ] Database schema design for file transfer metadata
+- [ ] Chunk metadata storage and retrieval (NO actual chunk data)
 - [ ] Transfer state persistence
 - [ ] Incomplete transfer cleanup
 - [ ] Storage quota management
 - [ ] Database migration handling
 
 **Implementation Notes:**
-- Store chunks temporarily in IndexedDB during transfer
+- Store only chunk metadata in IndexedDB (transfer ID, index, checksum, status)
+- Never store actual chunk data - stream directly via WebRTC
 - Persist transfer state for resume functionality
 - Implement cleanup for completed/cancelled transfers
-- Monitor storage quota and handle overflow
+- Minimal storage usage - only metadata and progress tracking
 
 ### 6. Resume Capability
 - [ ] Transfer state tracking and persistence
-- [ ] Chunk completion status tracking
+- [ ] Chunk completion status tracking (metadata only)
 - [ ] Resume transfer from last successful chunk
 - [ ] Partial file reconstruction
 - [ ] Resume negotiation between peers
 - [ ] Resume after connection loss
 
 **Implementation Notes:**
-- Track completed chunks in IndexedDB
+- Track completed chunk metadata in IndexedDB (not actual chunks)
 - Resume by requesting missing chunks only
+- Use file system API to verify partial file state
 - Synchronize resume state between sender and receiver
+- Continue writing to existing file handle on resume
 
 ### 7. Security Implementation (TOFU)
 - [ ] Shared secret generation

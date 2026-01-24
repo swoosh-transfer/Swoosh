@@ -41,7 +41,9 @@ Each chunk carries comprehensive metadata including a unique file identifier, it
 **Implementation Strategy:**
 - Read files in streaming fashion to avoid memory issues
 - Generate SHA256 hash for each chunk before sending
-- Include chunk metadata in each transmission
+- Stream chunks directly via WebRTC (no local storage of chunk data)
+- Store only chunk metadata in IndexedDB for resume capability
+- Write received chunks directly to file system immediately
 - Implement chunk ordering and duplicate detection
 
 ### 3. File System API Integration
@@ -66,12 +68,12 @@ The local storage system uses IndexedDB with a dedicated database for P2P file t
 **Data Organization:**
 Three main object stores organize the data:
 - **Transfers Store**: Tracks overall transfer operations using unique transfer IDs, with indexes for quick lookups by status, timestamp, and associated file ID
-- **Chunks Store**: Stores individual file chunks using composite keys (transfer ID + chunk index), with indexes for efficient retrieval by transfer ID and processing status
+- **Chunks Store**: Stores only chunk metadata (NOT actual chunk data) using composite keys (transfer ID + chunk index), with indexes for efficient retrieval by transfer ID and processing status
 - **Files Store**: Maintains file metadata and references using unique file IDs, with indexes for searching by name, size, and creation timestamp
 
 **Data Models:**
 - **Transfer**: ID, file metadata, progress, status, peer info
-- **Chunk**: Transfer ID, index, data blob, checksum, status
+- **Chunk**: Transfer ID, index, checksum, status, size (NO data blob - chunks stream directly via WebRTC)
 - **File**: ID, name, size, type, handle reference
 
 ### 5. Security Implementation (TOFU)
@@ -150,8 +152,10 @@ Each error type has a corresponding recovery strategy:
 
 **Memory Management:**
 - Use streaming file reading for large files
+- Stream chunks directly without storing in IndexedDB
+- Write received chunks to file system immediately
 - Clear processed chunks from memory immediately
-- Implement garbage collection triggers
+- Never cache actual chunk data locally
 - Monitor memory usage and adjust chunk processing
 
 **Transfer Optimization:**
@@ -218,62 +222,4 @@ This ensures basic functionality across a wide range of browsers and devices.
 - Secure context requirements
 
 ---
-
-## Implementation Phases
-
-### Phase 1: Foundation (Weeks 1-2)
-- Basic WebRTC connection
-- Simple file chunking
-- IndexedDB setup
-- Basic UI components
-
-### Phase 2: Core Features (Weeks 3-4)
-- Complete file transfer flow
-- SHA256 verification
-- Resume capability
-- Error handling
-
-### Phase 3: Security & Polish (Weeks 5-6)
-- TOFU implementation
-- UUID verification
-- Performance optimization
-- Cross-browser testing
-
-### Phase 4: Advanced Features (Weeks 7-8)
-- Multiple file transfers
-- UI/UX improvements
-- Documentation
-- Production deployment
-
----
-
-## Code Organization
-
-```
-src/
-├── components/
-│   ├── FileTransfer/
-│   ├── ConnectionStatus/
-│   └── ProgressIndicator/
-├── hooks/
-│   ├── useWebRTC.js
-│   ├── useFileSystem.js
-│   └── useIndexedDB.js
-├── stores/
-│   ├── connectionStore.js
-│   ├── transferStore.js
-│   └── settingsStore.js
-├── utils/
-│   ├── chunking.js
-│   ├── crypto.js
-│   ├── indexedDB.js
-│   └── webrtc.js
-├── workers/
-│   ├── hashWorker.js
-│   └── chunkWorker.js
-└── constants/
-    ├── messages.js
-    └── config.js
-```
-
 This implementation documentation provides the technical foundation for building your P2P file transfer application with all the specified features.
