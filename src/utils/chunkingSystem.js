@@ -1,9 +1,15 @@
 // File Chunking and Assembly System
 // Implements dual-loop architecture: chunking loop for sending, receiving loop for assembly
+// Supports pause/resume and crash recovery
 
 import { saveChunkMeta, getChunkMeta, getChunksByTransfer, deleteChunksByTransfer } from './indexedDB.js';
 import { createFileMetadata, saveFileMetadata, createTransferRecord, updateTransferProgress } from './fileMetadata.js';
 import { initFileWriter, writeChunkToFile, completeTransfer, getTransferProgress as getFileProgress } from './fileSystem.js';
+import { 
+  resumableTransferManager, 
+  TransferState, 
+  TransferRole 
+} from './resumableTransfer.js';
 
 const INITIAL_CHUNK_SIZE = 16 * 1024; // 16KB - WebRTC DataChannel limit
 const STORAGE_BUFFER_SIZE = 64 * 1024; // 64KB storage chunks for IndexedDB
@@ -16,13 +22,79 @@ class ChunkingEngine {
     this.storageBuffers = new Map(); // transferId -> storage buffer
     this.chunkSize = INITIAL_CHUNK_SIZE;
     this.performanceMetrics = new Map(); // transferId -> metrics
+    this.pauseControllers = new Map(); // transferId -> { isPaused, resumeResolve }
+    this.fileReaders = new Map(); // transferId -> reader (for resume)
+  }
+
+  /**
+   * Pause a chunking operation
+   * @param {string} transferId Transfer ID
+   */
+  async pause(transferId) {
+    const controller = this.pauseControllers.get(transferId);
+    if (controller && !controller.isPaused) {
+      controller.isPaused = true;
+      await resumableTransferManager.pauseTransfer(transferId);
+      console.log(`[ChunkingEngine] Paused transfer: ${transferId}`);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Resume a paused chunking operation
+   * @param {string} transferId Transfer ID
+   */
+  async resume(transferId) {
+    const controller = this.pauseControllers.get(transferId);
+    if (controller && controller.isPaused) {
+      controller.isPaused = false;
+      if (controller.resumeResolve) {
+        controller.resumeResolve();
+        controller.resumeResolve = null;
+      }
+      await resumableTransferManager.resumeTransfer(transferId);
+      resumableTransferManager.signalResume(transferId);
+      console.log(`[ChunkingEngine] Resumed transfer: ${transferId}`);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Check if transfer is paused
+   * @param {string} transferId Transfer ID
+   */
+  isPaused(transferId) {
+    const controller = this.pauseControllers.get(transferId);
+    return controller?.isPaused || false;
+  }
+
+  /**
+   * Wait if paused, returns true if should continue, false if cancelled
+   * @param {string} transferId Transfer ID
+   */
+  async _waitIfPaused(transferId) {
+    const controller = this.pauseControllers.get(transferId);
+    if (!controller) return true;
+
+    while (controller.isPaused) {
+      await new Promise(resolve => {
+        controller.resumeResolve = resolve;
+      });
+    }
+
+    // Check if cancelled
+    const state = await resumableTransferManager.getTransferState(transferId);
+    return state?.status !== TransferState.CANCELLED;
   }
 
   /**
    * CHUNKING LOOP - Sender side implementation
    * Reads file in 16KB chunks, buffers to storage size, then processes
+   * Now supports pause/resume
    */
-  async startChunking(transferId, file, peerId, onChunkReady, onProgress) {
+  async startChunking(transferId, file, peerId, onChunkReady, onProgress, resumeFromChunk = 0) {
     // Create file metadata and transfer record
     const fileMetadata = createFileMetadata({
       name: file.name,
@@ -34,10 +106,42 @@ class ChunkingEngine {
     await saveFileMetadata(fileMetadata);
     const transferRecord = await createTransferRecord({ transferId, fileMeta: fileMetadata, peerId });
     
+    // Register with resumable transfer manager
+    await resumableTransferManager.registerTransfer({
+      transferId,
+      role: TransferRole.SENDER,
+      fileName: file.name,
+      fileSize: file.size,
+      totalChunks: Math.ceil(file.size / STORAGE_BUFFER_SIZE),
+      peerId,
+      file
+    });
+
+    // Initialize pause controller
+    this.pauseControllers.set(transferId, {
+      isPaused: false,
+      resumeResolve: null
+    });
+
     const reader = file.stream().getReader();
+    this.fileReaders.set(transferId, reader);
+    
     const totalSize = file.size;
     let bytesRead = 0;
-    let storageChunkIndex = 0;
+    let storageChunkIndex = resumeFromChunk;
+    
+    // If resuming, skip to the correct position
+    if (resumeFromChunk > 0) {
+      const skipBytes = resumeFromChunk * STORAGE_BUFFER_SIZE;
+      let skipped = 0;
+      while (skipped < skipBytes) {
+        const { value: chunk, done } = await reader.read();
+        if (done) break;
+        skipped += chunk.length;
+      }
+      bytesRead = skipped;
+      console.log(`[ChunkingEngine] Resuming from chunk ${resumeFromChunk}, skipped ${skipped} bytes`);
+    }
     
     // Initialize chunking state
     this.activeChunkings.set(transferId, {
@@ -45,28 +149,36 @@ class ChunkingEngine {
       fileMetadata,
       transferRecord,
       totalSize,
-      bytesRead: 0,
-      storageChunkIndex: 0,
-      isComplete: false
+      bytesRead,
+      storageChunkIndex,
+      isComplete: false,
+      isPaused: false
     });
 
     // Initialize storage buffer
     this.storageBuffers.set(transferId, {
       buffer: new Uint8Array(STORAGE_BUFFER_SIZE),
       currentSize: 0,
-      chunkStartOffset: 0
+      chunkStartOffset: bytesRead
     });
 
     // Initialize performance metrics
     this.performanceMetrics.set(transferId, {
       startTime: Date.now(),
-      chunksProcessed: 0,
+      chunksProcessed: storageChunkIndex,
       bytesPerSecond: 0,
       adaptiveChunkSize: this.chunkSize
     });
 
     try {
       while (true) {
+        // Check for pause
+        const shouldContinue = await this._waitIfPaused(transferId);
+        if (!shouldContinue) {
+          console.log(`[ChunkingEngine] Transfer ${transferId} cancelled`);
+          break;
+        }
+
         // 3. Read 16KB from file (or remaining bytes)
         const { value: chunk, done } = await reader.read();
         
@@ -87,13 +199,23 @@ class ChunkingEngine {
           onProgress(bytesRead, totalSize);
         }
 
+        // Update resumable transfer progress
+        const chunkingState = this.activeChunkings.get(transferId);
+        await resumableTransferManager.updateProgress(transferId, {
+          chunkIndex: chunkingState.storageChunkIndex,
+          bytesProcessed: bytesRead
+        });
+
         // 9. Adapt chunk size based on performance monitoring
         this._adaptChunkSize(transferId);
       }
 
       // Mark chunking as complete
       const chunkingState = this.activeChunkings.get(transferId);
-      chunkingState.isComplete = true;
+      if (chunkingState) {
+        chunkingState.isComplete = true;
+        await resumableTransferManager.completeTransfer(transferId);
+      }
 
     } catch (error) {
       console.error('Chunking error:', error);
@@ -253,6 +375,23 @@ class ChunkingEngine {
     this.activeChunkings.delete(transferId);
     this.storageBuffers.delete(transferId);
     this.performanceMetrics.delete(transferId);
+    this.pauseControllers.delete(transferId);
+    this.fileReaders.delete(transferId);
+  }
+
+  /**
+   * Get pause state for a transfer
+   */
+  getPauseState(transferId) {
+    const controller = this.pauseControllers.get(transferId);
+    const state = this.activeChunkings.get(transferId);
+    
+    return {
+      isPaused: controller?.isPaused || false,
+      bytesRead: state?.bytesRead || 0,
+      storageChunkIndex: state?.storageChunkIndex || 0,
+      totalSize: state?.totalSize || 0
+    };
   }
 }
 
@@ -496,9 +635,29 @@ export async function initializeFileReception(transferId, fileMetadata, peerId) 
   return await assemblyEngine.initializeAssembly(transferId, fileMetadata, peerId);
 }
 
-// Start file chunking process
-export async function startFileChunking(transferId, file, peerId, onChunkReady, onProgress) {
-  return await chunkingEngine.startChunking(transferId, file, peerId, onChunkReady, onProgress);
+// Start file chunking process (with optional resume)
+export async function startFileChunking(transferId, file, peerId, onChunkReady, onProgress, resumeFromChunk = 0) {
+  return await chunkingEngine.startChunking(transferId, file, peerId, onChunkReady, onProgress, resumeFromChunk);
+}
+
+// Pause file chunking
+export async function pauseChunking(transferId) {
+  return await chunkingEngine.pause(transferId);
+}
+
+// Resume file chunking
+export async function resumeChunking(transferId) {
+  return await chunkingEngine.resume(transferId);
+}
+
+// Check if chunking is paused
+export function isChunkingPaused(transferId) {
+  return chunkingEngine.isPaused(transferId);
+}
+
+// Get chunking pause state
+export function getChunkingPauseState(transferId) {
+  return chunkingEngine.getPauseState(transferId);
 }
 
 // Process received chunk
@@ -511,11 +670,13 @@ export function getTransferProgress(transferId) {
   const chunkingProgress = chunkingEngine.activeChunkings.get(transferId);
   const assemblyProgress = assemblyEngine.getProgress(transferId);
   const fileSystemProgress = getFileProgress(transferId);
+  const pauseState = chunkingEngine.getPauseState(transferId);
   
   return {
     chunking: chunkingProgress,
     assembly: assemblyProgress,
-    fileSystem: fileSystemProgress
+    fileSystem: fileSystemProgress,
+    isPaused: pauseState.isPaused
   };
 }
 

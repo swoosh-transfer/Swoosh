@@ -40,6 +40,7 @@ import {
   StatusSection,
   FileInfo,
   TransferProgress,
+  TransferProgressWithControls,
   ShareUrlBox,
   IncomingFilePrompt,
   TransferComplete,
@@ -47,8 +48,13 @@ import {
   ErrorDisplay,
   ConnectionInfoPanel,
   TransferInfoPanel,
+  PauseResumeButton,
+  CrashRecoveryPrompt,
   formatBytes,
 } from '../components/RoomUI';
+
+// Pause/Resume functionality
+import { pauseChunking, resumeChunking, isChunkingPaused } from '../utils/chunkingSystem';
 
 export default function Room() {
   const { roomId } = useParams();
@@ -85,6 +91,8 @@ export default function Room() {
   const [downloadResult, setDownloadResult] = useState(null);
   const [logs, setLogs] = useState([]);
   const [identityVerified, setIdentityVerified] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [recoverableTransfers, setRecoverableTransfers] = useState([]);
   const myUUID = useRef(getLocalUUID());
 
   // Connection info for display
@@ -480,6 +488,15 @@ export default function Room() {
           addLog(`Retransmit requested: ${msg.chunks.length} chunks`, 'warning');
           // TODO: Implement retransmission
           break;
+        case 'transfer-paused':
+          handleRemotePause(msg.transferId);
+          break;
+        case 'transfer-resumed':
+          handleRemoteResume(msg.transferId);
+          break;
+        case 'transfer-cancelled':
+          handleRemoteCancel(msg.transferId);
+          break;
         default:
           console.log('[Room] Unknown message:', msg.type);
       }
@@ -795,6 +812,118 @@ export default function Room() {
     }
   };
 
+  // Pause transfer handler - sends signal to peer
+  const handlePauseTransfer = useCallback(() => {
+    const transferId = transferIdRef.current;
+    if (!transferId) return;
+
+    // Notify peer about pause
+    sendJSON({ type: 'transfer-paused', transferId });
+
+    if (isHost) {
+      pauseChunking(transferId);
+      addLog('Sending paused', 'warning');
+    } else {
+      fileReceiver.pause(transferId);
+      addLog('Receiving paused', 'warning');
+    }
+    setIsPaused(true);
+  }, [isHost, addLog, sendJSON]);
+
+  // Resume transfer handler - sends signal to peer
+  const handleResumeTransfer = useCallback(() => {
+    const transferId = transferIdRef.current;
+    if (!transferId) return;
+
+    // Notify peer about resume
+    sendJSON({ type: 'transfer-resumed', transferId });
+
+    if (isHost) {
+      resumeChunking(transferId);
+      addLog('Sending resumed', 'success');
+    } else {
+      fileReceiver.resume(transferId);
+      addLog('Receiving resumed', 'success');
+    }
+    setIsPaused(false);
+  }, [isHost, addLog, sendJSON]);
+
+  // Cancel transfer handler - sends signal to peer
+  const handleCancelTransfer = useCallback(() => {
+    const transferId = transferIdRef.current;
+    if (!transferId) return;
+
+    // Notify peer about cancellation
+    sendJSON({ type: 'transfer-cancelled', transferId });
+
+    if (isHost) {
+      chunkingEngineRef.current.cleanup(transferId);
+    } else {
+      fileReceiver.cancelTransfer(transferId);
+    }
+    setTransferState('idle');
+    setTransferProgress(0);
+    setIsPaused(false);
+    addLog('Transfer cancelled', 'warning');
+  }, [isHost, addLog, sendJSON]);
+
+  // Handle remote pause signal from peer
+  const handleRemotePause = useCallback((transferId) => {
+    if (isHost) {
+      pauseChunking(transferId);
+      addLog('Peer paused transfer', 'warning');
+    } else {
+      fileReceiver.pause(transferId);
+      addLog('Sender paused transfer', 'warning');
+    }
+    setIsPaused(true);
+  }, [isHost, addLog]);
+
+  // Handle remote resume signal from peer
+  const handleRemoteResume = useCallback((transferId) => {
+    if (isHost) {
+      resumeChunking(transferId);
+      addLog('Peer resumed transfer', 'success');
+    } else {
+      fileReceiver.resume(transferId);
+      addLog('Sender resumed transfer', 'success');
+    }
+    setIsPaused(false);
+  }, [isHost, addLog]);
+
+  // Handle remote cancel signal from peer
+  const handleRemoteCancel = useCallback((transferId) => {
+    if (isHost) {
+      chunkingEngineRef.current.cleanup(transferId);
+    } else {
+      fileReceiver.cancelTransfer(transferId);
+    }
+    setTransferState('idle');
+    setTransferProgress(0);
+    setIsPaused(false);
+    addLog('Peer cancelled transfer', 'warning');
+  }, [isHost, addLog]);
+
+  // Handle recoverable transfer recovery
+  const handleRecoverTransfer = useCallback(async (recoveryTransferId) => {
+    // TODO: Implement full recovery logic - reconnect to peer and resume
+    addLog(`Recovering transfer: ${recoveryTransferId}`, 'info');
+    setRecoverableTransfers(prev => prev.filter(t => t.transferId !== recoveryTransferId));
+  }, [addLog]);
+
+  // Discard recoverable transfer
+  const handleDiscardRecovery = useCallback((recoveryTransferId) => {
+    setRecoverableTransfers(prev => prev.filter(t => t.transferId !== recoveryTransferId));
+    addLog('Transfer discarded', 'info');
+  }, [addLog]);
+
+  // Handle file selection for crash recovery (sender)
+  const handleSelectFileForRecovery = useCallback(async (recoveryTransferId) => {
+    // TODO: Implement file picker and resume sending
+    addLog(`Select file to resume: ${recoveryTransferId}`, 'info');
+    setRecoverableTransfers(prev => prev.filter(t => t.transferId !== recoveryTransferId));
+  }, [addLog]);
+
   const handleLeave = () => {
     chunkingEngineRef.current.cleanup(transferIdRef.current);
     resetRoom();
@@ -809,12 +938,21 @@ export default function Room() {
     progress: transferProgress,
     speed: transferSpeed,
     eta: transferEta,
+    isPaused: isPaused,
   };
 
   const isTransferring = transferState === 'sending' || transferState === 'receiving' || transferState === 'preparing';
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 p-4">
+      {/* Crash Recovery Prompt */}
+      <CrashRecoveryPrompt
+        transfers={recoverableTransfers}
+        onResume={handleRecoverTransfer}
+        onDiscard={handleDiscardRecovery}
+        onSelectFile={handleSelectFileForRecovery}
+      />
+
       <div className="max-w-4xl mx-auto">
         {/* Header */}
         <div className="text-center mb-6">
@@ -859,14 +997,18 @@ export default function Room() {
               </div>
             )}
 
-            {/* Progress */}
+            {/* Progress with Pause/Resume Controls */}
             {isTransferring && (
               <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-                <TransferProgress
+                <TransferProgressWithControls
                   progress={transferProgress}
                   state={transferState}
                   speed={transferSpeed}
                   eta={transferEta}
+                  isPaused={isPaused}
+                  onPause={handlePauseTransfer}
+                  onResume={handleResumeTransfer}
+                  onCancel={handleCancelTransfer}
                 />
               </div>
             )}

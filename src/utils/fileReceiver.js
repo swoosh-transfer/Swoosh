@@ -2,9 +2,15 @@
  * File Receiver - Handles receiving large files with direct disk writing
  * Supports chunk validation, missing chunk tracking, and resume capability
  * Uses sequential ordered writes to avoid "state cached" errors
+ * Now supports pause/resume functionality
  */
 
 import { saveChunkMeta, getChunkMeta, getChunksByTransfer } from './indexedDB.js';
+import { 
+  resumableTransferManager, 
+  TransferState, 
+  TransferRole 
+} from './resumableTransfer.js';
 
 const CHUNK_SIZE = 64 * 1024; // 64KB chunks
 
@@ -13,9 +19,65 @@ export class FileReceiver {
     this.activeTransfers = new Map(); // transferId -> transfer state
     this.writeQueues = new Map(); // transferId -> write queue for sequential writes
     this.pendingChunks = new Map(); // transferId -> Map of out-of-order chunks waiting to be written
+    this.pauseControllers = new Map(); // transferId -> { isPaused, resumeResolve }
     this.onProgress = null;
     this.onComplete = null;
     this.onError = null;
+    this.onPauseStateChange = null; // Callback for pause state changes
+  }
+
+  /**
+   * Pause receiving for a transfer
+   * @param {string} transferId Transfer ID
+   */
+  async pause(transferId) {
+    const controller = this.pauseControllers.get(transferId);
+    if (controller && !controller.isPaused) {
+      controller.isPaused = true;
+      await resumableTransferManager.pauseTransfer(transferId);
+      
+      if (this.onPauseStateChange) {
+        this.onPauseStateChange(transferId, true);
+      }
+      
+      console.log(`[FileReceiver] Paused transfer: ${transferId}`);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Resume receiving for a transfer
+   * @param {string} transferId Transfer ID
+   */
+  async resume(transferId) {
+    const controller = this.pauseControllers.get(transferId);
+    if (controller && controller.isPaused) {
+      controller.isPaused = false;
+      if (controller.resumeResolve) {
+        controller.resumeResolve();
+        controller.resumeResolve = null;
+      }
+      await resumableTransferManager.resumeTransfer(transferId);
+      resumableTransferManager.signalResume(transferId);
+      
+      if (this.onPauseStateChange) {
+        this.onPauseStateChange(transferId, false);
+      }
+      
+      console.log(`[FileReceiver] Resumed transfer: ${transferId}`);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Check if transfer is paused
+   * @param {string} transferId Transfer ID
+   */
+  isPaused(transferId) {
+    const controller = this.pauseControllers.get(transferId);
+    return controller?.isPaused || false;
   }
 
   /**
@@ -53,6 +115,22 @@ export class FileReceiver {
     
     // Initialize pending chunks map for out-of-order handling
     this.pendingChunks.set(transferId, new Map());
+    
+    // Initialize pause controller
+    this.pauseControllers.set(transferId, {
+      isPaused: false,
+      resumeResolve: null
+    });
+
+    // Register with resumable transfer manager
+    await resumableTransferManager.registerTransfer({
+      transferId,
+      role: TransferRole.RECEIVER,
+      fileName: metadata.name,
+      fileSize: metadata.size,
+      totalChunks: state.totalChunks,
+      peerId: metadata.peerId || null
+    });
     
     return { transferId, state };
   }
@@ -96,6 +174,25 @@ export class FileReceiver {
     state.memoryChunks = new Array(state.totalChunks).fill(null);
     console.log('[FileReceiver] Using in-memory fallback');
     return { success: true, method: 'memory' };
+  }
+
+  /**
+   * Wait if paused, returns true if should continue
+   * @param {string} transferId - Transfer ID
+   */
+  async _waitIfPaused(transferId) {
+    const controller = this.pauseControllers.get(transferId);
+    if (!controller) return true;
+
+    while (controller.isPaused) {
+      await new Promise(resolve => {
+        controller.resumeResolve = resolve;
+      });
+    }
+
+    // Check if cancelled
+    const state = await resumableTransferManager.getTransferState(transferId);
+    return state?.status !== TransferState.CANCELLED;
   }
 
   /**
@@ -163,6 +260,12 @@ export class FileReceiver {
       return { success: false, error: 'Transfer not found' };
     }
 
+    // Check for pause - wait if paused
+    const shouldContinue = await this._waitIfPaused(transferId);
+    if (!shouldContinue) {
+      return { success: false, error: 'Transfer cancelled' };
+    }
+
     const { chunkIndex, checksum, size, fileOffset, isFinal } = chunkMeta;
 
     try {
@@ -219,6 +322,12 @@ export class FileReceiver {
         timestamp: Date.now(),
       });
 
+      // Update resumable transfer progress
+      await resumableTransferManager.updateProgress(transferId, {
+        chunkIndex,
+        bytesProcessed: state.bytesReceived
+      });
+
       // Calculate progress
       const progress = Math.round((state.bytesReceived / state.fileSize) * 100);
       const elapsed = (Date.now() - state.startTime) / 1000;
@@ -235,6 +344,7 @@ export class FileReceiver {
           totalChunks: state.totalChunks,
           speed,
           eta,
+          isPaused: this.isPaused(transferId),
         });
       }
 
@@ -390,15 +500,45 @@ export class FileReceiver {
       console.error('[FileReceiver] Cancel error:', err);
     }
 
+    // Cancel in resumable manager
+    await resumableTransferManager.cancelTransfer(transferId);
+
+    // Cleanup
     this.activeTransfers.delete(transferId);
+    this.writeQueues.delete(transferId);
+    this.pendingChunks.delete(transferId);
+    this.pauseControllers.delete(transferId);
   }
 
   /**
-   * Get transfer state
+   * Get transfer state with pause info
    * @param {string} transferId - Transfer ID
    */
   getTransferState(transferId) {
-    return this.activeTransfers.get(transferId);
+    const state = this.activeTransfers.get(transferId);
+    if (!state) return null;
+    
+    return {
+      ...state,
+      isPaused: this.isPaused(transferId)
+    };
+  }
+
+  /**
+   * Get pause state
+   * @param {string} transferId - Transfer ID
+   */
+  getPauseState(transferId) {
+    const state = this.activeTransfers.get(transferId);
+    const controller = this.pauseControllers.get(transferId);
+    
+    return {
+      isPaused: controller?.isPaused || false,
+      bytesReceived: state?.bytesReceived || 0,
+      chunksReceived: state?.receivedChunks?.size || 0,
+      totalChunks: state?.totalChunks || 0,
+      fileSize: state?.fileSize || 0
+    };
   }
 
   /**
