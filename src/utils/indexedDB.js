@@ -1,6 +1,6 @@
 // Minimal IndexedDB helper for transfer metadata (no chunk storage)
 const DB_NAME = 'P2PFileTransfer';
-const DB_VERSION = 1;
+const DB_VERSION = 2; // Updated to include chunks store
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -13,6 +13,11 @@ function openDB() {
       }
       if (!db.objectStoreNames.contains('files')) {
         db.createObjectStore('files', { keyPath: 'fileId' });
+      }
+      if (!db.objectStoreNames.contains('chunks')) {
+        const chunkStore = db.createObjectStore('chunks', { keyPath: ['transferId', 'chunkIndex'] });
+        chunkStore.createIndex('transferId', 'transferId', { unique: false });
+        chunkStore.createIndex('status', 'status', { unique: false });
       }
     };
 
@@ -100,6 +105,58 @@ export async function getFileMeta(fileId) {
   });
 }
 
+// Chunk metadata storage functions
+export async function saveChunkMeta(chunkMeta) {
+  return withStore('chunks', 'readwrite', (store) => {
+    store.put(chunkMeta);
+    return chunkMeta;
+  });
+}
+
+export async function getChunkMeta(transferId, chunkIndex) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('chunks', 'readonly');
+    const store = tx.objectStore('chunks');
+    const req = store.get([transferId, chunkIndex]);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function getChunksByTransfer(transferId) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('chunks', 'readonly');
+    const store = tx.objectStore('chunks');
+    const index = store.index('transferId');
+    const req = index.getAll(transferId);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+export async function deleteChunksByTransfer(transferId) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('chunks', 'readwrite');
+    const store = tx.objectStore('chunks');
+    const index = store.index('transferId');
+    const req = index.openCursor(transferId);
+    
+    req.onsuccess = (event) => {
+      const cursor = event.target.result;
+      if (cursor) {
+        cursor.delete();
+        cursor.continue();
+      } else {
+        resolve(true);
+      }
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
 export default {
   openDB,
   saveTransferMeta,
@@ -109,4 +166,8 @@ export default {
   listTransfers,
   saveFileMeta,
   getFileMeta,
+  saveChunkMeta,
+  getChunkMeta,
+  getChunksByTransfer,
+  deleteChunksByTransfer,
 };
