@@ -33,6 +33,7 @@ import {
 } from '../utils/tofuSecurity';
 import { ChunkingEngine } from '../utils/chunkingSystem';
 import { fileReceiver } from '../utils/fileReceiver';
+import { getQRCodeUrl } from '../utils/qrCode';
 
 // UI Components
 import {
@@ -158,6 +159,42 @@ export default function Room() {
   }, []);
 
   // ============ INITIALIZATION ============
+
+  // Track socket state for host (socket is already connected from Home.jsx)
+  useEffect(() => {
+    if (!isHost) return;
+    
+    const socket = getSocket();
+    if (!socket) return;
+
+    // Check current state immediately
+    if (socket.connected) {
+      setSocketConnected(true);
+      setSocketId(socket.id);
+      setConnInfo(prev => ({ ...prev, socketConnected: true, socketId: socket.id }));
+    }
+
+    const onConnect = () => {
+      setSocketConnected(true);
+      setSocketId(socket.id);
+      setConnInfo(prev => ({ ...prev, socketConnected: true, socketId: socket.id }));
+      addLog(`Socket connected: ${socket.id}`, 'success');
+    };
+
+    const onDisconnect = () => {
+      setSocketConnected(false);
+      setConnInfo(prev => ({ ...prev, socketConnected: false }));
+      addLog('Socket disconnected', 'warning');
+    };
+
+    socket.on('connect', onConnect);
+    socket.on('disconnect', onDisconnect);
+
+    return () => {
+      socket.off('connect', onConnect);
+      socket.off('disconnect', onDisconnect);
+    };
+  }, [isHost, addLog]);
 
   // Initialize receiver (joining via shared link)
   useEffect(() => {

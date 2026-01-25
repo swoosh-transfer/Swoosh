@@ -120,7 +120,7 @@ async function initDB() {
 }
 
 // Ensure database is initialized before any operation
-async function ensureDB() {
+export async function ensureDB() {
   const db = await openDB();
   
   // Double-check stores exist

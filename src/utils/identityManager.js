@@ -1,10 +1,11 @@
 /**
  * Identity Manager
  * Handles ephemeral identity (sessionStorage) and room-scoped session persistence (IndexedDB).
+ * Uses the shared IndexedDB from indexedDB.js to avoid version conflicts.
  */
 
-const DB_NAME = 'P2PFileTransfer'; // Matches your existing DB name
-const DB_VERSION = 3; // Incrementing version to add 'sessions' store
+import { ensureDB } from './indexedDB.js';
+
 const STORE_NAME = 'sessions';
 
 // 1. Get Local UUID (Ephemeral - dies on tab close)
@@ -26,13 +27,13 @@ export function getLocalUUID() {
 // 2. Clear old session data (Housekeeping)
 async function clearOldSessions() {
   try {
-    const db = await openDB();
+    const db = await ensureDB();
     const tx = db.transaction(STORE_NAME, 'readwrite');
     const store = tx.objectStore(STORE_NAME);
     store.clear(); 
     console.log('[Identity] Cleared stale session data');
   } catch (e) {
-    console.error(e);
+    console.error('[Identity] Error clearing sessions:', e);
     // Ignore error if store doesn't exist yet
   }
 }
@@ -45,7 +46,7 @@ export async function savePeerSession(peerUuid, roomId) {
   }
   
   try {
-    const db = await openDB();
+    const db = await ensureDB();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
@@ -74,7 +75,7 @@ export async function verifyPeer(peerUuid, currentRoomId) {
   }
   
   try {
-    const db = await openDB();
+    const db = await ensureDB();
     return new Promise((resolve) => {
       const tx = db.transaction(STORE_NAME, 'readonly');
       const store = tx.objectStore(STORE_NAME);
@@ -100,22 +101,4 @@ export async function verifyPeer(peerUuid, currentRoomId) {
     console.error('[Identity] Failed to verify peer:', err);
     return false;
   }
-}
-
-// Helper to open DB (Reusing your existing pattern logic)
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = window.indexedDB.open(DB_NAME, DB_VERSION);
-    
-    req.onupgradeneeded = (event) => {
-      const db = event.target.result;
-      // Create sessions store if missing
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME, { keyPath: 'roomId' });
-      }
-    };
-
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
 }

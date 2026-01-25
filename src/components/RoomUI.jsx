@@ -2,6 +2,9 @@
  * Room UI Components
  */
 
+import { useState } from 'react';
+import { getQRCodeUrl } from '../utils/qrCode';
+
 // Format bytes to human readable
 export function formatBytes(bytes) {
   if (!bytes || bytes === 0) return '0 B';
@@ -117,11 +120,36 @@ export function TransferProgress({ progress, state, speed, eta }) {
   );
 }
 
-// Share URL input with copy button
+// Share URL input with copy button and QR code
 export function ShareUrlBox({ url, onCopy, copied }) {
+  const [showQR, setShowQR] = useState(false);
+  
   return (
     <div className="space-y-3">
-      <label className="text-sm text-zinc-400">Share this link:</label>
+      <div className="flex items-center justify-between">
+        <label className="text-sm text-zinc-400">Share this link:</label>
+        <button
+          onClick={() => setShowQR(!showQR)}
+          className="text-xs px-2 py-1 bg-zinc-800 hover:bg-zinc-700 rounded transition-colors text-zinc-400"
+        >
+          {showQR ? 'Hide QR' : 'Show QR'}
+        </button>
+      </div>
+      
+      {showQR && url && (
+        <div className="flex justify-center py-3">
+          <div className="p-2 bg-white rounded-lg">
+            <img 
+              src={getQRCodeUrl(url, 150)} 
+              alt="Scan to join room"
+              width={150}
+              height={150}
+              className="block"
+            />
+          </div>
+        </div>
+      )}
+      
       <div className="flex gap-2">
         <input
           type="text"
