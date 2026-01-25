@@ -106,35 +106,36 @@ class ChunkingEngine {
 
   /**
    * 4-5. Append to storage buffer and check if full
+   * Handles variable-sized chunks from file stream (can be larger than buffer)
    */
   async _appendToStorageBuffer(transferId, chunk, onChunkReady) {
     const bufferState = this.storageBuffers.get(transferId);
-    const remainingSpace = STORAGE_BUFFER_SIZE - bufferState.currentSize;
-
-    if (chunk.length <= remainingSpace) {
-      // Chunk fits in current buffer
-      bufferState.buffer.set(chunk, bufferState.currentSize);
-      bufferState.currentSize += chunk.length;
-    } else {
-      // Chunk doesn't fit, split it
-      const firstPart = chunk.slice(0, remainingSpace);
-      const secondPart = chunk.slice(remainingSpace);
-
-      // Fill current buffer
-      bufferState.buffer.set(firstPart, bufferState.currentSize);
-      bufferState.currentSize += firstPart.length;
-
-      // 5. Storage chunk full - process it
-      await this._processStorageBuffer(transferId, onChunkReady, false);
-
-      // Start new buffer with remaining data
-      bufferState.currentSize = secondPart.length;
-      bufferState.buffer.set(secondPart, 0);
-    }
-
-    // 5. Check if storage chunk is full
-    if (bufferState.currentSize >= STORAGE_BUFFER_SIZE) {
-      await this._processStorageBuffer(transferId, onChunkReady, false);
+    
+    // Convert to Uint8Array if needed
+    const chunkData = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+    
+    let offset = 0;
+    
+    // Process the chunk in parts that fit in the buffer
+    while (offset < chunkData.length) {
+      const remainingSpace = STORAGE_BUFFER_SIZE - bufferState.currentSize;
+      const remainingChunk = chunkData.length - offset;
+      const bytesToCopy = Math.min(remainingSpace, remainingChunk);
+      
+      // Copy data to buffer
+      bufferState.buffer.set(
+        chunkData.subarray(offset, offset + bytesToCopy),
+        bufferState.currentSize
+      );
+      bufferState.currentSize += bytesToCopy;
+      offset += bytesToCopy;
+      
+      // Check if storage chunk is full
+      if (bufferState.currentSize >= STORAGE_BUFFER_SIZE) {
+        await this._processStorageBuffer(transferId, onChunkReady, false);
+        // Reset buffer after processing
+        bufferState.currentSize = 0;
+      }
     }
   }
 

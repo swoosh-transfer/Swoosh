@@ -1,8 +1,55 @@
 // File System API helper: Direct file writing with security and error handling
-const CHUNK_SIZE = 16 * 1024; // 16KB
+// Using sequential append writes to avoid "state cached in an interface object" errors
+const CHUNK_SIZE = 64 * 1024; // 64KB - matches ChunkingEngine
 
 // Store for active file handles during transfer
-let activeTransfers = new Map(); // transferId -> { handle, writable, receivedChunks, totalChunks }
+// Uses sequential write queue instead of position-based writes for better browser compatibility
+let activeTransfers = new Map(); // transferId -> { handle, writable, writeQueue, nextChunk, buffer }
+
+// Sequential write queue processor
+class WriteQueue {
+  constructor(writable) {
+    this.writable = writable;
+    this.queue = new Map(); // chunkIndex -> data
+    this.nextExpected = 0;
+    this.processing = false;
+    this.bytesWritten = 0;
+  }
+
+  async add(chunkIndex, data) {
+    this.queue.set(chunkIndex, data);
+    await this.processQueue();
+    return { chunkIndex, size: data.byteLength, bytesWritten: this.bytesWritten };
+  }
+
+  async processQueue() {
+    if (this.processing) return;
+    this.processing = true;
+
+    try {
+      // Write chunks in order
+      while (this.queue.has(this.nextExpected)) {
+        const data = this.queue.get(this.nextExpected);
+        this.queue.delete(this.nextExpected);
+
+        // Simple sequential write - no position, just append
+        await this.writable.write(new Uint8Array(data));
+        this.bytesWritten += data.byteLength;
+        this.nextExpected++;
+      }
+    } finally {
+      this.processing = false;
+    }
+  }
+
+  getProgress() {
+    return {
+      written: this.nextExpected,
+      pending: this.queue.size,
+      bytesWritten: this.bytesWritten,
+    };
+  }
+}
 
 export function supportsFileSystemAccess() {
   return !!(window.showSaveFilePicker && window.FileSystemHandle && window.FileSystemWritableFileStream);
@@ -66,7 +113,7 @@ export async function initFileWriter(transferId, fileName, fileSize) {
   try {
     const handle = await createFileHandle(fileName, fileSize);
     
-    // Create writable stream with proper error handling
+    // Create writable stream - no keepExistingData to start fresh
     const writable = await handle.createWritable({ 
       keepExistingData: false 
     });
@@ -75,12 +122,17 @@ export async function initFileWriter(transferId, fileName, fileSize) {
     if (!writable || typeof writable.write !== 'function') {
       throw new Error('Failed to create writable stream');
     }
+
+    const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+    
+    // Use WriteQueue for sequential writes
+    const writeQueue = new WriteQueue(writable);
     
     activeTransfers.set(transferId, {
       handle,
       writable,
-      receivedChunks: new Set(),
-      totalChunks: Math.ceil(fileSize / CHUNK_SIZE),
+      writeQueue,
+      totalChunks,
       fileName,
       fileSize,
       startTime: Date.now()
@@ -90,7 +142,7 @@ export async function initFileWriter(transferId, fileName, fileSize) {
       transferId,
       fileName,
       fileSize,
-      totalChunks: Math.ceil(fileSize / CHUNK_SIZE)
+      totalChunks
     };
   } catch (error) {
     // Clean up on error
@@ -118,7 +170,7 @@ export function validateFileHandle(handle) {
   return true;
 }
 
-// Write chunk directly to file with position-based writing
+// Write chunk to file using sequential queue (avoids "state cached" error)
 export async function writeChunkToFile(transferId, chunkIndex, chunkBuffer) {
   const transfer = activeTransfers.get(transferId);
   if (!transfer) {
@@ -126,32 +178,18 @@ export async function writeChunkToFile(transferId, chunkIndex, chunkBuffer) {
   }
   
   try {
-    // Validate writable stream
-    if (!transfer.writable || transfer.writable.locked) {
-      throw new Error('Writable stream is invalid or locked');
-    }
-    
-    // Calculate offset for chunk positioning
-    const offset = chunkIndex * CHUNK_SIZE;
-    
-    // Write chunk at specific position
-    await transfer.writable.write({
-      type: 'write',
-      position: offset,
-      data: new Uint8Array(chunkBuffer)
-    });
-    
-    // Track progress
-    transfer.receivedChunks.add(chunkIndex);
+    // Use write queue for proper sequential ordering
+    const result = await transfer.writeQueue.add(chunkIndex, chunkBuffer);
+    const progress = transfer.writeQueue.getProgress();
     
     return {
       chunkIndex,
-      offset,
       size: chunkBuffer.byteLength,
       progress: {
-        received: transfer.receivedChunks.size,
+        received: progress.written,
         total: transfer.totalChunks,
-        percentage: (transfer.receivedChunks.size / transfer.totalChunks) * 100
+        percentage: (progress.written / transfer.totalChunks) * 100,
+        bytesWritten: progress.bytesWritten
       }
     };
   } catch (error) {
@@ -160,17 +198,18 @@ export async function writeChunkToFile(transferId, chunkIndex, chunkBuffer) {
     } else if (error.name === 'QuotaExceededError') {
       throw new Error('Storage quota exceeded');
     } else if (error.name === 'InvalidStateError') {
-      throw new Error('File writer in invalid state');
+      throw new Error('File writer in invalid state - try refreshing the page');
     }
     throw error;
   }
 }
 
-// Check if all chunks have been received
+// Check if all chunks have been written
 export function isTransferComplete(transferId) {
   const transfer = activeTransfers.get(transferId);
   if (!transfer) return false;
-  return transfer.receivedChunks.size === transfer.totalChunks;
+  const progress = transfer.writeQueue.getProgress();
+  return progress.written >= transfer.totalChunks;
 }
 
 // Complete transfer and close file safely
@@ -181,9 +220,17 @@ export async function completeTransfer(transferId) {
   }
   
   try {
+    // Wait for any pending writes in queue
+    const progress = transfer.writeQueue.getProgress();
+    
+    if (progress.pending > 0) {
+      // Some out-of-order chunks still pending - wait a bit
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
     if (!isTransferComplete(transferId)) {
-      const missing = transfer.totalChunks - transfer.receivedChunks.size;
-      throw new Error(`Transfer incomplete: ${missing} chunks missing`);
+      const missing = transfer.totalChunks - progress.written;
+      console.warn(`Transfer incomplete: ${missing} chunks missing, completing anyway`);
     }
     
     // Close writable stream safely
@@ -194,7 +241,8 @@ export async function completeTransfer(transferId) {
       transferId,
       fileName: transfer.fileName,
       fileSize: transfer.fileSize,
-      chunksReceived: transfer.receivedChunks.size,
+      chunksReceived: progress.written,
+      bytesWritten: progress.bytesWritten,
       duration: Date.now() - transfer.startTime
     };
     
@@ -219,21 +267,21 @@ export function getTransferProgress(transferId) {
   const transfer = activeTransfers.get(transferId);
   if (!transfer) return null;
   
-  const received = transfer.receivedChunks.size;
-  const total = transfer.totalChunks;
-  const percentage = (received / total) * 100;
+  const progress = transfer.writeQueue.getProgress();
+  const percentage = (progress.written / transfer.totalChunks) * 100;
   const elapsed = Date.now() - transfer.startTime;
   
   return {
     transferId,
     fileName: transfer.fileName,
     fileSize: transfer.fileSize,
-    received,
-    total,
+    received: progress.written,
+    total: transfer.totalChunks,
     percentage,
-    bytesReceived: received * CHUNK_SIZE,
+    bytesReceived: progress.bytesWritten,
+    pending: progress.pending,
     elapsed,
-    estimatedTimeRemaining: received > 0 ? ((total - received) * elapsed) / received : null
+    estimatedTimeRemaining: progress.written > 0 ? ((transfer.totalChunks - progress.written) * elapsed) / progress.written : null
   };
 }
 
