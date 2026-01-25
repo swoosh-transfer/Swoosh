@@ -381,6 +381,80 @@ class ChunkingEngine {
   }
 
   /**
+   * Retransmit specific chunks
+   * @param {string} transferId - Transfer ID
+   * @param {number[]} chunkIndices - Array of chunk indices to retransmit
+   * @param {File} file - The original file
+   * @param {Function} onChunkReady - Callback for each chunk
+   * @returns {Promise<Object>} Result with success status
+   */
+  async retransmitChunks(transferId, chunkIndices, file, onChunkReady) {
+    if (!file) {
+      return { success: false, error: 'File not available for retransmission' };
+    }
+
+    logger.log(`[ChunkingEngine] Retransmitting ${chunkIndices.length} chunks for transfer ${transferId}`);
+    
+    const results = { success: true, sent: 0, failed: 0, errors: [] };
+    
+    for (const chunkIndex of chunkIndices) {
+      try {
+        // Calculate file offset for this chunk
+        const fileOffset = chunkIndex * STORAGE_BUFFER_SIZE;
+        const endOffset = Math.min(fileOffset + STORAGE_BUFFER_SIZE, file.size);
+        const chunkSize = endOffset - fileOffset;
+        
+        if (fileOffset >= file.size) {
+          logger.warn(`[ChunkingEngine] Chunk ${chunkIndex} offset ${fileOffset} exceeds file size ${file.size}`);
+          results.failed++;
+          results.errors.push({ chunkIndex, error: 'Offset exceeds file size' });
+          continue;
+        }
+        
+        // Read the specific chunk from file
+        const blob = file.slice(fileOffset, endOffset);
+        const arrayBuffer = await blob.arrayBuffer();
+        const chunkData = new Uint8Array(arrayBuffer);
+        
+        // Calculate checksum
+        const checksum = await this._calculateChecksum(chunkData);
+        
+        const isFinal = endOffset >= file.size;
+        
+        const chunkMetadata = {
+          transferId,
+          chunkIndex,
+          size: chunkSize,
+          checksum,
+          timestamp: Date.now(),
+          isFinal,
+          fileOffset,
+          isRetransmit: true
+        };
+        
+        // Send the chunk
+        if (onChunkReady) {
+          await onChunkReady({
+            metadata: chunkMetadata,
+            binaryData: chunkData
+          });
+        }
+        
+        results.sent++;
+        logger.log(`[ChunkingEngine] Retransmitted chunk ${chunkIndex}`);
+        
+      } catch (err) {
+        logger.error(`[ChunkingEngine] Failed to retransmit chunk ${chunkIndex}:`, err);
+        results.failed++;
+        results.errors.push({ chunkIndex, error: err.message });
+      }
+    }
+    
+    results.success = results.failed === 0;
+    return results;
+  }
+
+  /**
    * Get pause state for a transfer
    */
   getPauseState(transferId) {
@@ -391,7 +465,9 @@ class ChunkingEngine {
       isPaused: controller?.isPaused || false,
       bytesRead: state?.bytesRead || 0,
       storageChunkIndex: state?.storageChunkIndex || 0,
-      totalSize: state?.totalSize || 0
+      currentChunkIndex: state?.storageChunkIndex || 0, // Alias for compatibility
+      totalSize: state?.totalSize || 0,
+      totalChunks: state ? Math.ceil(state.totalSize / STORAGE_BUFFER_SIZE) : 0
     };
   }
 }

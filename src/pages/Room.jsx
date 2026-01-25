@@ -40,6 +40,7 @@ import { ChunkingEngine } from '../utils/chunkingSystem';
 import { fileReceiver } from '../utils/fileReceiver';
 import { getQRCodeUrl } from '../utils/qrCode';
 import { cleanupTransferData } from '../utils/indexedDB.js';
+import { resumableTransferManager } from '../utils/resumableTransfer.js';
 
 // UI Components
 import {
@@ -119,11 +120,13 @@ export default function Room() {
   const transferIdRef = useRef(null);
   // Use a queue for chunk metadata to handle out-of-order delivery
   const chunkMetaQueueRef = useRef([]);
-  const pendingBinaryRef = useRef(null); // Store binary if it arrives before metadata
+  const pendingBinaryQueueRef = useRef([]); // Queue of binary chunks that arrived before metadata
   const receivedBytesRef = useRef(0);
   const startTimeRef = useRef(null);
   const tofuStartedRef = useRef(false); // Prevent double TOFU verification
   const handshakeSentRef = useRef(false); // Prevent double handshake
+  const tofuVerifiedRef = useRef(false); // Track TOFU status for message handler (avoids stale closure)
+  const receiverLastChunkRef = useRef(-1); // Track receiver's last chunk when paused (sender side)
 
   // ============ LOGGING ============
   const addLog = useCallback((message, type = 'info') => {
@@ -437,14 +440,10 @@ export default function Room() {
     try {
       // Binary data = file chunk
       if (event.data instanceof ArrayBuffer) {
-        // Allow binary data if TOFU is verified (identity is implicitly verified via TOFU)
-        // This fixes race condition where identity check blocks valid chunks
-        if (!tofuVerified && !identityVerified) {
-          logger.warn('[Room] Queueing binary data: Verification pending');
-          // Store for later processing instead of dropping
-          if (!pendingBinaryRef.current) {
-            pendingBinaryRef.current = new Uint8Array(event.data);
-          }
+        // SECURITY: Queue chunks until TOFU is verified (use ref to avoid stale closure)
+        if (!tofuVerifiedRef.current) {
+          addLog('Received chunk before TOFU verification - queuing', 'warning');
+          pendingBinaryQueueRef.current.push(new Uint8Array(event.data));
           return;
         }
         await handleChunkData(new Uint8Array(event.data));
@@ -493,12 +492,12 @@ export default function Room() {
           break;
         case 'tofu-verified':
           setTofuVerified(true);
+          tofuVerifiedRef.current = true;
           setVerificationStatus('verified');
           addLog('TOFU verified!', 'success');
-          // Process any pending binary data that was queued during verification
-          if (pendingBinaryRef.current && chunkMetaQueueRef.current.length > 0) {
-            const binary = pendingBinaryRef.current;
-            pendingBinaryRef.current = null;
+          // Process all pending binary data that was queued during verification
+          while (pendingBinaryQueueRef.current.length > 0 && chunkMetaQueueRef.current.length > 0) {
+            const binary = pendingBinaryQueueRef.current.shift();
             await processChunkWithMeta(binary);
           }
           break;
@@ -508,15 +507,19 @@ export default function Room() {
         case 'chunk-metadata':
           // Queue metadata - binary may arrive before or after
           chunkMetaQueueRef.current.push(msg);
-          // Check if we have pending binary waiting for this metadata
-          if (pendingBinaryRef.current) {
-            const binary = pendingBinaryRef.current;
-            pendingBinaryRef.current = null;
+          // Check if we have pending binaries waiting for metadata
+          while (pendingBinaryQueueRef.current.length > 0 && chunkMetaQueueRef.current.length > 0) {
+            const binary = pendingBinaryQueueRef.current.shift();
             await processChunkWithMeta(binary);
           }
           break;
         case 'receiver-ready':
           if (isHost) {
+            // SECURITY: Only send after TOFU verification (use ref to avoid stale closure)
+            if (!tofuVerifiedRef.current) {
+              addLog('Ignoring receiver-ready: TOFU not verified', 'warning');
+              return;
+            }
             addLog('Receiver ready, sending...', 'success');
             await sendFileChunks();
           }
@@ -526,13 +529,13 @@ export default function Room() {
           break;
         case 'request-chunks':
           addLog(`Retransmit requested: ${msg.chunks.length} chunks`, 'warning');
-          // TODO: Implement retransmission
+          await handleRetransmitRequest(msg.chunks);
           break;
         case 'transfer-paused':
-          handleRemotePause(msg.transferId);
+          await handleRemotePause(msg.transferId, msg.lastChunk);
           break;
         case 'transfer-resumed':
-          handleRemoteResume(msg.transferId);
+          await handleRemoteResume(msg.transferId, msg.resumeFromChunk);
           break;
         case 'transfer-cancelled':
           handleRemoteCancel(msg.transferId);
@@ -561,12 +564,12 @@ export default function Room() {
         const response = await signChallenge(msg.challenge, hmacKey);
         sendJSON({ type: 'tofu-response', signature: response, challenge: msg.challenge });
         setTofuVerified(true);
+        tofuVerifiedRef.current = true;
         setVerificationStatus('verified');
         
         // Process any pending binary data
-        if (pendingBinaryRef.current && chunkMetaQueueRef.current.length > 0) {
-          const binary = pendingBinaryRef.current;
-          pendingBinaryRef.current = null;
+        while (pendingBinaryQueueRef.current.length > 0 && chunkMetaQueueRef.current.length > 0) {
+          const binary = pendingBinaryQueueRef.current.shift();
           await processChunkWithMeta(binary);
         }
       } else {
@@ -589,12 +592,12 @@ export default function Room() {
         addLog('Peer verified!', 'success');
         sendJSON({ type: 'tofu-verified' });
         setTofuVerified(true);
+        tofuVerifiedRef.current = true;
         setVerificationStatus('verified');
         
         // Process any pending binary data
-        if (pendingBinaryRef.current && chunkMetaQueueRef.current.length > 0) {
-          const binary = pendingBinaryRef.current;
-          pendingBinaryRef.current = null;
+        while (pendingBinaryQueueRef.current.length > 0 && chunkMetaQueueRef.current.length > 0) {
+          const binary = pendingBinaryQueueRef.current.shift();
           await processChunkWithMeta(binary);
         }
       } else {
@@ -641,7 +644,11 @@ export default function Room() {
   };
 
   const sendFileChunks = async () => {
-    if (!selectedFile) return;
+    // SECURITY: Don't send until TOFU is verified (use ref to avoid stale closure)
+    if (!selectedFile || !tofuVerifiedRef.current) {
+      addLog('Cannot send: TOFU not verified', 'error');
+      return;
+    }
 
     setTransferState('sending');
     startTimeRef.current = Date.now();
@@ -688,12 +695,17 @@ export default function Room() {
       setTransferProgress(100);
       addLog('Transfer complete!', 'success');
       
-      // Clean up IndexedDB data for completed transfer (sender side)
+      // Clean up all transfer data (sender side)
       try {
+        // Clean up in-memory state in resumable manager
+        await resumableTransferManager.completeTransfer(transferIdRef.current);
+        // Clean up IndexedDB data (chunks, transfer metadata, file metadata)
         await cleanupTransferData(transferIdRef.current);
-        logger.log('[Room] IndexedDB cleanup completed for sender transfer:', transferIdRef.current);
+        // Clean up chunking engine state
+        chunkingEngineRef.current.cleanup(transferIdRef.current);
+        logger.log('[Room] Full cleanup completed for sender transfer:', transferIdRef.current);
       } catch (cleanupErr) {
-        logger.warn('[Room] IndexedDB cleanup failed:', cleanupErr);
+        logger.warn('[Room] Cleanup failed:', cleanupErr);
       }
 
     } catch (err) {
@@ -702,9 +714,59 @@ export default function Room() {
     }
   };
 
+  // Handle retransmission request from receiver
+  const handleRetransmitRequest = useCallback(async (chunkIndices) => {
+    if (!selectedFile || !isHost) {
+      addLog('Cannot retransmit: file not available', 'error');
+      return;
+    }
+    
+    addLog(`Retransmitting ${chunkIndices.length} chunks...`, 'info');
+    
+    try {
+      const result = await chunkingEngineRef.current.retransmitChunks(
+        transferIdRef.current,
+        chunkIndices,
+        selectedFile,
+        async ({ metadata, binaryData }) => {
+          // Wait for buffer drain
+          await waitForDrain();
+          
+          // Send chunk metadata
+          sendJSON({ type: 'chunk-metadata', ...metadata });
+          
+          // Wait then send binary
+          await waitForDrain();
+          
+          const buffer = binaryData.buffer.slice(
+            binaryData.byteOffset,
+            binaryData.byteOffset + binaryData.byteLength
+          );
+          sendBinary(buffer);
+        }
+      );
+      
+      if (result.success) {
+        addLog(`Retransmitted ${result.sent} chunks successfully`, 'success');
+        // Send transfer complete again
+        sendJSON({ type: 'transfer-complete' });
+      } else {
+        addLog(`Retransmission partial: ${result.sent} sent, ${result.failed} failed`, 'warning');
+      }
+    } catch (err) {
+      addLog(`Retransmission failed: ${err.message}`, 'error');
+    }
+  }, [selectedFile, isHost, addLog, sendJSON, sendBinary, waitForDrain]);
+
   // ============ FILE TRANSFER - RECEIVER ============
 
   const handleFileMetadata = async (msg) => {
+    // SECURITY: Block file metadata until TOFU is verified (use ref to avoid stale closure)
+    if (!tofuVerifiedRef.current) {
+      addLog('Received file metadata before TOFU verification - ignoring', 'warning');
+      return;
+    }
+    
     addLog(`Incoming: ${msg.name} (${formatBytes(msg.size)})`, 'info');
 
     transferIdRef.current = msg.transferId;
@@ -714,7 +776,7 @@ export default function Room() {
 
     // Clear any previous metadata queue
     chunkMetaQueueRef.current = [];
-    pendingBinaryRef.current = null;
+    pendingBinaryQueueRef.current = [];
 
     // Initialize FileReceiver for this transfer
     await fileReceiver.initializeReceive({
@@ -781,8 +843,8 @@ export default function Room() {
     if (chunkMetaQueueRef.current.length > 0) {
       await processChunkWithMeta(data);
     } else {
-      // Binary arrived before metadata - store it temporarily
-      pendingBinaryRef.current = data;
+      // Binary arrived before metadata - queue it
+      pendingBinaryQueueRef.current.push(data);
     }
   };
 
@@ -837,12 +899,15 @@ export default function Room() {
         });
         addLog('File saved!', 'success');
         
-        // Clean up IndexedDB data for completed transfer
+        // Clean up all transfer data (receiver side)
         try {
+          // Clean up in-memory state in resumable manager
+          await resumableTransferManager.completeTransfer(transferIdRef.current);
+          // Clean up IndexedDB data (chunks, transfer metadata, file metadata)
           await cleanupTransferData(transferIdRef.current);
-          logger.log('[Room] IndexedDB cleanup completed for transfer:', transferIdRef.current);
+          logger.log('[Room] Full cleanup completed for receiver transfer:', transferIdRef.current);
         } catch (cleanupErr) {
-          logger.warn('[Room] IndexedDB cleanup failed:', cleanupErr);
+          logger.warn('[Room] Cleanup failed:', cleanupErr);
         }
       } else if (result.missingChunks?.length > 0) {
         addLog(`Missing ${result.missingChunks.length} chunks, requesting retransmit...`, 'warning');
@@ -869,39 +934,40 @@ export default function Room() {
   };
 
   // Pause transfer handler - sends signal to peer
-  const handlePauseTransfer = useCallback(() => {
+  const handlePauseTransfer = useCallback(async () => {
     const transferId = transferIdRef.current;
     if (!transferId) return;
 
-    // Notify peer about pause
-    sendJSON({ type: 'transfer-paused', transferId });
-
     if (isHost) {
-      // Use the ref instance directly for sender side
-      chunkingEngineRef.current.pause(transferId);
+      // Sender side - pause chunking
+      await chunkingEngineRef.current.pause(transferId);
+      sendJSON({ type: 'transfer-paused', transferId });
       addLog('Sending paused', 'warning');
     } else {
-      fileReceiver.pause(transferId);
-      addLog('Receiving paused', 'warning');
+      // Receiver side - pause and get last received chunk
+      const result = await fileReceiver.pause(transferId);
+      sendJSON({ type: 'transfer-paused', transferId, lastChunk: result.lastChunk });
+      addLog(`Receiving paused at chunk ${result.lastChunk}`, 'warning');
     }
     setIsPaused(true);
   }, [isHost, addLog, sendJSON]);
 
-  // Resume transfer handler - sends signal to peer
-  const handleResumeTransfer = useCallback(() => {
+  // Resume transfer handler - sends signal to peer with sync info
+  const handleResumeTransfer = useCallback(async () => {
     const transferId = transferIdRef.current;
     if (!transferId) return;
 
-    // Notify peer about resume
-    sendJSON({ type: 'transfer-resumed', transferId });
-
     if (isHost) {
-      // Use the ref instance directly for sender side
-      chunkingEngineRef.current.resume(transferId);
+      // Sender side - resume chunking
+      await chunkingEngineRef.current.resume(transferId);
+      sendJSON({ type: 'transfer-resumed', transferId });
       addLog('Sending resumed', 'success');
     } else {
-      fileReceiver.resume(transferId);
-      addLog('Receiving resumed', 'success');
+      // Receiver side - resume and tell sender which chunk to resume from
+      const result = await fileReceiver.resume(transferId);
+      const resumeFromChunk = result.lastChunk + 1;
+      sendJSON({ type: 'transfer-resumed', transferId, resumeFromChunk });
+      addLog(`Receiving resumed, requesting sender to resume from chunk ${resumeFromChunk}`, 'success');
     }
     setIsPaused(false);
   }, [isHost, addLog, sendJSON]);
@@ -926,30 +992,64 @@ export default function Room() {
   }, [isHost, addLog, sendJSON]);
 
   // Handle remote pause signal from peer
-  const handleRemotePause = useCallback((transferId) => {
+  const handleRemotePause = useCallback(async (transferId, lastChunk) => {
     if (isHost) {
-      // Use the ref instance directly for sender side
-      chunkingEngineRef.current.pause(transferId);
-      addLog('Peer paused transfer', 'warning');
+      // Sender receives pause from receiver - pause and note where receiver stopped
+      await chunkingEngineRef.current.pause(transferId);
+      if (lastChunk !== undefined) {
+        receiverLastChunkRef.current = lastChunk;
+        addLog(`Receiver paused at chunk ${lastChunk}`, 'warning');
+      } else {
+        addLog('Peer paused transfer', 'warning');
+      }
     } else {
-      fileReceiver.pause(transferId);
+      // Receiver receives pause from sender
+      await fileReceiver.pause(transferId);
       addLog('Sender paused transfer', 'warning');
     }
     setIsPaused(true);
   }, [isHost, addLog]);
 
   // Handle remote resume signal from peer
-  const handleRemoteResume = useCallback((transferId) => {
+  const handleRemoteResume = useCallback(async (transferId, resumeFromChunk) => {
     if (isHost) {
-      // Use the ref instance directly for sender side
-      chunkingEngineRef.current.resume(transferId);
-      addLog('Peer resumed transfer', 'success');
+      // Sender receives resume from receiver - resume from specified chunk
+      await chunkingEngineRef.current.resume(transferId);
+      
+      // Use resumeFromChunk if provided, otherwise use stored lastChunk + 1
+      const targetChunk = resumeFromChunk ?? (receiverLastChunkRef.current >= 0 ? receiverLastChunkRef.current + 1 : undefined);
+      
+      if (targetChunk !== undefined && selectedFile) {
+        addLog(`Receiver requested resume from chunk ${targetChunk}`, 'info');
+        
+        // Get pause state to check current position
+        const pauseState = chunkingEngineRef.current.getPauseState(transferId);
+        
+        // If chunking is still active and receiver needs earlier chunks, retransmit them
+        if (pauseState && pauseState.currentChunkIndex > targetChunk) {
+          const missingChunks = [];
+          for (let i = targetChunk; i < pauseState.currentChunkIndex; i++) {
+            missingChunks.push(i);
+          }
+          if (missingChunks.length > 0) {
+            addLog(`Retransmitting ${missingChunks.length} chunks from ${targetChunk}`, 'info');
+            await handleRetransmitRequest(missingChunks);
+          }
+        }
+        addLog('Sending resumed', 'success');
+      } else {
+        addLog('Peer resumed transfer', 'success');
+      }
+      
+      // Reset the stored last chunk
+      receiverLastChunkRef.current = -1;
     } else {
+      // Receiver receives resume from sender
       fileReceiver.resume(transferId);
       addLog('Sender resumed transfer', 'success');
     }
     setIsPaused(false);
-  }, [isHost, addLog]);
+  }, [isHost, addLog, selectedFile, handleRetransmitRequest]);
 
   // Handle remote cancel signal from peer
   const handleRemoteCancel = useCallback((transferId) => {

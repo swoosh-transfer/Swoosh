@@ -319,20 +319,27 @@ export async function resetDatabase() {
  */
 export async function cleanupTransferData(transferId) {
   try {
+    logger.log(`[IndexedDB] Cleaning up transfer data for: ${transferId}`);
+    
     // Delete chunks first (most data)
     await deleteChunksByTransfer(transferId);
+    logger.log(`[IndexedDB] Deleted chunks for transfer: ${transferId}`);
     
     // Delete transfer metadata
     await deleteTransferMeta(transferId);
+    logger.log(`[IndexedDB] Deleted transfer metadata for: ${transferId}`);
     
     // Delete file metadata (use transferId as fileId)
     await withStore('files', 'readwrite', (store) => {
       store.delete(transferId);
       return true;
     });
+    logger.log(`[IndexedDB] Deleted file metadata for: ${transferId}`);
     
+    logger.log(`[IndexedDB] Cleanup completed for transfer: ${transferId}`);
     return { success: true };
   } catch (err) {
+    logger.error(`[IndexedDB] Cleanup failed for transfer ${transferId}:`, err);
     return { success: false, error: err.message };
   }
 }

@@ -1,11 +1,11 @@
 /**
- * File Receiver - Handles receiving large files with direct disk writing
+ * File Receiver - Handles receiving large files with direct streaming disk writes
  * Supports chunk validation, missing chunk tracking, and resume capability
- * Uses sequential ordered writes to avoid "state cached" errors
- * Now supports pause/resume functionality
+ * Writes chunks directly to disk in order for memory efficiency with large files
+ * Supports pause/resume with progress synchronization
  */
 
-import { saveChunkMeta, getChunkMeta, getChunksByTransfer } from './indexedDB.js';
+import { saveChunkMeta, getChunksByTransfer } from './indexedDB.js';
 import { 
   resumableTransferManager, 
   TransferState, 
@@ -18,41 +18,68 @@ const CHUNK_SIZE = 64 * 1024; // 64KB chunks
 export class FileReceiver {
   constructor() {
     this.activeTransfers = new Map(); // transferId -> transfer state
-    this.writeQueues = new Map(); // transferId -> write queue for sequential writes
-    this.pendingChunks = new Map(); // transferId -> Map of out-of-order chunks waiting to be written
+    this.pendingChunks = new Map(); // transferId -> Map of out-of-order chunks
     this.pauseControllers = new Map(); // transferId -> { isPaused, resumeResolve }
     this.onProgress = null;
     this.onComplete = null;
     this.onError = null;
-    this.onPauseStateChange = null; // Callback for pause state changes
+    this.onPauseStateChange = null;
+    this.onRequestResync = null; // Callback to request sender to resync from a specific chunk
+  }
+
+  /**
+   * Get the last received chunk index for a transfer (consecutive from start)
+   * @param {string} transferId Transfer ID
+   * @returns {number} Last consecutive chunk index (-1 if none)
+   */
+  getLastReceivedChunk(transferId) {
+    const state = this.activeTransfers.get(transferId);
+    if (!state) return -1;
+    
+    // Find the highest consecutive chunk that was received
+    let lastConsecutive = -1;
+    for (let i = 0; i < state.totalChunks; i++) {
+      if (state.receivedChunks.has(i)) {
+        lastConsecutive = i;
+      } else {
+        break;
+      }
+    }
+    return lastConsecutive;
   }
 
   /**
    * Pause receiving for a transfer
    * @param {string} transferId Transfer ID
+   * @returns {Object} Pause info with lastChunk for sync
    */
   async pause(transferId) {
     const controller = this.pauseControllers.get(transferId);
+    
     if (controller && !controller.isPaused) {
       controller.isPaused = true;
       await resumableTransferManager.pauseTransfer(transferId);
       
+      const lastChunk = this.getLastReceivedChunk(transferId);
+      
       if (this.onPauseStateChange) {
-        this.onPauseStateChange(transferId, true);
+        this.onPauseStateChange(transferId, true, lastChunk);
       }
       
-      logger.log(`[FileReceiver] Paused transfer: ${transferId}`);
-      return true;
+      logger.log(`[FileReceiver] Paused transfer: ${transferId} at chunk ${lastChunk}`);
+      return { paused: true, lastChunk };
     }
-    return false;
+    return { paused: false };
   }
 
   /**
    * Resume receiving for a transfer
    * @param {string} transferId Transfer ID
+   * @returns {Object} Resume info with lastChunk for sync
    */
   async resume(transferId) {
     const controller = this.pauseControllers.get(transferId);
+    
     if (controller && controller.isPaused) {
       controller.isPaused = false;
       if (controller.resumeResolve) {
@@ -62,19 +89,20 @@ export class FileReceiver {
       await resumableTransferManager.resumeTransfer(transferId);
       resumableTransferManager.signalResume(transferId);
       
+      const lastChunk = this.getLastReceivedChunk(transferId);
+      
       if (this.onPauseStateChange) {
-        this.onPauseStateChange(transferId, false);
+        this.onPauseStateChange(transferId, false, lastChunk);
       }
       
-      logger.log(`[FileReceiver] Resumed transfer: ${transferId}`);
-      return true;
+      logger.log(`[FileReceiver] Resumed transfer: ${transferId} from chunk ${lastChunk}`);
+      return { resumed: true, lastChunk };
     }
-    return false;
+    return { resumed: false };
   }
 
   /**
    * Check if transfer is paused
-   * @param {string} transferId Transfer ID
    */
   isPaused(transferId) {
     const controller = this.pauseControllers.get(transferId);
@@ -83,9 +111,6 @@ export class FileReceiver {
 
   /**
    * Initialize a file receive operation
-   * Must be called from a user gesture (button click) for File System API
-   * @param {Object} metadata - File metadata from sender
-   * @returns {Promise<Object>} Transfer state
    */
   async initializeReceive(metadata) {
     const transferId = metadata.transferId || crypto.randomUUID();
@@ -99,22 +124,18 @@ export class FileReceiver {
       receivedChunks: new Map(), // chunkIndex -> { validated, checksum }
       missingChunks: new Set(),
       bytesReceived: 0,
+      bytesWritten: 0,
       fileHandle: null,
       writable: null,
       useFileSystemAPI: false,
       memoryChunks: [], // Fallback for browsers without File System API
       startTime: Date.now(),
       lastChunkTime: Date.now(),
-      nextExpectedChunk: 0, // Track next expected chunk for sequential writes
-      bytesWritten: 0,
+      nextExpectedChunk: 0, // Track next chunk to write sequentially
+      isWriting: false, // Lock to prevent concurrent writes
     };
 
     this.activeTransfers.set(transferId, state);
-    
-    // Initialize write queue for sequential writes
-    this.writeQueues.set(transferId, Promise.resolve());
-    
-    // Initialize pending chunks map for out-of-order handling
     this.pendingChunks.set(transferId, new Map());
     
     // Initialize pause controller
@@ -137,9 +158,7 @@ export class FileReceiver {
   }
 
   /**
-   * Setup file writer - MUST be called from user gesture
-   * @param {string} transferId - Transfer ID
-   * @param {string} suggestedName - Suggested file name
+   * Setup file writer with streaming support - MUST be called from user gesture
    */
   async setupFileWriter(transferId, suggestedName) {
     const state = this.activeTransfers.get(transferId);
@@ -155,13 +174,14 @@ export class FileReceiver {
           }]
         });
         
-        const writable = await handle.createWritable();
         state.fileHandle = handle;
-        state.writable = writable;
         state.useFileSystemAPI = true;
         
-        logger.log('[FileReceiver] File System API ready');
-        return { success: true, method: 'filesystem' };
+        // Create writable stream - use keepExistingData: false for clean start
+        state.writable = await handle.createWritable({ keepExistingData: false });
+        
+        logger.log(`[FileReceiver] File System API ready (direct write mode)`);
+        return { success: true, method: 'filesystem-direct' };
       } catch (err) {
         if (err.name === 'AbortError') {
           throw new Error('File save cancelled by user');
@@ -179,7 +199,6 @@ export class FileReceiver {
 
   /**
    * Wait if paused, returns true if should continue
-   * @param {string} transferId - Transfer ID
    */
   async _waitIfPaused(transferId) {
     const controller = this.pauseControllers.get(transferId);
@@ -191,68 +210,63 @@ export class FileReceiver {
       });
     }
 
-    // Check if cancelled
-    const state = await resumableTransferManager.getTransferState(transferId);
-    return state?.status !== TransferState.CANCELLED;
+    const transferState = await resumableTransferManager.getTransferState(transferId);
+    return transferState?.status !== TransferState.CANCELLED;
   }
 
   /**
-   * Queue a write operation to ensure sequential execution
-   * @param {string} transferId - Transfer ID
-   * @param {Function} writeOperation - Async write operation
+   * Process the write queue - writes chunks sequentially in order
+   * Uses simple sequential writes (no position) to avoid File System API state issues
    */
-  async queueWrite(transferId, writeOperation) {
-    const currentQueue = this.writeQueues.get(transferId) || Promise.resolve();
-    const newQueue = currentQueue.then(writeOperation).catch(err => {
-      logger.error('[FileReceiver] Queued write failed:', err);
+  async _processWriteQueue(transferId) {
+    const state = this.activeTransfers.get(transferId);
+    if (!state || !state.writable) return;
+    if (state.isWriting) return; // Already processing
+    
+    state.isWriting = true;
+    const pendingMap = this.pendingChunks.get(transferId);
+    
+    try {
+      // Write chunks in order starting from nextExpectedChunk
+      while (pendingMap.has(state.nextExpectedChunk)) {
+        const chunkIndex = state.nextExpectedChunk;
+        const chunkData = pendingMap.get(chunkIndex);
+        pendingMap.delete(chunkIndex);
+        
+        // Simple sequential write - just append data, no position needed
+        // This avoids the "state cached in interface object" error
+        await state.writable.write(chunkData);
+        state.bytesWritten += chunkData.byteLength;
+        state.nextExpectedChunk++;
+        
+        logger.log(`[FileReceiver] Wrote chunk ${chunkIndex} (${chunkData.byteLength} bytes), total written: ${state.bytesWritten}`);
+      }
+    } catch (err) {
+      logger.error(`[FileReceiver] Write error:`, err);
       throw err;
-    });
-    this.writeQueues.set(transferId, newQueue);
-    return newQueue;
+    } finally {
+      state.isWriting = false;
+    }
   }
 
   /**
-   * Write chunks in order - buffers out-of-order chunks and writes sequentially
-   * This avoids "state cached in an interface object" errors
-   * @param {string} transferId - Transfer ID
-   * @param {number} chunkIndex - Index of the chunk
-   * @param {Uint8Array} chunkData - The chunk data
+   * Queue a chunk for writing - stores in pending map and triggers sequential write
    */
-  async writeChunkInOrder(transferId, chunkIndex, chunkData) {
+  async _queueChunkForWrite(transferId, chunkIndex, chunkData) {
     const state = this.activeTransfers.get(transferId);
     if (!state) return;
     
-    const pending = this.pendingChunks.get(transferId);
+    const pendingMap = this.pendingChunks.get(transferId);
     
-    // If this is not the next expected chunk, buffer it
-    if (chunkIndex !== state.nextExpectedChunk) {
-      pending.set(chunkIndex, chunkData);
-      return;
-    }
+    // Store chunk in pending map (make a copy to avoid buffer reuse issues)
+    pendingMap.set(chunkIndex, new Uint8Array(chunkData));
     
-    // Write this chunk and any buffered sequential chunks
-    await this.queueWrite(transferId, async () => {
-      // Write current chunk
-      await state.writable.write(chunkData);
-      state.bytesWritten += chunkData.length;
-      state.nextExpectedChunk++;
-      
-      // Write any pending chunks that are now in order
-      while (pending.has(state.nextExpectedChunk)) {
-        const nextData = pending.get(state.nextExpectedChunk);
-        pending.delete(state.nextExpectedChunk);
-        await state.writable.write(nextData);
-        state.bytesWritten += nextData.length;
-        state.nextExpectedChunk++;
-      }
-    });
+    // Try to write any sequential chunks
+    await this._processWriteQueue(transferId);
   }
 
   /**
    * Receive and process a chunk
-   * @param {string} transferId - Transfer ID
-   * @param {Object} chunkMeta - Chunk metadata
-   * @param {Uint8Array} chunkData - Chunk binary data
    */
   async receiveChunk(transferId, chunkMeta, chunkData) {
     const state = this.activeTransfers.get(transferId);
@@ -269,6 +283,12 @@ export class FileReceiver {
 
     const { chunkIndex, checksum, size, fileOffset, isFinal } = chunkMeta;
 
+    // Check if chunk was already received (avoid duplicates)
+    if (state.receivedChunks.has(chunkIndex)) {
+      logger.log(`[FileReceiver] Chunk ${chunkIndex} already received, skipping`);
+      return { success: true, chunkIndex, duplicate: true };
+    }
+
     try {
       // Validate checksum
       const calculatedChecksum = await this.calculateChecksum(chunkData);
@@ -278,7 +298,6 @@ export class FileReceiver {
         logger.error(`[FileReceiver] Checksum mismatch for chunk ${chunkIndex}`);
         state.missingChunks.add(chunkIndex);
         
-        // Store metadata for retry
         await saveChunkMeta({
           transferId,
           chunkIndex,
@@ -293,23 +312,20 @@ export class FileReceiver {
         return { success: false, error: 'Checksum mismatch', chunkIndex };
       }
 
-      // Write chunk to file using sequential ordered writes
+      // Mark as received BEFORE writing (so we track it even if write is pending)
+      state.receivedChunks.set(chunkIndex, { validated: true, checksum });
+      state.bytesReceived += chunkData.byteLength;
+      state.lastChunkTime = Date.now();
+      state.missingChunks.delete(chunkIndex);
+
+      // Write chunk to file
       if (state.useFileSystemAPI && state.writable) {
-        // Make a copy of the data to avoid issues with buffer reuse
-        const chunkDataCopy = new Uint8Array(chunkData);
-        
-        // Queue this chunk for ordered sequential writing
-        await this.writeChunkInOrder(transferId, chunkIndex, chunkDataCopy);
-      } else {
+        // Queue for sequential disk write
+        await this._queueChunkForWrite(transferId, chunkIndex, chunkData);
+      } else if (state.memoryChunks) {
         // Store in memory array at correct position
         state.memoryChunks[chunkIndex] = new Uint8Array(chunkData);
       }
-
-      // Update state
-      state.receivedChunks.set(chunkIndex, { validated: true, checksum });
-      state.bytesReceived += chunkData.length;
-      state.lastChunkTime = Date.now();
-      state.missingChunks.delete(chunkIndex);
 
       // Store validated chunk metadata
       await saveChunkMeta({
@@ -359,7 +375,6 @@ export class FileReceiver {
 
   /**
    * Complete the transfer - finalize file and cleanup
-   * @param {string} transferId - Transfer ID
    */
   async completeTransfer(transferId) {
     const state = this.activeTransfers.get(transferId);
@@ -368,49 +383,47 @@ export class FileReceiver {
     }
 
     try {
-      // Wait for all queued writes to complete
-      const writeQueue = this.writeQueues.get(transferId);
-      if (writeQueue) {
-        await writeQueue;
-      }
-      
-      // Flush any remaining pending chunks (write them even if out of order)
-      const pending = this.pendingChunks.get(transferId);
-      if (pending && pending.size > 0) {
-        logger.warn(`[FileReceiver] Flushing ${pending.size} out-of-order chunks`);
-        // Sort by chunk index and write remaining
-        const sortedChunks = [...pending.entries()].sort((a, b) => a[0] - b[0]);
-        for (const [idx, data] of sortedChunks) {
-          if (state.useFileSystemAPI && state.writable) {
-            await state.writable.write(data);
-            state.bytesWritten += data.length;
-          }
-        }
-        pending.clear();
-      }
-
-      // Check for missing chunks
+      // Check for missing chunks first
       const missingChunks = this.getMissingChunks(transferId);
       if (missingChunks.length > 0) {
-        logger.warn(`[FileReceiver] Transfer has ${missingChunks.length} missing chunks`);
-        // Still try to complete if we got most chunks
-        if (missingChunks.length > state.totalChunks * 0.1) {
-          return { 
-            success: false, 
-            error: 'Missing chunks', 
-            missingChunks,
-            canResume: true 
-          };
-        }
+        logger.warn(`[FileReceiver] Transfer has ${missingChunks.length} missing chunks: ${missingChunks.slice(0, 10).join(', ')}...`);
+        return { 
+          success: false, 
+          error: 'Missing chunks', 
+          missingChunks,
+          canResume: true 
+        };
       }
 
       if (state.useFileSystemAPI && state.writable) {
+        // Process any remaining chunks in the write queue
+        await this._processWriteQueue(transferId);
+        
+        // Wait a bit for any in-flight writes
+        await new Promise(resolve => setTimeout(resolve, 50));
+        
+        // Check for any remaining pending chunks
+        const pendingMap = this.pendingChunks.get(transferId);
+        if (pendingMap && pendingMap.size > 0) {
+          logger.warn(`[FileReceiver] ${pendingMap.size} pending chunks at completion, processing...`);
+          await this._processWriteQueue(transferId);
+        }
+        
+        // Verify bytes written matches expected
+        if (state.bytesWritten !== state.fileSize) {
+          logger.warn(`[FileReceiver] Bytes mismatch: written=${state.bytesWritten}, expected=${state.fileSize}`);
+        }
+        
+        // Close the writable stream
         await state.writable.close();
+        state.writable = null;
+        
+        logger.log(`[FileReceiver] File saved successfully (${state.bytesWritten} bytes)`);
         
         if (this.onComplete) {
           this.onComplete(transferId, {
             fileName: state.fileName,
-            fileSize: state.fileSize,
+            fileSize: state.bytesWritten,
             savedToFileSystem: true,
             duration: Date.now() - state.startTime,
           });
@@ -426,7 +439,7 @@ export class FileReceiver {
         if (this.onComplete) {
           this.onComplete(transferId, {
             fileName: state.fileName,
-            fileSize: state.fileSize,
+            fileSize: blob.size,
             savedToFileSystem: false,
             url,
             blob,
@@ -442,12 +455,13 @@ export class FileReceiver {
     } finally {
       // Cleanup
       this.activeTransfers.delete(transferId);
+      this.pendingChunks.delete(transferId);
+      this.pauseControllers.delete(transferId);
     }
   }
 
   /**
    * Get list of missing chunk indices
-   * @param {string} transferId - Transfer ID
    */
   getMissingChunks(transferId) {
     const state = this.activeTransfers.get(transferId);
@@ -463,21 +477,7 @@ export class FileReceiver {
   }
 
   /**
-   * Request retransmission of missing chunks
-   * @param {string} transferId - Transfer ID
-   * @param {Function} requestCallback - Called with array of missing chunk indices
-   */
-  async requestMissingChunks(transferId, requestCallback) {
-    const missingChunks = this.getMissingChunks(transferId);
-    if (missingChunks.length > 0 && requestCallback) {
-      await requestCallback(missingChunks);
-    }
-    return missingChunks;
-  }
-
-  /**
    * Calculate SHA-256 checksum
-   * @param {Uint8Array} data - Data to hash
    */
   async calculateChecksum(data) {
     const hashBuffer = await crypto.subtle.digest('SHA-256', data);
@@ -487,7 +487,6 @@ export class FileReceiver {
 
   /**
    * Cancel a transfer
-   * @param {string} transferId - Transfer ID
    */
   async cancelTransfer(transferId) {
     const state = this.activeTransfers.get(transferId);
@@ -501,19 +500,15 @@ export class FileReceiver {
       logger.error('[FileReceiver] Cancel error:', err);
     }
 
-    // Cancel in resumable manager
     await resumableTransferManager.cancelTransfer(transferId);
 
-    // Cleanup
     this.activeTransfers.delete(transferId);
-    this.writeQueues.delete(transferId);
     this.pendingChunks.delete(transferId);
     this.pauseControllers.delete(transferId);
   }
 
   /**
    * Get transfer state with pause info
-   * @param {string} transferId - Transfer ID
    */
   getTransferState(transferId) {
     const state = this.activeTransfers.get(transferId);
@@ -521,13 +516,13 @@ export class FileReceiver {
     
     return {
       ...state,
-      isPaused: this.isPaused(transferId)
+      isPaused: this.isPaused(transferId),
+      lastReceivedChunk: this.getLastReceivedChunk(transferId),
     };
   }
 
   /**
-   * Get pause state
-   * @param {string} transferId - Transfer ID
+   * Get pause state with sync info
    */
   getPauseState(transferId) {
     const state = this.activeTransfers.get(transferId);
@@ -538,23 +533,21 @@ export class FileReceiver {
       bytesReceived: state?.bytesReceived || 0,
       chunksReceived: state?.receivedChunks?.size || 0,
       totalChunks: state?.totalChunks || 0,
-      fileSize: state?.fileSize || 0
+      fileSize: state?.fileSize || 0,
+      lastReceivedChunk: this.getLastReceivedChunk(transferId),
     };
   }
 
   /**
    * Resume a previously started transfer
-   * @param {string} transferId - Transfer ID
    */
   async resumeTransfer(transferId) {
-    // Get existing chunks from IndexedDB
     const existingChunks = await getChunksByTransfer(transferId);
     const validatedChunks = existingChunks.filter(c => c.validated && c.status === 'received');
     
     const state = this.activeTransfers.get(transferId);
     if (!state) return null;
 
-    // Restore received chunks map
     for (const chunk of validatedChunks) {
       state.receivedChunks.set(chunk.chunkIndex, {
         validated: true,
@@ -563,11 +556,18 @@ export class FileReceiver {
       state.bytesReceived += chunk.size;
     }
 
+    // Update nextExpectedChunk based on what we have
+    state.nextExpectedChunk = 0;
+    while (state.receivedChunks.has(state.nextExpectedChunk)) {
+      state.nextExpectedChunk++;
+    }
+
     const missingChunks = this.getMissingChunks(transferId);
     return {
       resumedChunks: validatedChunks.length,
       missingChunks,
       bytesReceived: state.bytesReceived,
+      lastReceivedChunk: this.getLastReceivedChunk(transferId),
     };
   }
 }
