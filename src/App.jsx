@@ -1,15 +1,16 @@
-import { useState } from 'react'
-
-
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import Home from './pages/Home';
+import Room from './pages/Room';
 
 function App() {
-  const [count, setCount] = useState(0)
-
   return (
-    <>
-      <h1 className='m-10 text-amber-300'>Hello</h1>
-    </>
-  )
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/:roomId" element={<Room />} />
+      </Routes>
+    </BrowserRouter>
+  );
 }
 
-export default App
+export default App;
