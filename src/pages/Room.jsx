@@ -59,8 +59,6 @@ import {
   formatBytes,
 } from '../components/RoomUI';
 
-// Pause/Resume functionality
-import { pauseChunking, resumeChunking, isChunkingPaused } from '../utils/chunkingSystem';
 
 export default function Room() {
   const { roomId } = useParams();
@@ -879,7 +877,8 @@ export default function Room() {
     sendJSON({ type: 'transfer-paused', transferId });
 
     if (isHost) {
-      pauseChunking(transferId);
+      // Use the ref instance directly for sender side
+      chunkingEngineRef.current.pause(transferId);
       addLog('Sending paused', 'warning');
     } else {
       fileReceiver.pause(transferId);
@@ -897,7 +896,8 @@ export default function Room() {
     sendJSON({ type: 'transfer-resumed', transferId });
 
     if (isHost) {
-      resumeChunking(transferId);
+      // Use the ref instance directly for sender side
+      chunkingEngineRef.current.resume(transferId);
       addLog('Sending resumed', 'success');
     } else {
       fileReceiver.resume(transferId);
@@ -928,7 +928,8 @@ export default function Room() {
   // Handle remote pause signal from peer
   const handleRemotePause = useCallback((transferId) => {
     if (isHost) {
-      pauseChunking(transferId);
+      // Use the ref instance directly for sender side
+      chunkingEngineRef.current.pause(transferId);
       addLog('Peer paused transfer', 'warning');
     } else {
       fileReceiver.pause(transferId);
@@ -940,7 +941,8 @@ export default function Room() {
   // Handle remote resume signal from peer
   const handleRemoteResume = useCallback((transferId) => {
     if (isHost) {
-      resumeChunking(transferId);
+      // Use the ref instance directly for sender side
+      chunkingEngineRef.current.resume(transferId);
       addLog('Peer resumed transfer', 'success');
     } else {
       fileReceiver.resume(transferId);
