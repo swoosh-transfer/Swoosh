@@ -8,23 +8,24 @@ import { useParams, useNavigate } from 'react-router-dom';
 // Zustand stores
 import { useRoomStore } from '../stores/roomStore';
 import { useTransferStore } from '../stores/transferStore';
+import { getLocalUUID, savePeerSession, verifyPeer } from '../utils/identityManager';
 
 // Existing utils - NO DUPLICATION
-import { 
-  initSocket, 
+import {
+  initSocket,
   getSocket,
-  joinRoom, 
+  joinRoom,
   setupSignalingListeners,
-  waitForConnection 
+  waitForConnection
 } from '../utils/signaling';
-import { 
-  initializePeerConnection, 
-  createOffer, 
-  handleOffer, 
-  handleAnswer, 
-  handleIceCandidate 
+import {
+  initializePeerConnection,
+  createOffer,
+  handleOffer,
+  handleAnswer,
+  handleIceCandidate
 } from '../utils/p2pManager';
-import { 
+import {
   deriveHMACKey,
   generateChallenge,
   signChallenge,
@@ -51,9 +52,9 @@ import {
 export default function Room() {
   const { roomId } = useParams();
   const navigate = useNavigate();
-  
+
   // ============ ZUSTAND STORES ============
-  const { 
+  const {
     isHost, securityPayload, selectedFile,
     setSecurityPayload, setRoomId, resetRoom,
     setTofuVerified, setConnectionState, setError,
@@ -82,6 +83,8 @@ export default function Room() {
   const [awaitingSaveLocation, setAwaitingSaveLocation] = useState(false);
   const [downloadResult, setDownloadResult] = useState(null);
   const [logs, setLogs] = useState([]);
+  const [identityVerified, setIdentityVerified] = useState(false);
+  const myUUID = useRef(getLocalUUID());
 
   // Connection info for display
   const [connInfo, setConnInfo] = useState({
@@ -153,7 +156,7 @@ export default function Room() {
   }, []);
 
   // ============ INITIALIZATION ============
-  
+
   // Initialize receiver (joining via shared link)
   useEffect(() => {
     const hash = window.location.hash.slice(1);
@@ -178,7 +181,7 @@ export default function Room() {
 
         // Initialize socket
         const socket = initSocket();
-        
+
         socket.on('connect', () => {
           setSocketConnected(true);
           setSocketId(socket.id);
@@ -213,7 +216,7 @@ export default function Room() {
   }, [roomId, isHost]);
 
   // ============ WEBRTC SETUP ============
-  
+
   useEffect(() => {
     const socket = getSocket();
     if (!socket || !roomId) return;
@@ -223,9 +226,18 @@ export default function Room() {
       addLog('Data channel ready', 'success');
       dataChannelRef.current = channel;
       setDataChannelReady(true);
-      setConnInfo(prev => ({ ...prev, dataChannelState: 'open' }));
-      
       channel.binaryType = 'arraybuffer';
+      setConnInfo(prev => ({ ...prev, dataChannelState: 'open' }));
+
+      const handshakeMsg = {
+        type: 'handshake',
+        uuid: myUUID.current
+      };
+
+      if (channel.readyState === 'open') {
+        channel.send(JSON.stringify(handshakeMsg));
+        addLog('Sent identity handshake', 'info');
+      }
       channel.onmessage = handleMessage;
       channel.onclose = () => {
         setDataChannelReady(false);
@@ -253,7 +265,7 @@ export default function Room() {
 
     // Initialize peer connection using existing p2pManager
     const pc = initializePeerConnection(socket, roomId, onChannelReady, onStateChange, onStats);
-    
+
     if (pc) {
       pc.oniceconnectionstatechange = () => {
         setConnInfo(prev => ({ ...prev, iceState: pc.iceConnectionState }));
@@ -287,10 +299,10 @@ export default function Room() {
   }, [roomId, isHost, securityPayload]);
 
   // ============ TOFU VERIFICATION (using existing tofuSecurity.js) ============
-  
+
   const startTOFUVerification = async () => {
     if (!securityPayload?.secret) return;
-    
+
     setVerificationStatus('verifying');
     addLog('Starting TOFU verification...', 'info');
 
@@ -298,19 +310,19 @@ export default function Room() {
       // Use existing tofuSecurity functions
       const hmacKey = await deriveHMACKey(securityPayload.secret);
       hmacKeyRef.current = hmacKey;
-      
+
       const challenge = generateChallenge();
       challengeRef.current = challenge;
-      
+
       const signature = await signChallenge(challenge, hmacKey);
-      
+
       sendJSON({
         type: 'tofu-challenge',
         challenge,
         signature,
         peerID: securityPayload.peerID,
       });
-      
+
       addLog('Sent TOFU challenge', 'info');
     } catch (err) {
       setVerificationStatus('failed');
@@ -319,11 +331,15 @@ export default function Room() {
   };
 
   // ============ MESSAGE HANDLER ============
-  
+
   const handleMessage = async (event) => {
     try {
       // Binary data = file chunk
       if (event.data instanceof ArrayBuffer) {
+        if (!identityVerified) {
+          console.warn('Blocked binary data: Identity not verified');
+          return;
+        }
         await handleChunkData(new Uint8Array(event.data));
         return;
       }
@@ -331,6 +347,25 @@ export default function Room() {
       const msg = JSON.parse(event.data);
 
       switch (msg.type) {
+        case 'handshake': {
+          addLog(`Received identity: ${msg.uuid.slice(0, 8)}...`, 'info');
+          // Verify against DB (Scoped by Room)
+          const isKnownPeer = await verifyPeer(msg.uuid, roomId);
+          if (isKnownPeer) {
+            addLog('Session resumed with known peer', 'success');
+            // Logic to trigger Resume UI could go here
+          } else {
+            addLog('New session established', 'info');
+          }
+          // Save this session for next time (reloads)
+          await savePeerSession(msg.uuid, roomId);
+          setIdentityVerified(true);
+          // START TOFU ONLY AFTER IDENTITY IS VERIFIED
+          if (securityPayload?.secret) {
+            startTOFUVerification();
+          }
+          break;
+        }
         case 'tofu-challenge':
           await handleTOFUChallenge(msg);
           break;
@@ -377,16 +412,16 @@ export default function Room() {
   };
 
   // ============ TOFU HANDLERS ============
-  
+
   const handleTOFUChallenge = async (msg) => {
     addLog('Received TOFU challenge', 'info');
-    
+
     try {
       const hmacKey = await deriveHMACKey(securityPayload.secret);
       hmacKeyRef.current = hmacKey;
-      
+
       const isValid = await verifyChallenge(msg.challenge, msg.signature, hmacKey);
-      
+
       if (isValid) {
         addLog('Challenge valid', 'success');
         const response = await signChallenge(msg.challenge, hmacKey);
@@ -405,10 +440,10 @@ export default function Room() {
 
   const handleTOFUResponse = async (msg) => {
     addLog('Received TOFU response', 'info');
-    
+
     try {
       const isValid = await verifyChallenge(challengeRef.current, msg.signature, hmacKeyRef.current);
-      
+
       if (isValid) {
         addLog('Peer verified!', 'success');
         sendJSON({ type: 'tofu-verified' });
@@ -419,18 +454,18 @@ export default function Room() {
         addLog('Peer verification failed!', 'error');
       }
     } catch (err) {
-      setVerificationStatus('failed');
+      setVerificationStatus('failed', err);
     }
   };
 
   // ============ FILE TRANSFER - SENDER ============
-  
+
   const handleStartTransfer = () => {
     if (!selectedFile || !tofuVerified) return;
-    
+
     const transferId = crypto.randomUUID();
     transferIdRef.current = transferId;
-    
+
     // Use Zustand store to track transfer
     initiateUpload({
       transferId,
@@ -458,10 +493,10 @@ export default function Room() {
 
   const sendFileChunks = async () => {
     if (!selectedFile) return;
-    
+
     setTransferState('sending');
     startTimeRef.current = Date.now();
-    
+
     try {
       // Use existing ChunkingEngine from chunkingSystem.js
       await chunkingEngineRef.current.startChunking(
@@ -471,16 +506,16 @@ export default function Room() {
         async ({ metadata, binaryData }) => {
           // Wait for buffer drain (backpressure)
           await waitForDrain();
-          
+
           // Send chunk metadata
           sendJSON({ type: 'chunk-metadata', ...metadata });
-          
+
           // Wait again then send binary
           await waitForDrain();
-          
+
           // Send binary data
           const buffer = binaryData.buffer.slice(
-            binaryData.byteOffset, 
+            binaryData.byteOffset,
             binaryData.byteOffset + binaryData.byteLength
           );
           sendBinary(buffer);
@@ -488,7 +523,7 @@ export default function Room() {
         (bytesRead, totalSize) => {
           const progress = Math.round((bytesRead / totalSize) * 100);
           setTransferProgress(progress);
-          
+
           // Calculate speed
           const elapsed = (Date.now() - startTimeRef.current) / 1000;
           if (elapsed > 0) {
@@ -503,7 +538,7 @@ export default function Room() {
       setTransferState('completed');
       setTransferProgress(100);
       addLog('Transfer complete!', 'success');
-      
+
     } catch (err) {
       setTransferState('error');
       addLog(`Transfer failed: ${err.message}`, 'error');
@@ -511,19 +546,19 @@ export default function Room() {
   };
 
   // ============ FILE TRANSFER - RECEIVER ============
-  
+
   const handleFileMetadata = async (msg) => {
     addLog(`Incoming: ${msg.name} (${formatBytes(msg.size)})`, 'info');
-    
+
     transferIdRef.current = msg.transferId;
     setPendingFile({ name: msg.name, size: msg.size, totalChunks: msg.totalChunks });
     setAwaitingSaveLocation(true);
     receivedBytesRef.current = 0;
-    
+
     // Clear any previous metadata queue
     chunkMetaQueueRef.current = [];
     pendingBinaryRef.current = null;
-    
+
     // Initialize FileReceiver for this transfer
     await fileReceiver.initializeReceive({
       transferId: msg.transferId,
@@ -531,7 +566,7 @@ export default function Room() {
       size: msg.size,
       mimeType: msg.mimeType,
     });
-    
+
     // Set up progress callback
     fileReceiver.onProgress = (tid, progress) => {
       setTransferProgress(progress.progress);
@@ -539,16 +574,16 @@ export default function Room() {
       setTransferEta(progress.eta);
       receivedBytesRef.current = progress.bytesReceived;
     };
-    
+
     fileReceiver.onComplete = (tid, result) => {
       addLog('File saved!', 'success');
       setDownloadResult({ savedToFileSystem: result.savedToFileSystem });
     };
-    
+
     fileReceiver.onError = (tid, error) => {
       addLog(`Receive error: ${error}`, 'error');
     };
-    
+
     // Use Zustand store
     initiateDownload({
       transferId: msg.transferId,
@@ -561,19 +596,19 @@ export default function Room() {
 
   const handleSelectSaveLocation = async () => {
     if (!pendingFile) return;
-    
+
     try {
       // Use FileReceiver to setup file writer (must be from user gesture)
       const result = await fileReceiver.setupFileWriter(transferIdRef.current, pendingFile.name);
-      
+
       addLog(`Save location selected (${result.method})`, 'success');
       setAwaitingSaveLocation(false);
       setTransferState('receiving');
       startTimeRef.current = Date.now();
-      
+
       // Tell sender we're ready
       sendJSON({ type: 'receiver-ready' });
-      
+
     } catch (err) {
       if (err.message.includes('cancelled')) {
         addLog('Save cancelled', 'warning');
@@ -593,7 +628,7 @@ export default function Room() {
       pendingBinaryRef.current = data;
     }
   };
-  
+
   // Process a chunk once we have both metadata and binary
   const processChunkWithMeta = async (data) => {
     const meta = chunkMetaQueueRef.current.shift();
@@ -601,7 +636,7 @@ export default function Room() {
       addLog('No metadata for chunk', 'error');
       return;
     }
-    
+
     try {
       // Use FileReceiver to handle the chunk (includes validation, writing, IndexedDB)
       const result = await fileReceiver.receiveChunk(
@@ -615,11 +650,11 @@ export default function Room() {
         },
         data
       );
-      
+
       if (!result.success) {
         addLog(`Chunk ${meta.chunkIndex}: ${result.error}`, 'error');
       }
-      
+
     } catch (err) {
       addLog(`Chunk ${meta.chunkIndex} error: ${err.message}`, 'error');
     }
@@ -627,18 +662,18 @@ export default function Room() {
 
   const handleTransferComplete = async () => {
     addLog('Transfer complete signal', 'info');
-    
+
     // Wait a moment for any in-flight chunks
     await new Promise(resolve => setTimeout(resolve, 100));
-    
+
     try {
       // Use FileReceiver to complete the transfer
       const result = await fileReceiver.completeTransfer(transferIdRef.current);
-      
+
       if (result.success) {
         setTransferState('completed');
         setTransferProgress(100);
-        setDownloadResult({ 
+        setDownloadResult({
           savedToFileSystem: result.savedToFileSystem,
           url: result.url,
           blob: result.blob,
@@ -650,21 +685,21 @@ export default function Room() {
       } else {
         addLog(`Complete error: ${result.error}`, 'error');
       }
-      
+
     } catch (err) {
       addLog(`Complete error: ${err.message}`, 'error');
     }
   };
 
   // ============ UI ACTIONS ============
-  
+
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(shareUrl);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
-      addLog('Copy failed', 'error');
+      addLog('Copy failed', err);
     }
   };
 
@@ -675,7 +710,7 @@ export default function Room() {
   };
 
   // ============ RENDER ============
-  
+
   const transferInfo = {
     fileName: pendingFile?.name || selectedFile?.name,
     fileSize: pendingFile?.size || selectedFile?.size || 0,
@@ -703,7 +738,7 @@ export default function Room() {
             {/* Connection Status */}
             <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
               <h2 className="text-sm font-medium text-zinc-400 mb-3">Status</h2>
-              <StatusSection 
+              <StatusSection
                 socketConnected={socketConnected || connInfo.socketConnected}
                 dataChannelReady={dataChannelReady}
                 tofuVerified={tofuVerified}
@@ -735,7 +770,7 @@ export default function Room() {
             {/* Progress */}
             {isTransferring && (
               <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-                <TransferProgress 
+                <TransferProgress
                   progress={transferProgress}
                   state={transferState}
                   speed={transferSpeed}
@@ -747,7 +782,7 @@ export default function Room() {
             {/* Complete */}
             {transferState === 'completed' && (
               <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-                <TransferComplete 
+                <TransferComplete
                   isHost={isHost}
                   savedToFileSystem={downloadResult?.savedToFileSystem}
                   fileName={pendingFile?.name}

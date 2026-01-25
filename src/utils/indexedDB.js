@@ -1,6 +1,6 @@
 // Minimal IndexedDB helper for transfer metadata (no chunk storage)
 const DB_NAME = 'P2PFileTransfer';
-const DB_VERSION = 2; // Updated to include chunks store
+const DB_VERSION = 3; // Updated to include chunks store
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -18,6 +18,10 @@ function openDB() {
         const chunkStore = db.createObjectStore('chunks', { keyPath: ['transferId', 'chunkIndex'] });
         chunkStore.createIndex('transferId', 'transferId', { unique: false });
         chunkStore.createIndex('status', 'status', { unique: false });
+      }
+
+      if (!db.objectStoreNames.contains('sessions')) {
+        db.createObjectStore('sessions', { keyPath: 'roomId' });
       }
     };
 
