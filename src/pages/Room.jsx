@@ -109,6 +109,8 @@ export default function Room() {
   const pendingBinaryRef = useRef(null); // Store binary if it arrives before metadata
   const receivedBytesRef = useRef(0);
   const startTimeRef = useRef(null);
+  const tofuStartedRef = useRef(false); // Prevent double TOFU verification
+  const handshakeSentRef = useRef(false); // Prevent double handshake
 
   // ============ LOGGING ============
   const addLog = useCallback((message, type = 'info') => {
@@ -229,26 +231,30 @@ export default function Room() {
       channel.binaryType = 'arraybuffer';
       setConnInfo(prev => ({ ...prev, dataChannelState: 'open' }));
 
-      const handshakeMsg = {
-        type: 'handshake',
-        uuid: myUUID.current
-      };
-
-      if (channel.readyState === 'open') {
-        channel.send(JSON.stringify(handshakeMsg));
-        addLog('Sent identity handshake', 'info');
-      }
+      // Set up message handler FIRST before sending anything
       channel.onmessage = handleMessage;
       channel.onclose = () => {
         setDataChannelReady(false);
         setConnInfo(prev => ({ ...prev, dataChannelState: 'closed' }));
         addLog('Data channel closed', 'warning');
+        // Reset refs on close for reconnection
+        tofuStartedRef.current = false;
+        handshakeSentRef.current = false;
       };
 
-      // Start TOFU verification
-      if (securityPayload?.secret) {
-        startTOFUVerification();
+      // Send handshake only once
+      if (!handshakeSentRef.current && channel.readyState === 'open') {
+        handshakeSentRef.current = true;
+        const handshakeMsg = {
+          type: 'handshake',
+          uuid: myUUID.current
+        };
+        channel.send(JSON.stringify(handshakeMsg));
+        addLog('Sent identity handshake', 'info');
       }
+      
+      // NOTE: TOFU verification will start after receiving peer's handshake
+      // This ensures identity is verified before cryptographic verification
     };
 
     // Connection state callback
@@ -301,8 +307,17 @@ export default function Room() {
   // ============ TOFU VERIFICATION (using existing tofuSecurity.js) ============
 
   const startTOFUVerification = async () => {
-    if (!securityPayload?.secret) return;
-
+    // Prevent double TOFU verification
+    if (tofuStartedRef.current) {
+      addLog('TOFU already started, skipping...', 'info');
+      return;
+    }
+    if (!securityPayload?.secret) {
+      addLog('No security payload, skipping TOFU', 'warning');
+      return;
+    }
+    
+    tofuStartedRef.current = true;
     setVerificationStatus('verifying');
     addLog('Starting TOFU verification...', 'info');
 
@@ -325,6 +340,7 @@ export default function Room() {
 
       addLog('Sent TOFU challenge', 'info');
     } catch (err) {
+      tofuStartedRef.current = false; // Allow retry on error
       setVerificationStatus('failed');
       addLog(`TOFU failed: ${err.message}`, 'error');
     }
@@ -336,8 +352,14 @@ export default function Room() {
     try {
       // Binary data = file chunk
       if (event.data instanceof ArrayBuffer) {
-        if (!identityVerified) {
-          console.warn('Blocked binary data: Identity not verified');
+        // Allow binary data if TOFU is verified (identity is implicitly verified via TOFU)
+        // This fixes race condition where identity check blocks valid chunks
+        if (!tofuVerified && !identityVerified) {
+          console.warn('[Room] Queueing binary data: Verification pending');
+          // Store for later processing instead of dropping
+          if (!pendingBinaryRef.current) {
+            pendingBinaryRef.current = new Uint8Array(event.data);
+          }
           return;
         }
         await handleChunkData(new Uint8Array(event.data));
@@ -348,22 +370,34 @@ export default function Room() {
 
       switch (msg.type) {
         case 'handshake': {
-          addLog(`Received identity: ${msg.uuid.slice(0, 8)}...`, 'info');
-          // Verify against DB (Scoped by Room)
-          const isKnownPeer = await verifyPeer(msg.uuid, roomId);
-          if (isKnownPeer) {
-            addLog('Session resumed with known peer', 'success');
-            // Logic to trigger Resume UI could go here
-          } else {
-            addLog('New session established', 'info');
+          const peerUuidShort = msg.uuid?.slice(0, 8) || 'unknown';
+          addLog(`Received identity: ${peerUuidShort}...`, 'info');
+          
+          try {
+            // Verify against DB (Scoped by Room)
+            const isKnownPeer = await verifyPeer(msg.uuid, roomId);
+            if (isKnownPeer) {
+              addLog('Session resumed with known peer', 'success');
+              // Could trigger resume UI here if needed
+            } else {
+              addLog('New session established', 'info');
+            }
+            // Save this session for next time (reloads)
+            await savePeerSession(msg.uuid, roomId);
+          } catch (err) {
+            console.warn('[Room] Identity storage error:', err);
+            // Continue anyway - identity storage is not critical
           }
-          // Save this session for next time (reloads)
-          await savePeerSession(msg.uuid, roomId);
+          
           setIdentityVerified(true);
+          
           // START TOFU ONLY AFTER IDENTITY IS VERIFIED
-          if (securityPayload?.secret) {
-            startTOFUVerification();
-          }
+          // Small delay to ensure state is updated
+          setTimeout(() => {
+            if (securityPayload?.secret && !tofuStartedRef.current) {
+              startTOFUVerification();
+            }
+          }, 50);
           break;
         }
         case 'tofu-challenge':
@@ -376,6 +410,12 @@ export default function Room() {
           setTofuVerified(true);
           setVerificationStatus('verified');
           addLog('TOFU verified!', 'success');
+          // Process any pending binary data that was queued during verification
+          if (pendingBinaryRef.current && chunkMetaQueueRef.current.length > 0) {
+            const binary = pendingBinaryRef.current;
+            pendingBinaryRef.current = null;
+            await processChunkWithMeta(binary);
+          }
           break;
         case 'file-metadata':
           await handleFileMetadata(msg);
@@ -428,6 +468,13 @@ export default function Room() {
         sendJSON({ type: 'tofu-response', signature: response, challenge: msg.challenge });
         setTofuVerified(true);
         setVerificationStatus('verified');
+        
+        // Process any pending binary data
+        if (pendingBinaryRef.current && chunkMetaQueueRef.current.length > 0) {
+          const binary = pendingBinaryRef.current;
+          pendingBinaryRef.current = null;
+          await processChunkWithMeta(binary);
+        }
       } else {
         setVerificationStatus('failed');
         addLog('Challenge invalid!', 'error');
@@ -449,12 +496,20 @@ export default function Room() {
         sendJSON({ type: 'tofu-verified' });
         setTofuVerified(true);
         setVerificationStatus('verified');
+        
+        // Process any pending binary data
+        if (pendingBinaryRef.current && chunkMetaQueueRef.current.length > 0) {
+          const binary = pendingBinaryRef.current;
+          pendingBinaryRef.current = null;
+          await processChunkWithMeta(binary);
+        }
       } else {
         setVerificationStatus('failed');
         addLog('Peer verification failed!', 'error');
       }
     } catch (err) {
-      setVerificationStatus('failed', err);
+      setVerificationStatus('failed');
+      addLog(`TOFU response error: ${err.message}`, 'error');
     }
   };
 

@@ -39,48 +39,67 @@ async function clearOldSessions() {
 
 // 3. Save Peer Session (Scoped by Room ID)
 export async function savePeerSession(peerUuid, roomId) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    const store = tx.objectStore(STORE_NAME);
-    
-    // We use RoomID as the primary key to allow "Scoped" history
-    // If I join Room B, I shouldn't resume Room A's transfer
-    store.put({ 
-      roomId: roomId,
-      peerUuid: peerUuid, 
-      lastConnected: Date.now() 
-    });
+  if (!peerUuid || !roomId) {
+    console.warn('[Identity] Invalid peerUuid or roomId');
+    return;
+  }
+  
+  try {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      
+      // We use RoomID as the primary key to allow "Scoped" history
+      // If I join Room B, I shouldn't resume Room A's transfer
+      store.put({ 
+        roomId: roomId,
+        peerUuid: peerUuid, 
+        lastConnected: Date.now() 
+      });
 
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (err) {
+    console.error('[Identity] Failed to save peer session:', err);
+    // Don't throw - this is not critical functionality
+  }
 }
 
 // 4. Verify Peer
 export async function verifyPeer(peerUuid, currentRoomId) {
-  const db = await openDB();
-  return new Promise((resolve) => {
-    const tx = db.transaction(STORE_NAME, 'readonly');
-    const store = tx.objectStore(STORE_NAME);
-    
-    // Look up by RoomID (Current Context)
-    const request = store.get(currentRoomId);
-
-    request.onsuccess = () => {
-      const record = request.result;
+  if (!peerUuid || !currentRoomId) {
+    return false;
+  }
+  
+  try {
+    const db = await openDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
       
-      // Verification:
-      // 1. Do we have a record for this ROOM?
-      // 2. Is the user the SAME as before?
-      if (record && record.peerUuid === peerUuid) {
-        resolve(true); // Verified: Resume allowed
-      } else {
-        resolve(false); // New session or different user
-      }
-    };
-    request.onerror = () => resolve(false);
-  });
+      // Look up by RoomID (Current Context)
+      const request = store.get(currentRoomId);
+
+      request.onsuccess = () => {
+        const record = request.result;
+        
+        // Verification:
+        // 1. Do we have a record for this ROOM?
+        // 2. Is the user the SAME as before?
+        if (record && record.peerUuid === peerUuid) {
+          resolve(true); // Verified: Resume allowed
+        } else {
+          resolve(false); // New session or different user
+        }
+      };
+      request.onerror = () => resolve(false);
+    });
+  } catch (err) {
+    console.error('[Identity] Failed to verify peer:', err);
+    return false;
+  }
 }
 
 // Helper to open DB (Reusing your existing pattern logic)
