@@ -1,3 +1,5 @@
+import logger from './logger.js';
+
 let monitorInterval = null;
 
 /**
@@ -41,7 +43,7 @@ function startHealthMonitoring(pc, onStats) {
       }
 
     } catch (err) {
-      console.error("Stats monitoring error:", err);
+      logger.error("Stats monitoring error:", err);
     }
   }, 1000);
 }

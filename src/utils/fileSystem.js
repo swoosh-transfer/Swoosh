@@ -1,5 +1,7 @@
 // File System API helper: Direct file writing with security and error handling
 // Using sequential append writes to avoid "state cached in an interface object" errors
+import logger from './logger.js';
+
 const CHUNK_SIZE = 64 * 1024; // 64KB - matches ChunkingEngine
 
 // Store for active file handles during transfer
@@ -230,7 +232,7 @@ export async function completeTransfer(transferId) {
 
     if (!isTransferComplete(transferId)) {
       const missing = transfer.totalChunks - progress.written;
-      console.warn(`Transfer incomplete: ${missing} chunks missing, completing anyway`);
+      logger.warn(`Transfer incomplete: ${missing} chunks missing, completing anyway`);
     }
     
     // Close writable stream safely
@@ -255,7 +257,7 @@ export async function completeTransfer(transferId) {
     try {
       await transfer.writable.abort();
     } catch (abortError) {
-      console.warn('Error aborting writable during cleanup:', abortError);
+      logger.warn('Error aborting writable during cleanup:', abortError);
     }
     activeTransfers.delete(transferId);
     throw error;
@@ -295,7 +297,7 @@ export async function cancelTransfer(transferId) {
       await transfer.writable.abort();
     }
   } catch (error) {
-    console.warn('Error during transfer cancellation:', error);
+    logger.warn('Error during transfer cancellation:', error);
   } finally {
     activeTransfers.delete(transferId);
   }

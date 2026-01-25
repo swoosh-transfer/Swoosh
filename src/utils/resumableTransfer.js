@@ -13,6 +13,7 @@ import {
   deleteChunksByTransfer,
   deleteTransferMeta
 } from './indexedDB.js';
+import logger from './logger.js';
 
 // Transfer states
 export const TransferState = {
@@ -96,7 +97,7 @@ class ResumableTransferManager {
       this.transferCallbacks.set(transferId, { onPause, onResume, onCancel });
     }
 
-    console.log(`[ResumableTransfer] Registered ${role} transfer: ${transferId}`);
+    logger.log(`[ResumableTransfer] Registered ${role} transfer: ${transferId}`);
     return transferMeta;
   }
 
@@ -112,7 +113,7 @@ class ResumableTransferManager {
     }
 
     if (meta.status === TransferState.PAUSED) {
-      console.log(`[ResumableTransfer] Transfer ${transferId} already paused`);
+      logger.log(`[ResumableTransfer] Transfer ${transferId} already paused`);
       return meta;
     }
 
@@ -143,7 +144,7 @@ class ResumableTransferManager {
       await callbacks.onPause(pauseState);
     }
 
-    console.log(`[ResumableTransfer] Paused transfer: ${transferId} at chunk ${meta.lastChunkIndex}`);
+    logger.log(`[ResumableTransfer] Paused transfer: ${transferId} at chunk ${meta.lastChunkIndex}`);
     return pauseState;
   }
 
@@ -211,7 +212,7 @@ class ResumableTransferManager {
       await callbacks.onResume(resumeState);
     }
 
-    console.log(`[ResumableTransfer] Resuming transfer: ${transferId} from chunk ${resumeState.resumeFromChunk}`);
+    logger.log(`[ResumableTransfer] Resuming transfer: ${transferId} from chunk ${resumeState.resumeFromChunk}`);
     return resumeState;
   }
 
@@ -249,7 +250,7 @@ class ResumableTransferManager {
     this.fileReferences.delete(transferId);
     this.resumePromises.delete(transferId);
 
-    console.log(`[ResumableTransfer] Completed transfer: ${transferId}`);
+    logger.log(`[ResumableTransfer] Completed transfer: ${transferId}`);
   }
 
   /**
@@ -280,7 +281,7 @@ class ResumableTransferManager {
       await deleteTransferMeta(transferId);
     }
 
-    console.log(`[ResumableTransfer] Cancelled transfer: ${transferId}`);
+    logger.log(`[ResumableTransfer] Cancelled transfer: ${transferId}`);
   }
 
   /**
@@ -328,7 +329,7 @@ class ResumableTransferManager {
       };
     }));
 
-    console.log(`[ResumableTransfer] Found ${enriched.length} recoverable transfers`);
+    logger.log(`[ResumableTransfer] Found ${enriched.length} recoverable transfers`);
     return enriched;
   }
 
@@ -350,7 +351,7 @@ class ResumableTransferManager {
       await deleteTransferMeta(transfer.transferId);
     }
 
-    console.log(`[ResumableTransfer] Cleaned up ${toCleanup.length} old transfers`);
+    logger.log(`[ResumableTransfer] Cleaned up ${toCleanup.length} old transfers`);
     return toCleanup.length;
   }
 
@@ -368,14 +369,14 @@ class ResumableTransferManager {
       async shouldContinue() {
         // Check if paused
         if (self.isPaused(transferId)) {
-          console.log(`[ResumableTransfer] Transfer ${transferId} is paused, waiting...`);
+          logger.log(`[ResumableTransfer] Transfer ${transferId} is paused, waiting...`);
           
           // Wait for resume
           await new Promise((resolve) => {
             self.resumePromises.set(transferId, resolve);
           });
           
-          console.log(`[ResumableTransfer] Transfer ${transferId} resumed`);
+          logger.log(`[ResumableTransfer] Transfer ${transferId} resumed`);
         }
         
         // Check if cancelled

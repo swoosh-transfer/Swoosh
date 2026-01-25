@@ -3,13 +3,14 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
 import { initializeDatabase } from './utils/indexedDB.js'
+import logger from './utils/logger.js'
 
 // Initialize IndexedDB at app startup
 initializeDatabase().then((result) => {
   if (result.success) {
-    console.log('[App] IndexedDB ready with stores:', result.stores);
+    logger.log('[App] IndexedDB ready with stores:', result.stores);
   } else {
-    console.error('[App] IndexedDB initialization failed:', result.error);
+    logger.error('[App] IndexedDB initialization failed:', result.error);
   }
 });
 

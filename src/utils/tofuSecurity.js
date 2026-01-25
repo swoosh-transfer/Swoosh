@@ -3,6 +3,8 @@
  * Provides cryptographically secure peer-to-peer authentication and verification
  */
 
+import logger from './logger.js';
+
 /**
  * Generate a cryptographically secure 32-byte random secret
  * @returns {Promise<string>} Base64-encoded secret
@@ -62,7 +64,7 @@ export function parseSecurityPayload(encodedPayload) {
     
     return payload;
   } catch (error) {
-    console.error('Failed to parse security payload:', error);
+    logger.error('Failed to parse security payload:', error);
     return null;
   }
 }
@@ -101,7 +103,7 @@ export function extractSecurityFromURL(url) {
     
     return parseSecurityPayload(fragment);
   } catch (error) {
-    console.error('Failed to extract security from URL:', error);
+    logger.error('Failed to extract security from URL:', error);
     return null;
   }
 }
@@ -188,7 +190,7 @@ export async function verifyChallenge(challenge, signature, hmacKey) {
     
     return await crypto.subtle.verify('HMAC', hmacKey, signatureBytes, challengeBytes);
   } catch (error) {
-    console.error('Challenge verification failed:', error);
+    logger.error('Challenge verification failed:', error);
     return false;
   }
 }
@@ -273,7 +275,7 @@ export class SecuritySession {
       };
       
     } catch (error) {
-      console.error('Mutual verification failed:', error);
+      logger.error('Mutual verification failed:', error);
       this.verified = false;
       return { verified: false, error: error.message };
     }

@@ -5,6 +5,7 @@
  */
 
 import { ensureDB } from './indexedDB.js';
+import logger from './logger.js';
 
 const STORE_NAME = 'sessions';
 
@@ -31,9 +32,9 @@ async function clearOldSessions() {
     const tx = db.transaction(STORE_NAME, 'readwrite');
     const store = tx.objectStore(STORE_NAME);
     store.clear(); 
-    console.log('[Identity] Cleared stale session data');
+    logger.log('[Identity] Cleared stale session data');
   } catch (e) {
-    console.error('[Identity] Error clearing sessions:', e);
+    logger.error('[Identity] Error clearing sessions:', e);
     // Ignore error if store doesn't exist yet
   }
 }
@@ -41,7 +42,7 @@ async function clearOldSessions() {
 // 3. Save Peer Session (Scoped by Room ID)
 export async function savePeerSession(peerUuid, roomId) {
   if (!peerUuid || !roomId) {
-    console.warn('[Identity] Invalid peerUuid or roomId');
+    logger.warn('[Identity] Invalid peerUuid or roomId');
     return;
   }
   
@@ -63,7 +64,7 @@ export async function savePeerSession(peerUuid, roomId) {
       tx.onerror = () => reject(tx.error);
     });
   } catch (err) {
-    console.error('[Identity] Failed to save peer session:', err);
+    logger.error('[Identity] Failed to save peer session:', err);
     // Don't throw - this is not critical functionality
   }
 }
@@ -98,7 +99,7 @@ export async function verifyPeer(peerUuid, currentRoomId) {
       request.onerror = () => resolve(false);
     });
   } catch (err) {
-    console.error('[Identity] Failed to verify peer:', err);
+    logger.error('[Identity] Failed to verify peer:', err);
     return false;
   }
 }

@@ -1,4 +1,6 @@
 // Minimal IndexedDB helper for transfer metadata (no chunk storage)
+import logger from './logger.js';
+
 const DB_NAME = 'P2PFileTransfer';
 const DB_VERSION = 4; // Bumped to force re-creation of all stores
 
@@ -19,7 +21,7 @@ async function openDB() {
       return dbInstance;
     }
     // Stores missing - need to recreate
-    console.warn('[IndexedDB] Missing stores detected, recreating database...');
+    logger.warn('[IndexedDB] Missing stores detected, recreating database...');
     dbInstance.close();
     dbInstance = null;
   }
@@ -45,25 +47,25 @@ async function initDB() {
 
     req.onupgradeneeded = (event) => {
       const db = event.target.result;
-      console.log('[IndexedDB] Upgrading database to version', DB_VERSION);
+      logger.log('[IndexedDB] Upgrading database to version', DB_VERSION);
       
       // Create all required stores if they don't exist
       if (!db.objectStoreNames.contains('transfers')) {
-        console.log('[IndexedDB] Creating transfers store');
+        logger.log('[IndexedDB] Creating transfers store');
         db.createObjectStore('transfers', { keyPath: 'transferId' });
       }
       if (!db.objectStoreNames.contains('files')) {
-        console.log('[IndexedDB] Creating files store');
+        logger.log('[IndexedDB] Creating files store');
         db.createObjectStore('files', { keyPath: 'fileId' });
       }
       if (!db.objectStoreNames.contains('chunks')) {
-        console.log('[IndexedDB] Creating chunks store');
+        logger.log('[IndexedDB] Creating chunks store');
         const chunkStore = db.createObjectStore('chunks', { keyPath: ['transferId', 'chunkIndex'] });
         chunkStore.createIndex('transferId', 'transferId', { unique: false });
         chunkStore.createIndex('status', 'status', { unique: false });
       }
       if (!db.objectStoreNames.contains('sessions')) {
-        console.log('[IndexedDB] Creating sessions store');
+        logger.log('[IndexedDB] Creating sessions store');
         db.createObjectStore('sessions', { keyPath: 'roomId' });
       }
     };
@@ -77,14 +79,14 @@ async function initDB() {
       );
       
       if (missingStores.length > 0) {
-        console.error('[IndexedDB] Missing stores after open:', missingStores);
+        logger.error('[IndexedDB] Missing stores after open:', missingStores);
         db.close();
         
         // Delete and retry
-        console.log('[IndexedDB] Deleting corrupt database...');
+        logger.log('[IndexedDB] Deleting corrupt database...');
         const deleteReq = window.indexedDB.deleteDatabase(DB_NAME);
         deleteReq.onsuccess = () => {
-          console.log('[IndexedDB] Database deleted, recreating...');
+          logger.log('[IndexedDB] Database deleted, recreating...');
           // Retry opening
           initDB().then(resolve).catch(reject);
         };
@@ -96,25 +98,25 @@ async function initDB() {
       
       // Handle unexpected close
       db.onclose = () => {
-        console.warn('[IndexedDB] Database connection closed unexpectedly');
+        logger.warn('[IndexedDB] Database connection closed unexpectedly');
         dbInstance = null;
       };
       
       db.onerror = (event) => {
-        console.error('[IndexedDB] Database error:', event.target.error);
+        logger.error('[IndexedDB] Database error:', event.target.error);
       };
       
-      console.log('[IndexedDB] Database ready with stores:', [...db.objectStoreNames]);
+      logger.log('[IndexedDB] Database ready with stores:', [...db.objectStoreNames]);
       resolve(db);
     };
     
     req.onerror = () => {
-      console.error('[IndexedDB] Failed to open database:', req.error);
+      logger.error('[IndexedDB] Failed to open database:', req.error);
       reject(req.error);
     };
     
     req.onblocked = () => {
-      console.warn('[IndexedDB] Database blocked - close other tabs');
+      logger.warn('[IndexedDB] Database blocked - close other tabs');
     };
   });
 }
@@ -161,7 +163,7 @@ async function withStore(storeName, mode, callback) {
       tx.onabort = () => reject(new Error('Transaction aborted'));
     } catch (err) {
       // If transaction fails, invalidate db instance
-      console.error('[IndexedDB] Transaction creation failed:', err);
+      logger.error('[IndexedDB] Transaction creation failed:', err);
       dbInstance = null;
       reject(err);
     }
@@ -286,10 +288,10 @@ export async function deleteChunksByTransfer(transferId) {
 export async function initializeDatabase() {
   try {
     const db = await ensureDB();
-    console.log('[IndexedDB] Database initialized successfully');
+    logger.log('[IndexedDB] Database initialized successfully');
     return { success: true, stores: [...db.objectStoreNames] };
   } catch (err) {
-    console.error('[IndexedDB] Database initialization failed:', err);
+    logger.error('[IndexedDB] Database initialization failed:', err);
     return { success: false, error: err.message };
   }
 }
@@ -304,11 +306,44 @@ export async function resetDatabase() {
   return new Promise((resolve, reject) => {
     const req = window.indexedDB.deleteDatabase(DB_NAME);
     req.onsuccess = () => {
-      console.log('[IndexedDB] Database deleted');
       // Reinitialize
       initializeDatabase().then(resolve).catch(reject);
     };
     req.onerror = () => reject(req.error);
+  });
+}
+
+/**
+ * Clean up all data for a completed transfer
+ * Removes transfer metadata, file metadata, and all chunk metadata
+ */
+export async function cleanupTransferData(transferId) {
+  try {
+    // Delete chunks first (most data)
+    await deleteChunksByTransfer(transferId);
+    
+    // Delete transfer metadata
+    await deleteTransferMeta(transferId);
+    
+    // Delete file metadata (use transferId as fileId)
+    await withStore('files', 'readwrite', (store) => {
+      store.delete(transferId);
+      return true;
+    });
+    
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Delete file metadata by ID
+ */
+export async function deleteFileMeta(fileId) {
+  return withStore('files', 'readwrite', (store) => {
+    store.delete(fileId);
+    return true;
   });
 }
 
@@ -324,8 +359,10 @@ export default {
   listTransfers,
   saveFileMeta,
   getFileMeta,
+  deleteFileMeta,
   saveChunkMeta,
   getChunkMeta,
   getChunksByTransfer,
   deleteChunksByTransfer,
+  cleanupTransferData,
 };

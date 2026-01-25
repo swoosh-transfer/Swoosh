@@ -4,6 +4,7 @@
  */
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import logger from '../utils/logger.js';
 
 // Zustand stores
 import { useRoomStore } from '../stores/roomStore';
@@ -16,14 +17,18 @@ import {
   getSocket,
   joinRoom,
   setupSignalingListeners,
-  waitForConnection
+  waitForConnection,
+  onReconnect,
+  offReconnect
 } from '../utils/signaling';
 import {
   initializePeerConnection,
   createOffer,
   handleOffer,
   handleAnswer,
-  handleIceCandidate
+  handleIceCandidate,
+  setPolite,
+  getConnectionState
 } from '../utils/p2pManager';
 import {
   deriveHMACKey,
@@ -34,6 +39,7 @@ import {
 import { ChunkingEngine } from '../utils/chunkingSystem';
 import { fileReceiver } from '../utils/fileReceiver';
 import { getQRCodeUrl } from '../utils/qrCode';
+import { cleanupTransferData } from '../utils/indexedDB.js';
 
 // UI Components
 import {
@@ -125,7 +131,7 @@ export default function Room() {
   const addLog = useCallback((message, type = 'info') => {
     const timestamp = new Date().toLocaleTimeString();
     setLogs(prev => [...prev.slice(-50), { timestamp, message, type }]);
-    console.log(`[Room] ${message}`);
+    logger.log(`[Room] ${message}`);
   }, []);
 
   // ============ DATA CHANNEL HELPERS ============
@@ -316,15 +322,46 @@ export default function Room() {
 
     // Initialize peer connection using existing p2pManager
     const pc = initializePeerConnection(socket, roomId, onChannelReady, onStateChange, onStats);
+    
+    // Set polite mode: joiner (receiver) is polite, host (sender) is impolite
+    // This implements "perfect negotiation" pattern to avoid offer collision
+    setPolite(!isHost);
 
     if (pc) {
       pc.oniceconnectionstatechange = () => {
         setConnInfo(prev => ({ ...prev, iceState: pc.iceConnectionState }));
+        
+        // Handle ICE connection failures
+        if (pc.iceConnectionState === 'failed') {
+          addLog('ICE connection failed, attempting restart...', 'warning');
+        }
       };
       pc.onsignalingstatechange = () => {
         setConnInfo(prev => ({ ...prev, signalingState: pc.signalingState }));
       };
     }
+
+    // Handle socket reconnection - re-initiate connection if needed
+    const handleReconnection = async (rejoinedRoomId) => {
+      addLog('Socket reconnected, re-establishing connection...', 'info');
+      
+      // Reset state for reconnection
+      tofuStartedRef.current = false;
+      handshakeSentRef.current = false;
+      setTofuVerified(false);
+      setIdentityVerified(false);
+      
+      // If we're the host, create a new offer
+      if (isHost) {
+        addLog('Re-creating offer after reconnect...', 'info');
+        // Small delay to ensure peer is ready
+        setTimeout(async () => {
+          await createOffer(socket, roomId, onChannelReady);
+        }, 500);
+      }
+    };
+    
+    onReconnect(handleReconnection);
 
     // Setup signaling listeners using existing signaling.js
     setupSignalingListeners({
@@ -347,6 +384,11 @@ export default function Room() {
         await handleIceCandidate(candidate);
       },
     });
+    
+    // Cleanup reconnect listener on unmount
+    return () => {
+      offReconnect(handleReconnection);
+    };
   }, [roomId, isHost, securityPayload]);
 
   // ============ TOFU VERIFICATION (using existing tofuSecurity.js) ============
@@ -400,7 +442,7 @@ export default function Room() {
         // Allow binary data if TOFU is verified (identity is implicitly verified via TOFU)
         // This fixes race condition where identity check blocks valid chunks
         if (!tofuVerified && !identityVerified) {
-          console.warn('[Room] Queueing binary data: Verification pending');
+          logger.warn('[Room] Queueing binary data: Verification pending');
           // Store for later processing instead of dropping
           if (!pendingBinaryRef.current) {
             pendingBinaryRef.current = new Uint8Array(event.data);
@@ -430,7 +472,7 @@ export default function Room() {
             // Save this session for next time (reloads)
             await savePeerSession(msg.uuid, roomId);
           } catch (err) {
-            console.warn('[Room] Identity storage error:', err);
+            logger.warn('[Room] Identity storage error:', err);
             // Continue anyway - identity storage is not critical
           }
           
@@ -498,10 +540,10 @@ export default function Room() {
           handleRemoteCancel(msg.transferId);
           break;
         default:
-          console.log('[Room] Unknown message:', msg.type);
+          logger.log('[Room] Unknown message:', msg.type);
       }
     } catch (err) {
-      console.error('[Room] Message error:', err);
+      logger.error('[Room] Message error:', err);
     }
   };
 
@@ -647,6 +689,14 @@ export default function Room() {
       setTransferState('completed');
       setTransferProgress(100);
       addLog('Transfer complete!', 'success');
+      
+      // Clean up IndexedDB data for completed transfer (sender side)
+      try {
+        await cleanupTransferData(transferIdRef.current);
+        logger.log('[Room] IndexedDB cleanup completed for sender transfer:', transferIdRef.current);
+      } catch (cleanupErr) {
+        logger.warn('[Room] IndexedDB cleanup failed:', cleanupErr);
+      }
 
     } catch (err) {
       setTransferState('error');
@@ -788,6 +838,14 @@ export default function Room() {
           blob: result.blob,
         });
         addLog('File saved!', 'success');
+        
+        // Clean up IndexedDB data for completed transfer
+        try {
+          await cleanupTransferData(transferIdRef.current);
+          logger.log('[Room] IndexedDB cleanup completed for transfer:', transferIdRef.current);
+        } catch (cleanupErr) {
+          logger.warn('[Room] IndexedDB cleanup failed:', cleanupErr);
+        }
       } else if (result.missingChunks?.length > 0) {
         addLog(`Missing ${result.missingChunks.length} chunks, requesting retransmit...`, 'warning');
         sendJSON({ type: 'request-chunks', chunks: result.missingChunks });

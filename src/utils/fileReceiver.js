@@ -11,6 +11,7 @@ import {
   TransferState, 
   TransferRole 
 } from './resumableTransfer.js';
+import logger from './logger.js';
 
 const CHUNK_SIZE = 64 * 1024; // 64KB chunks
 
@@ -40,7 +41,7 @@ export class FileReceiver {
         this.onPauseStateChange(transferId, true);
       }
       
-      console.log(`[FileReceiver] Paused transfer: ${transferId}`);
+      logger.log(`[FileReceiver] Paused transfer: ${transferId}`);
       return true;
     }
     return false;
@@ -65,7 +66,7 @@ export class FileReceiver {
         this.onPauseStateChange(transferId, false);
       }
       
-      console.log(`[FileReceiver] Resumed transfer: ${transferId}`);
+      logger.log(`[FileReceiver] Resumed transfer: ${transferId}`);
       return true;
     }
     return false;
@@ -159,20 +160,20 @@ export class FileReceiver {
         state.writable = writable;
         state.useFileSystemAPI = true;
         
-        console.log('[FileReceiver] File System API ready');
+        logger.log('[FileReceiver] File System API ready');
         return { success: true, method: 'filesystem' };
       } catch (err) {
         if (err.name === 'AbortError') {
           throw new Error('File save cancelled by user');
         }
-        console.warn('[FileReceiver] File System API failed:', err);
+        logger.warn('[FileReceiver] File System API failed:', err);
       }
     }
 
     // Fallback to in-memory
     state.useFileSystemAPI = false;
     state.memoryChunks = new Array(state.totalChunks).fill(null);
-    console.log('[FileReceiver] Using in-memory fallback');
+    logger.log('[FileReceiver] Using in-memory fallback');
     return { success: true, method: 'memory' };
   }
 
@@ -203,7 +204,7 @@ export class FileReceiver {
   async queueWrite(transferId, writeOperation) {
     const currentQueue = this.writeQueues.get(transferId) || Promise.resolve();
     const newQueue = currentQueue.then(writeOperation).catch(err => {
-      console.error('[FileReceiver] Queued write failed:', err);
+      logger.error('[FileReceiver] Queued write failed:', err);
       throw err;
     });
     this.writeQueues.set(transferId, newQueue);
@@ -256,7 +257,7 @@ export class FileReceiver {
   async receiveChunk(transferId, chunkMeta, chunkData) {
     const state = this.activeTransfers.get(transferId);
     if (!state) {
-      console.error('[FileReceiver] Transfer not found:', transferId);
+      logger.error('[FileReceiver] Transfer not found:', transferId);
       return { success: false, error: 'Transfer not found' };
     }
 
@@ -274,7 +275,7 @@ export class FileReceiver {
       const isValid = calculatedChecksum === checksum;
 
       if (!isValid) {
-        console.error(`[FileReceiver] Checksum mismatch for chunk ${chunkIndex}`);
+        logger.error(`[FileReceiver] Checksum mismatch for chunk ${chunkIndex}`);
         state.missingChunks.add(chunkIndex);
         
         // Store metadata for retry
@@ -350,7 +351,7 @@ export class FileReceiver {
 
       return { success: true, chunkIndex, progress };
     } catch (err) {
-      console.error('[FileReceiver] Chunk receive error:', err);
+      logger.error('[FileReceiver] Chunk receive error:', err);
       state.missingChunks.add(chunkIndex);
       return { success: false, error: err.message, chunkIndex };
     }
@@ -376,7 +377,7 @@ export class FileReceiver {
       // Flush any remaining pending chunks (write them even if out of order)
       const pending = this.pendingChunks.get(transferId);
       if (pending && pending.size > 0) {
-        console.warn(`[FileReceiver] Flushing ${pending.size} out-of-order chunks`);
+        logger.warn(`[FileReceiver] Flushing ${pending.size} out-of-order chunks`);
         // Sort by chunk index and write remaining
         const sortedChunks = [...pending.entries()].sort((a, b) => a[0] - b[0]);
         for (const [idx, data] of sortedChunks) {
@@ -391,7 +392,7 @@ export class FileReceiver {
       // Check for missing chunks
       const missingChunks = this.getMissingChunks(transferId);
       if (missingChunks.length > 0) {
-        console.warn(`[FileReceiver] Transfer has ${missingChunks.length} missing chunks`);
+        logger.warn(`[FileReceiver] Transfer has ${missingChunks.length} missing chunks`);
         // Still try to complete if we got most chunks
         if (missingChunks.length > state.totalChunks * 0.1) {
           return { 
@@ -436,7 +437,7 @@ export class FileReceiver {
         return { success: true, savedToFileSystem: false, url, blob };
       }
     } catch (err) {
-      console.error('[FileReceiver] Complete transfer error:', err);
+      logger.error('[FileReceiver] Complete transfer error:', err);
       return { success: false, error: err.message };
     } finally {
       // Cleanup
@@ -497,7 +498,7 @@ export class FileReceiver {
         await state.writable.abort();
       }
     } catch (err) {
-      console.error('[FileReceiver] Cancel error:', err);
+      logger.error('[FileReceiver] Cancel error:', err);
     }
 
     // Cancel in resumable manager

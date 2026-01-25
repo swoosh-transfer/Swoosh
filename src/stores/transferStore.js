@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import logger from '../utils/logger.js';
 
 /**
  * Transfer Store
@@ -128,7 +129,7 @@ export const useTransferStore = create(
       pauseTransfer: (transferId) => {
         const transfer = get().activeTransfers.find(t => t.id === transferId);
         if (!transfer || transfer.status !== 'active') {
-          console.warn(`Cannot pause transfer: ${transferId}`);
+          logger.warn(`Cannot pause transfer: ${transferId}`);
           return false;
         }
 
@@ -168,7 +169,7 @@ export const useTransferStore = create(
       resumeTransfer: (transferId) => {
         const transfer = get().activeTransfers.find(t => t.id === transferId);
         if (!transfer || transfer.status !== 'paused') {
-          console.warn(`Cannot resume transfer: ${transferId}`);
+          logger.warn(`Cannot resume transfer: ${transferId}`);
           return false;
         }
 
@@ -242,7 +243,7 @@ export const useTransferStore = create(
         const currentProgress = get().uploadProgress[transferId];
 
         if (!currentProgress) {
-          console.warn(`Upload progress not found for transfer: ${transferId}`);
+          logger.warn(`Upload progress not found for transfer: ${transferId}`);
           return;
         }
 
@@ -297,7 +298,7 @@ export const useTransferStore = create(
         const currentProgress = get().downloadProgress[transferId];
 
         if (!currentProgress) {
-          console.warn(`Download progress not found for transfer: ${transferId}`);
+          logger.warn(`Download progress not found for transfer: ${transferId}`);
           return;
         }
 
@@ -380,7 +381,7 @@ export const useTransferStore = create(
         const transfer = get().activeTransfers.find(t => t.id === transferId);
         
         if (!transfer) {
-          console.warn(`Transfer not found: ${transferId}`);
+          logger.warn(`Transfer not found: ${transferId}`);
           return false;
         }
 

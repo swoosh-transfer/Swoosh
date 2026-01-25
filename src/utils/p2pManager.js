@@ -1,14 +1,53 @@
 import { startHealthMonitoring, stopHealthMonitoring } from './connectionMonitor';
+import logger from './logger.js';
 
 let peerConnection = null;
 let dataChannel = null;
 let remoteDescriptionSet = false;
 let iceCandidateQueue = [];
+let isNegotiating = false; // Track if we're in the middle of negotiation
+let isPolite = false; // For perfect negotiation pattern
+let makingOffer = false; // Track if we're creating an offer
 
 const rtcConfig = {
-  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+  ],
   iceCandidatePoolSize: 10
 };
+
+/**
+ * Set whether this peer is polite (for perfect negotiation)
+ * The joiner/receiver should be polite, host/sender should be impolite
+ */
+export function setPolite(polite) {
+  isPolite = polite;
+  logger.log('[P2P] Set polite mode:', polite);
+}
+
+/**
+ * Check if peer connection is in a valid state for negotiation
+ */
+export function canNegotiate() {
+  if (!peerConnection) return false;
+  const state = peerConnection.signalingState;
+  return state === 'stable' || state === 'have-local-offer' || state === 'have-remote-offer';
+}
+
+/**
+ * Get current connection state
+ */
+export function getConnectionState() {
+  return {
+    peerConnection: peerConnection?.connectionState,
+    signaling: peerConnection?.signalingState,
+    ice: peerConnection?.iceConnectionState,
+    dataChannel: dataChannel?.readyState,
+    isNegotiating,
+    remoteDescriptionSet
+  };
+}
 
 /**
  * Initializes the RTCPeerConnection and sets up event listeners.
@@ -27,6 +66,8 @@ export function initializePeerConnection(socket, roomId, onChannelReady, onState
   
   remoteDescriptionSet = false;
   iceCandidateQueue = [];
+  isNegotiating = false;
+  makingOffer = false;
 
   peerConnection = new RTCPeerConnection(rtcConfig);
 
@@ -70,31 +111,60 @@ export function initializePeerConnection(socket, roomId, onChannelReady, onState
 export async function createOffer(socket, roomId, onChannelReady) {
   if (!peerConnection) return;
 
+  // Check if we're already negotiating
+  if (makingOffer || peerConnection.signalingState !== 'stable') {
+    logger.log('[P2P] Skipping offer creation - already negotiating or not stable');
+    return;
+  }
+
   try {
+    makingOffer = true;
+    isNegotiating = true;
+    
     // Create reliable and ordered data channel for file transfer
-    dataChannel = peerConnection.createDataChannel("file-transfer", { 
-      reliable: true, 
-      ordered: true 
-    });
-    setupDataChannel(dataChannel, onChannelReady);
+    if (!dataChannel || dataChannel.readyState === 'closed') {
+      dataChannel = peerConnection.createDataChannel("file-transfer", { 
+        reliable: true, 
+        ordered: true 
+      });
+      setupDataChannel(dataChannel, onChannelReady);
+    }
 
     const offer = await peerConnection.createOffer();
     await peerConnection.setLocalDescription(offer);
 
     socket.emit('offer', { offer, roomId });
+    logger.log('[P2P] Offer sent');
   } catch (err) {
-    console.error("Error creating offer:", err);
+    logger.error("Error creating offer:", err);
+  } finally {
+    makingOffer = false;
   }
 }
 
 /**
  * Handles an incoming Offer (Callee role).
- * Sets remote description and sends an Answer.
+ * Implements perfect negotiation pattern to handle glare.
  */
 export async function handleOffer(offer, socket, roomId) {
   if (!peerConnection) return;
 
   try {
+    // Perfect negotiation: Handle offer collision (glare)
+    const offerCollision = makingOffer || peerConnection.signalingState !== 'stable';
+    
+    if (offerCollision) {
+      // If we're impolite, ignore the incoming offer
+      if (!isPolite) {
+        logger.log('[P2P] Ignoring offer collision (impolite peer)');
+        return;
+      }
+      // If we're polite, rollback our offer and accept theirs
+      logger.log('[P2P] Rolling back local offer (polite peer)');
+      await peerConnection.setLocalDescription({ type: 'rollback' });
+    }
+    
+    isNegotiating = true;
     await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
     remoteDescriptionSet = true;
     processIceQueue(); // Flush buffered candidates
@@ -103,8 +173,11 @@ export async function handleOffer(offer, socket, roomId) {
     await peerConnection.setLocalDescription(answer);
 
     socket.emit('answer', { answer, roomId });
+    logger.log('[P2P] Answer sent');
+    isNegotiating = false;
   } catch (err) {
-    console.error("Error handling offer:", err);
+    logger.error("Error handling offer:", err);
+    isNegotiating = false;
   }
 }
 
@@ -113,12 +186,22 @@ export async function handleOffer(offer, socket, roomId) {
  */
 export async function handleAnswer(answer) {
   if (!peerConnection) return;
+  
+  // Ignore answer if we're not expecting one
+  if (peerConnection.signalingState !== 'have-local-offer') {
+    logger.log('[P2P] Ignoring unexpected answer, state:', peerConnection.signalingState);
+    return;
+  }
+  
   try {
     await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
     remoteDescriptionSet = true;
+    isNegotiating = false;
     processIceQueue();
+    logger.log('[P2P] Answer processed successfully');
   } catch (err) {
-    console.error("Error handling answer:", err);
+    logger.error("Error handling answer:", err);
+    isNegotiating = false;
   }
 }
 
@@ -135,7 +218,7 @@ export async function handleIceCandidate(candidate) {
     try {
       await peerConnection.addIceCandidate(ice);
     } catch (e) {
-      console.error("Error adding ICE candidate:", e);
+      logger.error("Error adding ICE candidate:", e);
     }
   } else {
     // Buffer candidate until remote description is available
@@ -148,7 +231,7 @@ function processIceQueue() {
   if (!peerConnection) return;
   while (iceCandidateQueue.length > 0) {
     const candidate = iceCandidateQueue.shift();
-    peerConnection.addIceCandidate(candidate).catch(e => console.error("Queue ICE error:", e));
+    peerConnection.addIceCandidate(candidate).catch(e => logger.error("Queue ICE error:", e));
   }
 }
 
@@ -171,7 +254,7 @@ async function handleAutoReconnection(socket, roomId) {
        await peerConnection.setLocalDescription(offer);
        socket.emit('offer', { offer, roomId });
      } catch (err) {
-       console.error("Reconnection failed:", err);
+       logger.error("Reconnection failed:", err);
      }
   }
 }

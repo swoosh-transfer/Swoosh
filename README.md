@@ -1,8 +1,19 @@
-# P2P File Transfer
+# Swoosh 💨
+
+**Swoosh your files instantly, peer-to-peer.**
 
 A secure, browser-based peer-to-peer file transfer application capable of handling **50GB+ files** using WebRTC technology. Transfer files directly between devices without server storage - your data never touches our servers.
 
-![P2P File Transfer](https://img.shields.io/badge/WebRTC-Enabled-blue) ![Security](https://img.shields.io/badge/Security-TOFU-green) ![Large Files](https://img.shields.io/badge/Files-50GB+-orange)
+![WebRTC](https://img.shields.io/badge/WebRTC-Enabled-blue) ![Security](https://img.shields.io/badge/Security-TOFU-green) ![Large Files](https://img.shields.io/badge/Files-50GB+-orange) ![License](https://img.shields.io/badge/License-MIT-yellow)
+
+## 🌐 Live Deployment
+
+Experience Swoosh now:
+
+- **Production**: [Add your deployment URL here]
+- **Demo**: [Add your demo URL here]
+
+> 🔗 Share the deployment link with your peer to start swooshing files instantly!
 
 ## ✨ Features
 
@@ -53,8 +64,8 @@ A secure, browser-based peer-to-peer file transfer application capable of handli
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/p2p-file-transfer.git
-cd p2p-file-transfer
+git clone https://github.com/your-username/swoosh.git
+cd swoosh
 
 # Install dependencies
 npm install
@@ -207,6 +218,11 @@ MIT License - See [LICENSE](LICENSE) for details.
 
 Contributions are welcome! Please read our contributing guidelines before submitting PRs.
 
+## 👥 Team
+
+Built during DUHacks hackathon.
+
 ---
 
-**Built with ❤️ for secure, serverless file sharing**
+**Swoosh** - Built with ❤️ for secure, serverless file sharing  
+*Swoosh it. Share it. Simple.*

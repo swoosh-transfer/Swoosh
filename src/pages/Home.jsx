@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useRoomStore } from '../stores/roomStore';
 import { initSocket, createRoom } from '../utils/signaling';
 import { createTOFUSetup } from '../utils/tofuSecurity';
+import logger from '../utils/logger.js';
 
 export default function Home() {
   const navigate = useNavigate();
@@ -60,7 +61,7 @@ export default function Home() {
       }))}`);
       
     } catch (err) {
-      console.error('Failed to start transfer:', err);
+      logger.error('Failed to start transfer:', err);
       setError(err.message || 'Failed to create room');
     } finally {
       setIsLoading(false);

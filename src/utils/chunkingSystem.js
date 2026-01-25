@@ -10,6 +10,7 @@ import {
   TransferState, 
   TransferRole 
 } from './resumableTransfer.js';
+import logger from './logger.js';
 
 const INITIAL_CHUNK_SIZE = 16 * 1024; // 16KB - WebRTC DataChannel limit
 const STORAGE_BUFFER_SIZE = 64 * 1024; // 64KB storage chunks for IndexedDB
@@ -35,7 +36,7 @@ class ChunkingEngine {
     if (controller && !controller.isPaused) {
       controller.isPaused = true;
       await resumableTransferManager.pauseTransfer(transferId);
-      console.log(`[ChunkingEngine] Paused transfer: ${transferId}`);
+      logger.log(`[ChunkingEngine] Paused transfer: ${transferId}`);
       return true;
     }
     return false;
@@ -55,7 +56,7 @@ class ChunkingEngine {
       }
       await resumableTransferManager.resumeTransfer(transferId);
       resumableTransferManager.signalResume(transferId);
-      console.log(`[ChunkingEngine] Resumed transfer: ${transferId}`);
+      logger.log(`[ChunkingEngine] Resumed transfer: ${transferId}`);
       return true;
     }
     return false;
@@ -140,7 +141,7 @@ class ChunkingEngine {
         skipped += chunk.length;
       }
       bytesRead = skipped;
-      console.log(`[ChunkingEngine] Resuming from chunk ${resumeFromChunk}, skipped ${skipped} bytes`);
+      logger.log(`[ChunkingEngine] Resuming from chunk ${resumeFromChunk}, skipped ${skipped} bytes`);
     }
     
     // Initialize chunking state
@@ -175,7 +176,7 @@ class ChunkingEngine {
         // Check for pause
         const shouldContinue = await this._waitIfPaused(transferId);
         if (!shouldContinue) {
-          console.log(`[ChunkingEngine] Transfer ${transferId} cancelled`);
+          logger.log(`[ChunkingEngine] Transfer ${transferId} cancelled`);
           break;
         }
 
@@ -218,7 +219,7 @@ class ChunkingEngine {
       }
 
     } catch (error) {
-      console.error('Chunking error:', error);
+      logger.error('Chunking error:', error);
       throw new Error(`File chunking failed: ${error.message}`);
     } finally {
       reader.releaseLock();
@@ -561,7 +562,7 @@ class AssemblyEngine {
     // Mark as complete
     assemblyState.isComplete = true;
 
-    console.log(`File assembly complete: ${result.fileSize} bytes received in ${result.duration}ms`);
+    logger.log(`File assembly complete: ${result.fileSize} bytes received in ${result.duration}ms`);
     return result;
   }
 

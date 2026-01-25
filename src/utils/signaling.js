@@ -1,4 +1,5 @@
 import { io } from 'socket.io-client';
+import logger from './logger.js';
 
 const SIGNALING_SERVER = import.meta.env.VITE_SIGNALING_SERVER || 'http://localhost:5000';
 
@@ -6,6 +7,25 @@ let socket = null;
 let roomErrorHandler = null;
 let isJoining = false; // Track if currently joining to prevent duplicates
 let currentRoom = null; // Track current room
+let reconnectCallbacks = []; // Callbacks to call on reconnection
+
+/**
+ * Register a callback to be called when socket reconnects
+ * @param {Function} callback - Function to call on reconnect
+ */
+export function onReconnect(callback) {
+  if (typeof callback === 'function') {
+    reconnectCallbacks.push(callback);
+  }
+}
+
+/**
+ * Remove a reconnect callback
+ * @param {Function} callback - Function to remove
+ */
+export function offReconnect(callback) {
+  reconnectCallbacks = reconnectCallbacks.filter(cb => cb !== callback);
+}
 
 /**
  * Initialize socket connection to signaling server
@@ -24,24 +44,73 @@ export function initSocket() {
   socket = io(SIGNALING_SERVER, {
     transports: ['websocket'],
     reconnection: true,
-    reconnectionAttempts: 5,
+    reconnectionAttempts: 10,
     reconnectionDelay: 1000,
+    reconnectionDelayMax: 5000,
+    timeout: 20000,
   });
 
   socket.on('connect', () => {
-    console.log('[Socket] Connected:', socket.id);
+    logger.log('[Socket] Connected:', socket.id);
+    
+    // Auto-rejoin room if we were in one
+    if (currentRoom) {
+      logger.log('[Socket] Reconnected, rejoining room:', currentRoom);
+      const roomToRejoin = currentRoom;
+      currentRoom = null; // Reset so joinRoom doesn't short-circuit
+      isJoining = false;
+      
+      // Rejoin the room
+      joinRoom(roomToRejoin).then(() => {
+        logger.log('[Socket] Successfully rejoined room after reconnect');
+        // Notify all callbacks
+        reconnectCallbacks.forEach(cb => {
+          try {
+            cb(roomToRejoin);
+          } catch (e) {
+            logger.error('[Socket] Reconnect callback error:', e);
+          }
+        });
+      }).catch(err => {
+        logger.error('[Socket] Failed to rejoin room:', err);
+      });
+    }
   });
 
   socket.on('disconnect', (reason) => {
-    console.log('[Socket] Disconnected:', reason);
-    currentRoom = null; // Reset room tracking on disconnect
+    logger.log('[Socket] Disconnected:', reason);
+    // Don't reset currentRoom here - we need it for auto-rejoin
+    isJoining = false;
   });
 
   socket.on('connect_error', (error) => {
-    console.error('[Socket] Connection error:', error);
+    logger.error('[Socket] Connection error:', error);
   });
 
+  // Handle visibility change for mobile browsers
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+  }
+
   return socket;
+}
+
+/**
+ * Handle page visibility changes (mobile tab switching)
+ */
+function handleVisibilityChange() {
+  if (document.visibilityState === 'visible' && socket) {
+    logger.log('[Socket] Page became visible, checking connection...');
+    
+    if (!socket.connected) {
+      logger.log('[Socket] Socket disconnected, attempting reconnect...');
+      socket.connect();
+    } else if (currentRoom) {
+      // Verify we're still in the room by re-emitting join
+      logger.log('[Socket] Verifying room membership...');
+      socket.emit('verify-room', currentRoom);
+    }
+  }
 }
 
 /**
@@ -107,7 +176,7 @@ export function createRoom() {
 
     const onRoomCreated = (roomId) => {
       cleanup();
-      console.log('[Socket] Room created:', roomId);
+      logger.log('[Socket] Room created:', roomId);
       resolve(roomId);
     };
 
@@ -149,14 +218,14 @@ export function joinRoom(roomId) {
 
     // Prevent duplicate join attempts
     if (isJoining) {
-      console.log('[Socket] Already joining, ignoring duplicate request');
+      logger.log('[Socket] Already joining, ignoring duplicate request');
       reject(new Error('Already joining room'));
       return;
     }
 
     // Already in this room
     if (currentRoom === roomId) {
-      console.log('[Socket] Already in room:', roomId);
+      logger.log('[Socket] Already in room:', roomId);
       resolve(roomId);
       return;
     }
@@ -168,7 +237,7 @@ export function joinRoom(roomId) {
       cleanup();
       isJoining = false;
       currentRoom = joinedRoomId;
-      console.log('[Socket] Joined room:', joinedRoomId);
+      logger.log('[Socket] Joined room:', joinedRoomId);
       resolve(joinedRoomId);
     };
 
@@ -208,7 +277,7 @@ export function joinRoom(roomId) {
  */
 export function setupSignalingListeners(handlers) {
   if (!socket) {
-    console.error('Socket not initialized');
+    logger.error('Socket not initialized');
     return;
   }
 
@@ -220,28 +289,28 @@ export function setupSignalingListeners(handlers) {
 
   if (handlers.onUserJoined) {
     socket.on('user-joined', (peerId) => {
-      console.log('[Socket] User joined:', peerId);
+      logger.log('[Socket] User joined:', peerId);
       handlers.onUserJoined(peerId);
     });
   }
 
   if (handlers.onOffer) {
     socket.on('offer', ({ offer }) => {
-      console.log('[Socket] Received offer');
+      logger.log('[Socket] Received offer');
       handlers.onOffer(offer);
     });
   }
 
   if (handlers.onAnswer) {
     socket.on('answer', ({ answer }) => {
-      console.log('[Socket] Received answer');
+      logger.log('[Socket] Received answer');
       handlers.onAnswer(answer);
     });
   }
 
   if (handlers.onIceCandidate) {
     socket.on('ice-candidate', ({ candidate }) => {
-      console.log('[Socket] Received ICE candidate');
+      logger.log('[Socket] Received ICE candidate');
       handlers.onIceCandidate(candidate);
     });
   }
