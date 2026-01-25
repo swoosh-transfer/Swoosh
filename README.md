@@ -10,8 +10,7 @@ A secure, browser-based peer-to-peer file transfer application capable of handli
 
 Experience Swoosh now:
 
-- **Production**: [Add your deployment URL here]
-- **Demo**: [Add your demo URL here]
+- **Production**: https://swoosh-transfer.vercel.app/
 
 > 🔗 Share the deployment link with your peer to start swooshing files instantly!
 
@@ -64,8 +63,8 @@ Experience Swoosh now:
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/swoosh.git
-cd swoosh
+git clone https://github.com/swoosh-transfer/Swoosh
+cd Swoosh
 
 # Install dependencies
 npm install
