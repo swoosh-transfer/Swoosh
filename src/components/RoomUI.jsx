@@ -1,0 +1,257 @@
+/**
+ * Room UI Components
+ */
+
+// Format bytes to human readable
+export function formatBytes(bytes) {
+  if (!bytes || bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// Info row for connection/transfer info panels
+export function InfoRow({ label, value, status = 'default' }) {
+  const statusColors = {
+    success: 'text-emerald-400',
+    error: 'text-red-400',
+    warning: 'text-amber-400',
+    default: 'text-zinc-300',
+  };
+
+  return (
+    <div className="flex justify-between py-1 border-b border-zinc-800 last:border-0">
+      <span className="text-zinc-500">{label}</span>
+      <span className={`truncate ml-2 max-w-30 ${statusColors[status]}`}>{value}</span>
+    </div>
+  );
+}
+
+// Connection status indicators
+export function StatusSection({ socketConnected, dataChannelReady, tofuVerified, tofuStatus }) {
+  const statuses = [
+    {
+      label: 'Socket',
+      done: socketConnected,
+      active: !socketConnected,
+    },
+    {
+      label: 'P2P',
+      done: dataChannelReady,
+      active: socketConnected && !dataChannelReady,
+    },
+    {
+      label: 'Verified',
+      done: tofuVerified,
+      active: tofuStatus === 'verifying',
+      failed: tofuStatus === 'failed',
+    },
+  ];
+
+  return (
+    <div className="flex justify-between">
+      {statuses.map((status, i) => (
+        <div key={status.label} className="flex items-center gap-2">
+          <div className={`
+            w-3 h-3 rounded-full transition-all
+            ${status.done 
+              ? 'bg-emerald-500' 
+              : status.active 
+                ? 'bg-amber-500 animate-pulse' 
+                : status.failed 
+                  ? 'bg-red-500' 
+                  : 'bg-zinc-700'
+            }
+          `} />
+          <span className="text-sm text-zinc-400">{status.label}</span>
+          {i < statuses.length - 1 && (
+            <div className="w-8 h-px bg-zinc-800 ml-2" />
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// File info display
+export function FileInfo({ file }) {
+  return (
+    <div className="flex items-center gap-3">
+      <div className="w-10 h-10 rounded-lg bg-zinc-700 flex items-center justify-center shrink-0">
+        <svg className="w-5 h-5 text-zinc-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+        </svg>
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-zinc-100 font-medium truncate">{file.name}</p>
+        <p className="text-zinc-500 text-sm">{formatBytes(file.size)}</p>
+      </div>
+    </div>
+  );
+}
+
+// Transfer progress bar
+export function TransferProgress({ progress, state, speed, eta }) {
+  return (
+    <div className="space-y-3">
+      <div className="flex justify-between text-sm">
+        <span className="text-zinc-400">
+          {state === 'transferring' ? 'Transferring...' : 
+           state === 'preparing' ? 'Preparing...' :
+           state === 'completed' ? 'Complete!' : 'Idle'}
+        </span>
+        <span className="text-zinc-300 font-mono">{progress}%</span>
+      </div>
+      <div className="h-2 bg-zinc-800 rounded-full overflow-hidden">
+        <div 
+          className="h-full bg-emerald-500 transition-all duration-300"
+          style={{ width: `${progress}%` }}
+        />
+      </div>
+      <div className="flex justify-between text-xs text-zinc-500">
+        <span>{speed ? `${formatBytes(speed)}/s` : 'Starting...'}</span>
+        <span>{eta ? `ETA: ${Math.round(eta)}s` : ''}</span>
+      </div>
+    </div>
+  );
+}
+
+// Share URL input with copy button
+export function ShareUrlBox({ url, onCopy, copied }) {
+  return (
+    <div className="space-y-3">
+      <label className="text-sm text-zinc-400">Share this link:</label>
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={url}
+          readOnly
+          className="flex-1 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-xs font-mono text-zinc-300 truncate"
+        />
+        <button
+          onClick={onCopy}
+          className="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 rounded-lg transition-colors text-sm"
+        >
+          {copied ? '✓' : 'Copy'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Incoming file prompt
+export function IncomingFilePrompt({ file, onAccept }) {
+  return (
+    <div className="space-y-4">
+      <div className="p-4 bg-amber-950/30 border border-amber-900/50 rounded-xl">
+        <h3 className="font-medium text-amber-400 mb-2">Incoming File</h3>
+        <p className="text-zinc-300">{file.name}</p>
+        <p className="text-zinc-500 text-sm">{formatBytes(file.size)}</p>
+      </div>
+      <button
+        onClick={onAccept}
+        className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl font-medium transition-colors"
+      >
+        Choose Save Location & Start
+      </button>
+      <p className="text-xs text-zinc-500 text-center">
+        For large files, choose a save location for direct disk writing
+      </p>
+    </div>
+  );
+}
+
+// Transfer complete success message
+export function TransferComplete({ isHost, savedToFileSystem, fileName, onDownload }) {
+  return (
+    <div className="p-4 bg-emerald-950/30 border border-emerald-900/50 rounded-xl text-center">
+      <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-emerald-900/50 flex items-center justify-center">
+        <svg className="w-6 h-6 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+        </svg>
+      </div>
+      <p className="text-emerald-400 font-medium">Transfer Complete!</p>
+      {savedToFileSystem && (
+        <p className="text-zinc-500 text-sm mt-1">File saved to disk</p>
+      )}
+      {!isHost && !savedToFileSystem && onDownload && (
+        <button
+          onClick={onDownload}
+          className="w-full mt-4 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-xl font-medium transition-colors"
+        >
+          Download {fileName}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// Activity log display
+export function ActivityLog({ logs }) {
+  return (
+    <div className="h-48 overflow-y-auto space-y-1 font-mono text-xs">
+      {logs.length === 0 ? (
+        <p className="text-zinc-600">No activity yet...</p>
+      ) : (
+        logs.map((log, i) => (
+          <div key={i} className={`flex gap-2 ${
+            log.type === 'error' ? 'text-red-400' :
+            log.type === 'success' ? 'text-emerald-400' :
+            log.type === 'warning' ? 'text-amber-400' :
+            'text-zinc-500'
+          }`}>
+            <span className="text-zinc-600 shrink-0">{log.timestamp}</span>
+            <span className="break-all">{log.message}</span>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+// Error display
+export function ErrorDisplay({ error }) {
+  if (!error) return null;
+  
+  return (
+    <div className="p-3 bg-red-950/50 border border-red-900 rounded-lg">
+      <p className="text-red-400 text-sm">{error}</p>
+    </div>
+  );
+}
+
+// Connection info panel
+export function ConnectionInfoPanel({ info }) {
+  return (
+    <div className="grid grid-cols-2 gap-2 text-xs">
+      <InfoRow label="Socket" value={info.socketConnected ? 'Connected' : 'Disconnected'} 
+               status={info.socketConnected ? 'success' : 'error'} />
+      <InfoRow label="Socket ID" value={info.socketId?.slice(0, 12) || '-'} />
+      <InfoRow label="ICE State" value={info.iceState} 
+               status={info.iceState === 'connected' ? 'success' : 'default'} />
+      <InfoRow label="Signaling" value={info.signalingState} />
+      <InfoRow label="RTC State" value={info.rtcState}
+               status={info.rtcState === 'connected' ? 'success' : 'default'} />
+      <InfoRow label="Data Channel" value={info.dataChannelState}
+               status={info.dataChannelState === 'open' ? 'success' : 'default'} />
+      <InfoRow label="RTT" value={`${info.rtt}ms`} />
+      <InfoRow label="Packet Loss" value={`${info.packetLoss}%`} />
+    </div>
+  );
+}
+
+// Transfer info panel
+export function TransferInfoPanel({ info }) {
+  if (!info.fileName) return null;
+  
+  return (
+    <div className="grid grid-cols-2 gap-2 text-xs">
+      <InfoRow label="File" value={info.fileName} />
+      <InfoRow label="Size" value={formatBytes(info.fileSize)} />
+      <InfoRow label="Progress" value={`${info.progress}%`} />
+      <InfoRow label="Speed" value={info.speed ? `${formatBytes(info.speed)}/s` : '-'} />
+      <InfoRow label="ETA" value={info.eta ? `${Math.round(info.eta)}s` : '-'} />
+    </div>
+  );
+}
