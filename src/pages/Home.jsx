@@ -18,21 +18,19 @@ export default function Home() {
     // Fetch analytics data
     const fetchAnalytics = async () => {
       try {
-        const apiUrl = import.meta.env.VITE_API_URL || window.location.origin || 'http://localhost:5000';
-        const url = `${apiUrl}/api/analytics/summary?days=7`;
-        logger.info('Fetching analytics data from', url);
+        const baseUrl = (import.meta.env.VITE_API_URL || window.location.origin || 'http://localhost:5000').trim().replace(/\/$/, '');
+        const url = `${baseUrl}/api/analytics/summary?days=7`;
+        logger.info('Fetching analytics from:', url);
         const response = await fetch(url, { mode: 'cors' });
         if (response.ok) {
           const data = await response.json();
           logger.info('Analytics data:', data);
           setStats(data);
-          logger.info('Analytics stats set in state', data);
         } else {
-          logger.warn('Analytics fetch failed with status', response.status);
+          logger.warn('Analytics fetch failed:', response.status);
         }
       } catch (err) {
-        // Silently fail - analytics is optional
-        logger.info('Analytics not available:', err);
+        logger.info('Analytics unavailable:', err.message);
       }
     };
     
