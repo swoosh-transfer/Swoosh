@@ -118,6 +118,7 @@ export default function Room() {
   const challengeRef = useRef(null);
   const hmacKeyRef = useRef(null);
   const transferIdRef = useRef(null);
+    const sessionIdRef = useRef(null); // Analytics session ID
   // Use a queue for chunk metadata to handle out-of-order delivery
   const chunkMetaQueueRef = useRef([]);
   const pendingBinaryQueueRef = useRef([]); // Queue of binary chunks that arrived before metadata
@@ -616,7 +617,21 @@ export default function Room() {
     if (!selectedFile || !tofuVerified) return;
 
     const transferId = crypto.randomUUID();
+    const sessionId = 'session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
     transferIdRef.current = transferId;
+    sessionIdRef.current = sessionId;
+
+    // Emit analytics event: transfer-start
+    const socket = getSocket();
+    if (socket?.connected) {
+      socket.emit('transfer-start', {
+        roomId,
+        sessionId,
+        fileCount: 1,
+        totalBytes: selectedFile.size
+      });
+      addLog('Analytics: Transfer started', 'info');
+    }
 
     // Use Zustand store to track transfer
     initiateUpload({
@@ -694,8 +709,17 @@ export default function Room() {
       setTransferState('completed');
       setTransferProgress(100);
       addLog('Transfer complete!', 'success');
-      
-      // Clean up all transfer data (sender side)
+
+      // Emit analytics event: transfer-complete
+      const socket = getSocket();
+      if (socket?.connected && sessionIdRef.current) {
+        socket.emit('transfer-complete', {
+          roomId,
+          sessionId: sessionIdRef.current
+        });
+        addLog('Analytics: Transfer completed', 'success');
+      }
+            // Clean up all transfer data (sender side)
       try {
         // Clean up in-memory state in resumable manager
         await resumableTransferManager.completeTransfer(transferIdRef.current);
@@ -711,6 +735,17 @@ export default function Room() {
     } catch (err) {
       setTransferState('error');
       addLog(`Transfer failed: ${err.message}`, 'error');
+
+          // Emit analytics event: transfer-failed
+          const socket = getSocket();
+          if (socket?.connected && sessionIdRef.current) {
+            socket.emit('transfer-failed', {
+              roomId,
+              sessionId: sessionIdRef.current,
+              reason: err.message || 'chunking-error'
+            });
+            addLog('Analytics: Transfer failed', 'error');
+          }
     }
   };
 
@@ -761,16 +796,19 @@ export default function Room() {
   // ============ FILE TRANSFER - RECEIVER ============
 
   const handleFileMetadata = async (msg) => {
+    const { transferId, name, size, mimeType, totalChunks } = msg;
+    
+    // Receiver does not emit analytics events; sender is source of truth
     // SECURITY: Block file metadata until TOFU is verified (use ref to avoid stale closure)
     if (!tofuVerifiedRef.current) {
       addLog('Received file metadata before TOFU verification - ignoring', 'warning');
       return;
     }
     
-    addLog(`Incoming: ${msg.name} (${formatBytes(msg.size)})`, 'info');
+    addLog(`Incoming: ${name} (${formatBytes(size)})`, 'info');
 
-    transferIdRef.current = msg.transferId;
-    setPendingFile({ name: msg.name, size: msg.size, totalChunks: msg.totalChunks });
+    transferIdRef.current = transferId;
+    setPendingFile({ name, size, totalChunks });
     setAwaitingSaveLocation(true);
     receivedBytesRef.current = 0;
 
@@ -780,10 +818,10 @@ export default function Room() {
 
     // Initialize FileReceiver for this transfer
     await fileReceiver.initializeReceive({
-      transferId: msg.transferId,
-      name: msg.name,
-      size: msg.size,
-      mimeType: msg.mimeType,
+      transferId,
+      name,
+      size,
+      mimeType,
     });
 
     // Set up progress callback
@@ -805,11 +843,11 @@ export default function Room() {
 
     // Use Zustand store
     initiateDownload({
-      transferId: msg.transferId,
-      fileName: msg.name,
-      fileSize: msg.size,
-      fileType: msg.mimeType,
-      totalChunks: msg.totalChunks,
+      transferId,
+      fileName: name,
+      fileSize: size,
+      fileType: mimeType,
+      totalChunks,
     });
   };
 
@@ -872,6 +910,7 @@ export default function Room() {
 
       if (!result.success) {
         addLog(`Chunk ${meta.chunkIndex}: ${result.error}`, 'error');
+      } else {
       }
 
     } catch (err) {
@@ -898,6 +937,8 @@ export default function Room() {
           blob: result.blob,
         });
         addLog('File saved!', 'success');
+
+        // Receiver does not emit analytics events; sender already emitted
         
         // Clean up all transfer data (receiver side)
         try {
@@ -1309,7 +1350,7 @@ export default function Room() {
             )}
 
             {/* Send Button */}
-            {isHost && tofuVerified && transferState === 'idle' && (
+            {isHost && tofuVerified && dataChannelReady && transferState === 'idle' && (
               <button
                 onClick={handleStartTransfer}
                 className="w-full py-3 bg-zinc-100 text-zinc-900 hover:bg-white rounded-xl font-medium transition-colors"

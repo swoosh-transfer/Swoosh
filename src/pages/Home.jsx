@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useRoomStore } from '../stores/roomStore';
 import { initSocket, createRoom } from '../utils/signaling';
@@ -10,8 +10,34 @@ export default function Home() {
   const fileInputRef = useRef(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [stats, setStats] = useState(null);
   
   const { setSelectedFile, setIsHost, setSecurityPayload, setRoomId } = useRoomStore();
+
+  useEffect(() => {
+    // Fetch analytics data
+    const fetchAnalytics = async () => {
+      try {
+        const apiUrl = import.meta.env.VITE_API_URL || window.location.origin || 'http://localhost:5000';
+        const url = `${apiUrl}/api/analytics/summary?days=7`;
+        logger.info('Fetching analytics data from', url);
+        const response = await fetch(url, { mode: 'cors' });
+        if (response.ok) {
+          const data = await response.json();
+          logger.info('Analytics data:', data);
+          setStats(data);
+          logger.info('Analytics stats set in state', data);
+        } else {
+          logger.warn('Analytics fetch failed with status', response.status);
+        }
+      } catch (err) {
+        // Silently fail - analytics is optional
+        logger.info('Analytics not available:', err);
+      }
+    };
+    
+    fetchAnalytics();
+  }, []);
 
   const handleFileSelect = (e) => {
     const file = e.target.files?.[0];
@@ -171,6 +197,35 @@ export default function Home() {
           </button>
         </div>
 
+        {/* Analytics Stats */}
+        {stats && (
+          <div className="mt-8 p-6 bg-zinc-900/50 border border-zinc-800 rounded-xl">
+            <div className="grid grid-cols-3 gap-4 text-center">
+              <div>
+                <div className="text-2xl font-light text-emerald-400">
+                  {formatNumber(calculateTotal(stats.dailyStats, 'transfersCompleted'))}
+                </div>
+                <div className="text-xs text-zinc-500 mt-1">Transfers</div>
+              </div>
+              <div>
+                <div className="text-2xl font-light text-emerald-400">
+                  {formatBytes(calculateTotal(stats.dailyStats, 'totalBytesTransferred'))}
+                </div>
+                <div className="text-xs text-zinc-500 mt-1">Data Shared</div>
+              </div>
+              <div>
+                <div className="text-2xl font-light text-emerald-400">
+                  {formatNumber(calculateTotal(stats.dailyStats, 'roomsCompleted'))}
+                </div>
+                <div className="text-xs text-zinc-500 mt-1">Rooms</div>
+              </div>
+            </div>
+            <div className="text-center mt-3 text-xs text-zinc-600">
+              {stats.period || 'Last 7 days'}
+            </div>
+          </div>
+        )}
+
         {/* Footer */}
         <p className="text-center text-zinc-600 text-xs mt-8">
           End-to-end encrypted • No server storage • TOFU verified
@@ -186,4 +241,23 @@ function formatFileSize(bytes) {
   const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+function formatNumber(num) {
+  if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+  if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+  return num.toString();
+}
+
+function calculateTotal(dailyStats, field) {
+  if (!dailyStats || !Array.isArray(dailyStats)) return 0;
+  return dailyStats.reduce((sum, day) => sum + (day[field] || 0), 0);
 }
