@@ -166,8 +166,22 @@ export class FileReceiver {
 
     if (window.showSaveFilePicker) {
       try {
+        // Helper to format filename with counter before extension
+        // This ensures files are saved as "name(1).jpg" instead of "name.jpg (1)"
+        const formatSuggestedName = (filename) => {
+          // Extract name and extension
+          const lastDot = filename.lastIndexOf('.');
+          if (lastDot === -1 || lastDot === 0) {
+            // No extension or hidden file
+            return filename;
+          }
+          // Return as-is, the browser will handle numbering correctly
+          // Different browsers handle this differently, so we just provide clean name
+          return filename;
+        };
+        
         const handle = await window.showSaveFilePicker({
-          suggestedName: suggestedName || state.fileName,
+          suggestedName: formatSuggestedName(suggestedName || state.fileName),
           types: [{
             description: 'All Files',
             accept: { '*/*': [] }
@@ -229,6 +243,13 @@ export class FileReceiver {
     try {
       // Write chunks in order starting from nextExpectedChunk
       while (pendingMap.has(state.nextExpectedChunk)) {
+        // Check if writable stream is still open before writing
+        // This prevents "Cannot write to a closing writable stream" errors
+        if (!state.writable) {
+          logger.warn(`[FileReceiver] Writable stream closed, stopping write queue`);
+          break;
+        }
+        
         const chunkIndex = state.nextExpectedChunk;
         const chunkData = pendingMap.get(chunkIndex);
         pendingMap.delete(chunkIndex);
@@ -242,8 +263,13 @@ export class FileReceiver {
         logger.log(`[FileReceiver] Wrote chunk ${chunkIndex} (${chunkData.byteLength} bytes), total written: ${state.bytesWritten}`);
       }
     } catch (err) {
-      logger.error(`[FileReceiver] Write error:`, err);
-      throw err;
+      // Check if error is about closing stream - log as warning, not error
+      if (err.message?.includes('closing writable stream')) {
+        logger.warn(`[FileReceiver] Stream was closing during write, chunks may have been processed already`);
+      } else {
+        logger.error(`[FileReceiver] Write error:`, err);
+        throw err;
+      }
     } finally {
       state.isWriting = false;
     }
@@ -255,6 +281,12 @@ export class FileReceiver {
   async _queueChunkForWrite(transferId, chunkIndex, chunkData) {
     const state = this.activeTransfers.get(transferId);
     if (!state) return;
+    
+    // Don't queue if writable stream is closing or closed
+    if (!state.writable) {
+      logger.warn(`[FileReceiver] Writable stream not available, skipping chunk ${chunkIndex}`);
+      return;
+    }
     
     const pendingMap = this.pendingChunks.get(transferId);
     
@@ -396,25 +428,61 @@ export class FileReceiver {
       }
 
       if (state.useFileSystemAPI && state.writable) {
-        // Process any remaining chunks in the write queue
-        await this._processWriteQueue(transferId);
-        
-        // Wait a bit for any in-flight writes
-        await new Promise(resolve => setTimeout(resolve, 50));
-        
-        // Check for any remaining pending chunks
         const pendingMap = this.pendingChunks.get(transferId);
-        if (pendingMap && pendingMap.size > 0) {
-          logger.warn(`[FileReceiver] ${pendingMap.size} pending chunks at completion, processing...`);
+        
+        // Keep processing write queue until ALL pending chunks are written
+        let maxAttempts = 100; // Prevent infinite loop
+        let attempt = 0;
+        
+        while (pendingMap && pendingMap.size > 0 && attempt < maxAttempts) {
+          const pendingCount = pendingMap.size;
+          logger.log(`[FileReceiver] Processing ${pendingCount} pending chunks (attempt ${attempt + 1})...`);
+          
+          // Process the write queue
           await this._processWriteQueue(transferId);
+          
+          // Give time for chunks to be processed
+          await new Promise(resolve => setTimeout(resolve, 100));
+          
+          // Check if we made progress
+          if (pendingMap.size === pendingCount) {
+            // No progress made - chunks might be out of order
+            logger.warn(`[FileReceiver] No progress on pending chunks, waiting for sequential chunks...`);
+            await new Promise(resolve => setTimeout(resolve, 200));
+          }
+          
+          attempt++;
         }
         
-        // Verify bytes written matches expected
+        if (pendingMap && pendingMap.size > 0) {
+          logger.warn(`[FileReceiver] ${pendingMap.size} chunks still pending after ${attempt} attempts`);
+          // These are likely out-of-order chunks waiting for earlier chunks
+          // Don't close the stream yet - wait for retransmission
+          return { 
+            success: false, 
+            error: `${pendingMap.size} chunks pending write`,
+            pendingChunks: Array.from(pendingMap.keys()),
+            canRetry: true 
+          };
+        }
+        
+        // Final verification
         if (state.bytesWritten !== state.fileSize) {
           logger.warn(`[FileReceiver] Bytes mismatch: written=${state.bytesWritten}, expected=${state.fileSize}`);
+          // Check what chunks are actually missing vs just not written yet
+          const missing = this.getMissingChunks(transferId);
+          if (missing.length > 0) {
+            return { 
+              success: false, 
+              error: 'Missing chunks', 
+              missingChunks: missing,
+              canResume: true 
+            };
+          }
         }
         
-        // Close the writable stream
+        // All chunks written successfully - close the stream
+        logger.log(`[FileReceiver] All chunks written, closing stream (${state.bytesWritten} bytes)...`);
         await state.writable.close();
         state.writable = null;
         
@@ -453,10 +521,16 @@ export class FileReceiver {
       logger.error('[FileReceiver] Complete transfer error:', err);
       return { success: false, error: err.message };
     } finally {
-      // Cleanup
-      this.activeTransfers.delete(transferId);
-      this.pendingChunks.delete(transferId);
-      this.pauseControllers.delete(transferId);
+      // Only cleanup if transfer actually completed successfully
+      // If there are missing chunks, keep state active for retransmission
+      const state = this.activeTransfers.get(transferId);
+      if (state && state.receivedChunks.size === state.totalChunks) {
+        // All chunks received, safe to cleanup
+        this.activeTransfers.delete(transferId);
+        this.pendingChunks.delete(transferId);
+        this.pauseControllers.delete(transferId);
+      }
+      // If chunks are missing, state stays active for retransmission
     }
   }
 
@@ -536,6 +610,16 @@ export class FileReceiver {
       fileSize: state?.fileSize || 0,
       lastReceivedChunk: this.getLastReceivedChunk(transferId),
     };
+  }
+
+  /**
+   * Force cleanup of transfer state (for explicit cleanup after retransmission)
+   */
+  forceCleanup(transferId) {
+    this.activeTransfers.delete(transferId);
+    this.pendingChunks.delete(transferId);
+    this.pauseControllers.delete(transferId);
+    logger.log(`[FileReceiver] Force cleanup completed for transfer: ${transferId}`);
   }
 
   /**

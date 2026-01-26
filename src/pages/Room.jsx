@@ -882,8 +882,8 @@ export default function Room() {
   const handleTransferComplete = async () => {
     addLog('Transfer complete signal', 'info');
 
-    // Wait a moment for any in-flight chunks
-    await new Promise(resolve => setTimeout(resolve, 100));
+    // Wait longer for any in-flight chunks to arrive and be queued
+    await new Promise(resolve => setTimeout(resolve, 300));
 
     try {
       // Use FileReceiver to complete the transfer
@@ -909,9 +909,102 @@ export default function Room() {
         } catch (cleanupErr) {
           logger.warn('[Room] Cleanup failed:', cleanupErr);
         }
+      } else if (result.pendingChunks?.length > 0) {
+        // Chunks are received but waiting to be written (out of order)
+        addLog(`${result.pendingChunks.length} chunks pending write, waiting...`, 'warning');
+        
+        // Wait longer for sequential chunks to arrive
+        setTimeout(async () => {
+          addLog('Retrying completion after pending chunks...', 'info');
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+          const retryResult = await fileReceiver.completeTransfer(transferIdRef.current);
+          if (retryResult.success) {
+            setTransferState('completed');
+            setTransferProgress(100);
+            setDownloadResult({
+              savedToFileSystem: retryResult.savedToFileSystem,
+              url: retryResult.url,
+              blob: retryResult.blob,
+            });
+            addLog('File saved after pending chunks written!', 'success');
+            
+            fileReceiver.forceCleanup(transferIdRef.current);
+            try {
+              await resumableTransferManager.completeTransfer(transferIdRef.current);
+              await cleanupTransferData(transferIdRef.current);
+              logger.log('[Room] Cleanup completed after pending chunks:', transferIdRef.current);
+            } catch (cleanupErr) {
+              logger.warn('[Room] Cleanup failed:', cleanupErr);
+            }
+          } else if (retryResult.missingChunks?.length > 0) {
+            // Now we know chunks are truly missing
+            addLog(`Actually missing ${retryResult.missingChunks.length} chunks, requesting retransmit...`, 'warning');
+            sendJSON({ type: 'request-chunks', chunks: retryResult.missingChunks });
+            
+            // Wait for retransmission
+            setTimeout(async () => {
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              const finalResult = await fileReceiver.completeTransfer(transferIdRef.current);
+              if (finalResult.success) {
+                setTransferState('completed');
+                setTransferProgress(100);
+                setDownloadResult({
+                  savedToFileSystem: finalResult.savedToFileSystem,
+                  url: finalResult.url,
+                  blob: finalResult.blob,
+                });
+                addLog('File saved after retransmission!', 'success');
+                fileReceiver.forceCleanup(transferIdRef.current);
+                try {
+                  await resumableTransferManager.completeTransfer(transferIdRef.current);
+                  await cleanupTransferData(transferIdRef.current);
+                } catch (cleanupErr) {
+                  logger.warn('[Room] Cleanup failed:', cleanupErr);
+                }
+              }
+            }, 3000);
+          }
+        }, 3000); // Wait 3 seconds for sequential chunks
       } else if (result.missingChunks?.length > 0) {
         addLog(`Missing ${result.missingChunks.length} chunks, requesting retransmit...`, 'warning');
+        // DON'T cleanup yet - keep transfer state active for retransmission
+        // The receiver needs to stay initialized to receive retransmitted chunks
         sendJSON({ type: 'request-chunks', chunks: result.missingChunks });
+        
+        // Set a timeout to retry completion after retransmission should be done
+        setTimeout(async () => {
+          addLog('Checking transfer again after retransmission...', 'info');
+          // Wait for chunks to arrive and be written
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          // Try completing again
+          const retryResult = await fileReceiver.completeTransfer(transferIdRef.current);
+          if (retryResult.success) {
+            setTransferState('completed');
+            setTransferProgress(100);
+            setDownloadResult({
+              savedToFileSystem: retryResult.savedToFileSystem,
+              url: retryResult.url,
+              blob: retryResult.blob,
+            });
+            addLog('File saved after retransmission!', 'success');
+            
+            // Force cleanup of receiver state
+            fileReceiver.forceCleanup(transferIdRef.current);
+            
+            // Now cleanup database
+            try {
+              await resumableTransferManager.completeTransfer(transferIdRef.current);
+              await cleanupTransferData(transferIdRef.current);
+              logger.log('[Room] Full cleanup completed after retransmission:', transferIdRef.current);
+            } catch (cleanupErr) {
+              logger.warn('[Room] Cleanup failed:', cleanupErr);
+            }
+          } else if (retryResult.missingChunks?.length > 0) {
+            addLog(`Still missing ${retryResult.missingChunks.length} chunks after retransmit`, 'error');
+            // Could request retransmit again or give up
+          }
+        }, 3000); // Wait 3 seconds for retransmission
       } else {
         addLog(`Complete error: ${result.error}`, 'error');
       }
@@ -958,10 +1051,38 @@ export default function Room() {
     if (!transferId) return;
 
     if (isHost) {
-      // Sender side - resume chunking
+      // Sender side - when sender initiates resume, check if we have receiver's last position
+      const resumeFromChunk = receiverLastChunkRef.current >= 0 
+        ? receiverLastChunkRef.current + 1 
+        : undefined;
+      
+      if (resumeFromChunk !== undefined && selectedFile) {
+        // Get sender's current pause state
+        const pauseState = chunkingEngineRef.current.getPauseState(transferId);
+        
+        // If sender paused ahead of receiver, we need to resync
+        if (pauseState && pauseState.currentChunkIndex > resumeFromChunk) {
+          addLog(`Resyncing: sender at chunk ${pauseState.currentChunkIndex}, receiver at ${resumeFromChunk}`, 'info');
+          
+          // Retransmit missing chunks
+          const missingChunks = [];
+          for (let i = resumeFromChunk; i < pauseState.currentChunkIndex; i++) {
+            missingChunks.push(i);
+          }
+          
+          if (missingChunks.length > 0) {
+            addLog(`Retransmitting ${missingChunks.length} chunks from ${resumeFromChunk}`, 'info');
+            await handleRetransmitRequest(missingChunks);
+          }
+        }
+      }
+      
       await chunkingEngineRef.current.resume(transferId);
-      sendJSON({ type: 'transfer-resumed', transferId });
+      sendJSON({ type: 'transfer-resumed', transferId, resumeFromChunk });
       addLog('Sending resumed', 'success');
+      
+      // Reset stored position
+      receiverLastChunkRef.current = -1;
     } else {
       // Receiver side - resume and tell sender which chunk to resume from
       const result = await fileReceiver.resume(transferId);
@@ -970,7 +1091,7 @@ export default function Room() {
       addLog(`Receiving resumed, requesting sender to resume from chunk ${resumeFromChunk}`, 'success');
     }
     setIsPaused(false);
-  }, [isHost, addLog, sendJSON]);
+  }, [isHost, addLog, sendJSON, selectedFile, handleRetransmitRequest]);
 
   // Cancel transfer handler - sends signal to peer
   const handleCancelTransfer = useCallback(() => {
@@ -1014,7 +1135,6 @@ export default function Room() {
   const handleRemoteResume = useCallback(async (transferId, resumeFromChunk) => {
     if (isHost) {
       // Sender receives resume from receiver - resume from specified chunk
-      await chunkingEngineRef.current.resume(transferId);
       
       // Use resumeFromChunk if provided, otherwise use stored lastChunk + 1
       const targetChunk = resumeFromChunk ?? (receiverLastChunkRef.current >= 0 ? receiverLastChunkRef.current + 1 : undefined);
@@ -1025,19 +1145,23 @@ export default function Room() {
         // Get pause state to check current position
         const pauseState = chunkingEngineRef.current.getPauseState(transferId);
         
-        // If chunking is still active and receiver needs earlier chunks, retransmit them
+        // If sender paused ahead of receiver, retransmit missing chunks BEFORE resuming
         if (pauseState && pauseState.currentChunkIndex > targetChunk) {
           const missingChunks = [];
           for (let i = targetChunk; i < pauseState.currentChunkIndex; i++) {
             missingChunks.push(i);
           }
           if (missingChunks.length > 0) {
-            addLog(`Retransmitting ${missingChunks.length} chunks from ${targetChunk}`, 'info');
+            addLog(`Retransmitting ${missingChunks.length} chunks from ${targetChunk} before resuming`, 'info');
             await handleRetransmitRequest(missingChunks);
           }
         }
+        
+        // Now resume normal sending from where sender left off
+        await chunkingEngineRef.current.resume(transferId);
         addLog('Sending resumed', 'success');
       } else {
+        await chunkingEngineRef.current.resume(transferId);
         addLog('Peer resumed transfer', 'success');
       }
       
@@ -1045,7 +1169,7 @@ export default function Room() {
       receiverLastChunkRef.current = -1;
     } else {
       // Receiver receives resume from sender
-      fileReceiver.resume(transferId);
+      await fileReceiver.resume(transferId);
       addLog('Sender resumed transfer', 'success');
     }
     setIsPaused(false);
