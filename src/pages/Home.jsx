@@ -11,6 +11,7 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [stats, setStats] = useState(null);
+  const [isDragging, setIsDragging] = useState(false);
   
   const { setSelectedFile, setIsHost, setSecurityPayload, setRoomId } = useRoomStore();
 
@@ -41,6 +42,43 @@ export default function Home() {
     const file = e.target.files?.[0];
     if (file) {
       setSelectedFile(file);
+      setError(null);
+    }
+  };
+
+  const handleDragEnter = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    const files = e.dataTransfer?.files;
+    if (files && files.length > 0) {
+      const file = files[0];
+      setSelectedFile(file);
+      setError(null);
+      // Update the file input
+      if (fileInputRef.current) {
+        const dataTransfer = new DataTransfer();
+        dataTransfer.items.add(file);
+        fileInputRef.current.files = dataTransfer.files;
+      }
     }
   };
 
@@ -210,12 +248,18 @@ export default function Home() {
             <label 
               htmlFor="file-input"
               className="block w-full cursor-pointer"
+              onDragEnter={handleDragEnter}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
             >
               <div className={`
                 border-2 border-dashed rounded-xl p-8 text-center transition-all
                 ${selectedFile 
                   ? 'border-emerald-600 bg-emerald-950/20' 
-                  : 'border-zinc-700 hover:border-zinc-600'
+                  : isDragging
+                    ? 'border-emerald-500 bg-emerald-950/30 scale-[1.02]'
+                    : 'border-zinc-700 hover:border-zinc-600'
                 }
               `}>
                 {selectedFile ? (
