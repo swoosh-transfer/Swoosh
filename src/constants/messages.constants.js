@@ -20,6 +20,7 @@ export const MESSAGE_TYPE = {
   // File Transfer Setup
   FILE_METADATA: 'file-metadata',
   CHUNK_METADATA: 'chunk-metadata',
+  CHUNK_DATA: 'chunk-data',
   RECEIVER_READY: 'receiver-ready',
   
   // Transfer Control
@@ -31,7 +32,17 @@ export const MESSAGE_TYPE = {
   // Chunk Management
   REQUEST_CHUNKS: 'request-chunks',
   MISSING_CHUNKS: 'missing-chunks',
+  
+  // Error Handling
+  TRANSFER_ERROR: 'transfer-error',
+  
+  // Keep-alive
+  PING: 'ping',
+  PONG: 'pong'
 };
+
+// Alias for backward compatibility
+export const MESSAGE_TYPES = MESSAGE_TYPE;
 
 /**
  * Signaling Event Types

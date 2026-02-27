@@ -34,6 +34,13 @@ export const SIGNALING_RECONNECT_DELAY = 2 * 1000;
 export const MAX_RETRY_ATTEMPTS = 3;
 
 /**
+ * RECONNECT_MAX_ATTEMPTS: 5
+ * 
+ * Maximum number of reconnection attempts for P2P connection failures.
+ */
+export const RECONNECT_MAX_ATTEMPTS = 5;
+
+/**
  * ICE Servers Configuration
  * 
  * STUN/TURN servers for NAT traversal and connection establishment.
