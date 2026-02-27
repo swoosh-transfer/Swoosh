@@ -308,8 +308,35 @@ Comprehensive documentation for developers:
 - **[ADDING_FEATURES.md](docs/ADDING_FEATURES.md)** - Step-by-step guides for common development tasks
 - **[TRANSFER_FLOW.md](docs/TRANSFER_FLOW.md)** - Detailed transfer lifecycle with sequence diagrams
 - **[DEBUGGING.md](docs/DEBUGGING.md)** - Troubleshooting guide for common issues
+- **[TESTING.md](docs/TESTING.md)** - Testing strategy and how to write tests
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Complete architectural overview and design decisions
 - **[stores/README.md](src/stores/README.md)** - Store vs hook state management guidelines
+
+## 🧪 Testing
+
+The project uses Vitest for unit and integration testing.
+
+```bash
+# Run tests in watch mode
+npm test
+
+# Run tests once (for CI)
+npm run test:run
+
+# Run tests with UI
+npm run test:ui
+
+# Run with coverage report
+npm run test:coverage
+```
+
+**Test Structure:**
+- `src/__tests__/unit/` - Unit tests for pure functions and classes
+- `src/__tests__/integration/` - Integration tests for services
+- `src/__tests__/hooks/` - React hooks tests
+- `src/__mocks__/` - Reusable mock factories
+
+See [docs/TESTING.md](docs/TESTING.md) for comprehensive testing guide and best practices.
 
 ## 🤝 Contributing
 
