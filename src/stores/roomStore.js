@@ -1,73 +1,134 @@
 import { create } from 'zustand';
 
 /**
- * Room Store
- * Manages room state, peer connection state, and TOFU verification status
+ * Room Store - Simplified (Phase 6 Refactoring)
+ * 
+ * WHAT THIS STORE MANAGES:
+ * - Room metadata (roomId, isHost)
+ * - Security payload for TOFU verification
+ * - Selected file from Home.jsx (persists to Room.jsx)
+ * - Global room errors
+ * 
+ * WHAT THIS STORE NO LONGER MANAGES (delegated to hooks):
+ * - Connection state → useRoomConnection hook
+ * - TOFU verification → useSecurity hook
+ * - Transfer progress → useFileTransfer hook
+ * - Data channel state → useRoomConnection hook
+ * 
+ * See stores/README.md for state management guidelines.
  */
 export const useRoomStore = create((set, get) => ({
-  // State
+  // ============ ROOM METADATA ============
+  // Room identifier (set when creating/joining room)
   roomId: null,
-  isHost: false,
-  securityPayload: null,
-  peerConnected: false,
-  dataChannelReady: false,
-  tofuVerified: false,
-  verificationStatus: 'pending', // 'pending' | 'verifying' | 'verified' | 'failed'
-  connectionState: 'disconnected', // 'disconnected' | 'connecting' | 'connected' | 'failed'
-  error: null,
   
-  // Selected file for transfer
+  // Whether current user is the host (creator) or guest (joiner)
+  isHost: false,
+  
+  // Security payload (secret, peerID) embedded in share URL
+  // Used for TOFU verification between peers
+  securityPayload: null,
+  
+  // File selected on Home.jsx, persists to Room.jsx for transfer
   selectedFile: null,
   
-  // Transfer state
-  transferState: 'idle', // 'idle' | 'sending' | 'receiving' | 'completed' | 'error'
-  transferProgress: 0,
-  transferSpeed: 0,
+  // Global room-level error (navigation failures, critical issues)
+  error: null,
 
-  // Actions
+  // ============ ACTIONS ============
+  
+  /**
+   * Set room ID
+   * @param {string} roomId - Room identifier
+   */
   setRoomId: (roomId) => set({ roomId }),
   
+  /**
+   * Set whether user is host
+   * @param {boolean} isHost - Host status
+   */
   setIsHost: (isHost) => set({ isHost }),
   
+  /**
+   * Set security payload for TOFU verification
+   * @param {Object} payload - Security payload { secret, peerID }
+   */
   setSecurityPayload: (payload) => set({ securityPayload: payload }),
   
-  setPeerConnected: (connected) => set({ peerConnected: connected }),
-  
-  setDataChannelReady: (ready) => set({ dataChannelReady: ready }),
-  
-  setTofuVerified: (verified) => set({ 
-    tofuVerified: verified,
-    verificationStatus: verified ? 'verified' : 'failed'
-  }),
-  
-  setVerificationStatus: (status) => set({ verificationStatus: status }),
-  
-  setConnectionState: (state) => set({ connectionState: state }),
-  
-  setError: (error) => set({ error }),
-  
+  /**
+   * Set selected file for transfer
+   * @param {File} file - File object from Home.jsx
+   */
   setSelectedFile: (file) => set({ selectedFile: file }),
   
-  setTransferState: (state) => set({ transferState: state }),
+  /**
+   * Set global room error
+   * @param {string} error - Error message
+   */
+  setError: (error) => set({ error }),
   
-  setTransferProgress: (progress) => set({ transferProgress: progress }),
-  
-  setTransferSpeed: (speed) => set({ transferSpeed: speed }),
-  
-  // Reset room state
+  /**
+   * Reset room state (called when leaving room)
+   */
   resetRoom: () => set({
     roomId: null,
     isHost: false,
     securityPayload: null,
-    peerConnected: false,
-    dataChannelReady: false,
-    tofuVerified: false,
-    verificationStatus: 'pending',
-    connectionState: 'disconnected',
-    error: null,
     selectedFile: null,
-    transferState: 'idle',
-    transferProgress: 0,
-    transferSpeed: 0,
+    error: null,
   }),
+  
+  // ============ DEPRECATED METHODS (kept for backward compatibility) ============
+  // These are no-ops now, state managed by hooks instead
+  
+  /** @deprecated Use useSecurity hook instead */
+  setTofuVerified: () => {},
+  
+  /** @deprecated Use useSecurity hook instead */
+  setVerificationStatus: () => {},
+  
+  /** @deprecated Use useRoomConnection hook instead */
+  setConnectionState: () => {},
+  
+  /** @deprecated Use useRoomConnection hook instead */
+  setPeerConnected: () => {},
+  
+  /** @deprecated Use useRoomConnection hook instead */
+  setDataChannelReady: () => {},
+  
+  /** @deprecated Use useFileTransfer hook instead */
+  setTransferState: () => {},
+  
+  /** @deprecated Use useFileTransfer hook instead */
+  setTransferProgress: () => {},
+  
+  /** @deprecated Use useFileTransfer hook instead */
+  setTransferSpeed: () => {},
+  
+  // ============ DEPRECATED PROPERTIES ============
+  // Kept for read compatibility, but hooks are source of truth
+  
+  /** @deprecated Read from useSecurity hook instead */
+  tofuVerified: false,
+  
+  /** @deprecated Read from useSecurity hook instead */
+  verificationStatus: 'pending',
+  
+  /** @deprecated Read from useRoomConnection hook instead */
+  connectionState: 'disconnected',
+  
+  /** @deprecated Read from useRoomConnection hook instead */
+  peerConnected: false,
+  
+  /** @deprecated Read from useRoomConnection hook instead */
+  dataChannelReady: false,
+  
+  /** @deprecated Read from useFileTransfer hook instead */
+  transferState: 'idle',
+  
+  /** @deprecated Read from useFileTransfer hook instead */
+  transferProgress: 0,
+  
+  /** @deprecated Read from useFileTransfer hook instead */
+  transferSpeed: 0,
 }));
