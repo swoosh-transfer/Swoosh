@@ -1,5 +1,11 @@
 # Swoosh - Complete Project Flow Documentation
 
+> **📖 Note:** This document provides detailed implementation flows. For a quick introduction, see:
+> - **[docs/NEW_DEVELOPER_GUIDE.md](docs/NEW_DEVELOPER_GUIDE.md)** - 30-minute onboarding guide
+> - **[docs/TRANSFER_FLOW.md](docs/TRANSFER_FLOW.md)** - Transfer lifecycle with sequence diagrams
+> - **[docs/DEBUGGING.md](docs/DEBUGGING.md)** - Troubleshooting guide
+> - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Architectural overview
+
 ## 📋 Table of Contents
 1. [Project Overview](#project-overview)
 2. [Architecture Overview](#architecture-overview)
@@ -29,6 +35,40 @@
 ---
 
 ## 🏗️ Architecture Overview
+
+Swoosh uses a **layered architecture** with clear separation of concerns:
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│                        UI Layer (React)                        │
+│  pages/Room/ - Modular components & custom hooks (~200 lines) │
+└────────────────────────────┬──────────────────────────────────┘
+                             ↓
+┌───────────────────────────────────────────────────────────────┐
+│                      Service Layer                             │
+│  • TransferOrchestrator - File transfer coordination          │
+│  • ConnectionService - WebRTC lifecycle management            │
+│  • SecurityService - TOFU authentication                      │
+│  • MessageService - Protocol message handling                 │
+└────────────────────────────┬──────────────────────────────────┘
+                             ↓
+┌───────────────────────────────────────────────────────────────┐
+│                    Transfer Layer (Domain)                     │
+│  • ChunkingEngine - File splitting & buffering                │
+│  • AssemblyEngine - Chunk validation & assembly               │
+│  • ProgressTracker - Single source of truth for progress      │
+│  • ResumableTransferManager - Pause/resume logic              │
+└────────────────────────────┬──────────────────────────────────┘
+                             ↓
+┌───────────────────────────────────────────────────────────────┐
+│                 Infrastructure Layer (Data & I/O)              │
+│  • Database Repositories - IndexedDB access                   │
+│  • FileWriter - File System API wrapper                       │
+│  • Storage Layer - Persistent data management                 │
+└───────────────────────────────────────────────────────────────┘
+```
+
+### Peer-to-Peer Communication Flow
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -74,6 +114,8 @@
 │                    └────────────────┘                        │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+**📖 For detailed architecture information, see [ARCHITECTURE.md](ARCHITECTURE.md)**
 
 ---
 

@@ -29,27 +29,58 @@ Experience Swoosh now:
 
 ## 🏗️ Architecture
 
+Swoosh follows a **clean layered architecture** for maintainability and scalability:
+
 ```
-┌─────────────────┐    WebRTC DataChannel     ┌─────────────────┐
-│   Sender        │◄─────────────────────────►│   Receiver      │
-│                 │                           │                 │
-│ File System API │                           │ File System API │
-│ Chunking Engine │                           │ Assembly Engine │
-│ SHA256 Hasher   │                           │ SHA256 Verifier │
-│ IndexedDB Meta  │                           │ IndexedDB Meta  │
-│ Zustand Store   │                           │ Zustand Store   │
-└─────────────────┘                           └─────────────────┘
+┌──────────────────────────────────────────────────┐
+│  UI Layer: React Components & Hooks              │
+│  (pages/Room/ - 200 lines, highly modular)       │
+└────────────────┬─────────────────────────────────┘
+                 ↓
+┌──────────────────────────────────────────────────┐
+│  Service Layer: Business Logic Orchestration     │
+│  • ConnectionService - WebRTC management         │
+│  • TransferOrchestrator - File transfer logic    │
+│  • SecurityService - TOFU authentication         │
+│  • MessageService - Protocol handling            │
+└────────────────┬─────────────────────────────────┘
+                 ↓
+┌──────────────────────────────────────────────────┐
+│  Transfer Layer: Domain-Specific Modules         │
+│  • ChunkingEngine - File splitting & sending     │
+│  • AssemblyEngine - Chunk validation & assembly  │
+│  • ProgressTracker - Single source of truth      │
+│  • ResumableTransferManager - Pause/Resume logic │
+└────────────────┬─────────────────────────────────┘
+                 ↓
+┌──────────────────────────────────────────────────┐
+│  Infrastructure: Data Access & I/O               │
+│  • Database Repositories - IndexedDB access      │
+│  • FileWriter - File System API integration      │
+│  • Storage Layer - Persistent data management    │
+└──────────────────────────────────────────────────┘
 ```
+
+### Key Architectural Principles
+
+- **No Circular Dependencies**: Strict unidirectional data flow
+- **Single Responsibility**: Each module has one clear purpose
+- **Service Pattern**: Business logic in testable, stateless services
+- **Repository Pattern**: Centralized data access layer
+- **Event-Driven**: Loose coupling via events between layers
 
 ### Core Components
 
-| Component | Description |
-|-----------|-------------|
-| **ChunkingEngine** | Splits files into 16KB network chunks, buffers to 64KB storage chunks |
-| **AssemblyEngine** | Receives chunks, validates checksums, and reassembles files |
-| **FileReceiver** | Handles sequential disk writing with out-of-order chunk buffering |
-| **IndexedDB** | Stores transfer metadata only (no chunk data) for resume capability |
-| **TOFU Security** | Challenge-response authentication using HMAC-SHA256 |
+| Component | Layer | Description |
+|-----------|-------|-------------|
+| **TransferOrchestrator** | Service | Coordinates end-to-end file transfer workflow |
+| **ChunkingEngine** | Transfer | Splits files into 16KB network chunks, buffers to 64KB storage chunks |
+| **AssemblyEngine** | Transfer | Receives chunks, validates checksums, and reassembles files |
+| **FileReceiver** | Transfer | Handles sequential disk writing with out-of-order chunk buffering |
+| **ProgressTracker** | Transfer | Single source of truth for all progress tracking |
+| **ConnectionService** | Service | WebRTC connection lifecycle management |
+| **SecurityService** | Service | TOFU authentication and verification |
+| **Database Repositories** | Infrastructure | IndexedDB access layer (metadata only, no chunk data) |
 
 ## 🚀 Quick Start
 
@@ -129,27 +160,83 @@ IndexedDB stores only **metadata** for resume capability:
 
 ```
 src/
-├── components/
-│   └── RoomUI.jsx        # UI components for room/transfer interface
+├── constants/              # Configuration constants with explanatory comments
+│   ├── transfer.constants.js
+│   ├── network.constants.js
+│   ├── timing.constants.js
+│   └── messages.constants.js
+├── lib/                    # Pure utility functions (no dependencies)
+│   ├── formatters.js       # formatBytes, formatDuration, formatSpeed
+│   ├── errors.js           # Custom error classes
+│   └── validators.js       # Validation helpers
+├── infrastructure/         # Data access & I/O layer
+│   ├── database/
+│   │   ├── client.js       # IndexedDB connection
+│   │   ├── transfers.repository.js
+│   │   ├── chunks.repository.js
+│   │   └── metadata.repository.js
+│   └── storage/
+│       ├── FileWriter.js   # File System API wrapper
+│       └── WriteQueue.js   # Sequential write queue
+├── transfer/               # Transfer engine domain layer
+│   ├── sending/
+│   │   ├── ChunkingEngine.js    # File splitting & sending
+│   │   └── BufferManager.js      # Chunk buffering logic
+│   ├── receiving/
+│   │   ├── AssemblyEngine.js    # Chunk validation & assembly
+│   │   ├── FileReceiver.js      # File writing coordination
+│   │   └── ChunkValidator.js    # SHA-256 validation
+│   ├── resumption/
+│   │   ├── ResumableTransferManager.js  # Pause/resume logic
+│   │   └── TransferStateManager.js      # State persistence
+│   └── shared/
+│       └── ProgressTracker.js   # Single source of truth for progress
+├── services/               # Business logic orchestration (stateless)
+│   ├── connection/
+│   │   └── ConnectionService.js # WebRTC lifecycle management
+│   ├── security/
+│   │   └── SecurityService.js   # TOFU authentication
+│   ├── transfer/
+│   │   └── TransferOrchestrator.js  # File transfer coordination
+│   └── messaging/
+│       └── MessageService.js    # Protocol message handling
+├── stores/                 # Zustand stores (minimal, UI state only)
+│   ├── roomStore.js        # Room metadata (roomId, isHost, securityPayload)
+│   ├── transferStore.js    # Transfer history for UI display
+│   └── README.md           # Store vs hook guidelines
 ├── pages/
-│   ├── Home.jsx          # Landing page
-│   └── Room.jsx          # Transfer room page
-├── stores/
-│   ├── roomStore.js      # Room/connection state management
-│   └── transferStore.js  # Transfer progress state management
-└── utils/
-    ├── chunkingSystem.js # ChunkingEngine & AssemblyEngine
-    ├── fileReceiver.js   # Sequential file writing with validation
-    ├── fileSystem.js     # File System Access API wrapper
-    ├── fileMetadata.js   # Metadata creation and storage
-    ├── indexedDB.js      # IndexedDB operations
-    ├── p2pManager.js     # WebRTC connection management
-    ├── signaling.js      # Socket.io signaling
-    ├── tofuSecurity.js   # TOFU authentication
-    ├── identityManager.js# UUID session management
-    ├── connectionMonitor.js # Connection health monitoring
-    └── qrCode.js         # QR code generation
+│   ├── Home.jsx            # Landing page
+│   └── Room/               # Main transfer UI (modular, ~200 lines)
+│       ├── index.jsx       # Composed room component
+│       ├── hooks/          # Custom hooks for business logic
+│       │   ├── useRoomConnection.js   # ConnectionService integration
+│       │   ├── useFileTransfer.js     # TransferOrchestrator integration
+│       │   ├── useSecurity.js         # SecurityService integration
+│       │   ├── useMessages.js         # MessageService integration
+│       │   └── useUI.js               # UI-specific state
+│       ├── components/     # Presentational components
+│       │   ├── ConnectionSection.jsx
+│       │   ├── SecuritySection.jsx
+│       │   ├── TransferSection.jsx
+│       │   └── ActivityLog.jsx
+│       └── README.md       # Room architecture documentation
+├── components/
+│   └── shared/             # Reusable UI components
+├── utils/                  # Legacy utilities (being refactored)
+│   ├── identityManager.js
+│   ├── logger.js
+│   ├── qrCode.js
+│   ├── signaling.js        # Socket.io signaling (used by ConnectionService)
+│   ├── p2pManager.js       # WebRTC adapter (used by ConnectionService)
+│   └── tofuSecurity.js     # TOFU crypto (used by SecurityService)
+└── docs/                   # Developer documentation
+    ├── NEW_DEVELOPER_GUIDE.md   # 30-minute onboarding guide
+    ├── ADDING_FEATURES.md       # Step-by-step feature guides
+    ├── TRANSFER_FLOW.md         # Detailed transfer lifecycle
+    └── DEBUGGING.md             # Troubleshooting common issues
 ```
+
+**📖 For New Developers:** Start with [docs/NEW_DEVELOPER_GUIDE.md](docs/NEW_DEVELOPER_GUIDE.md) for a comprehensive introduction to the codebase.
 
 ## 🔄 Resume & Crash Recovery
 
@@ -213,9 +300,25 @@ npm run lint     # Run ESLint
 
 MIT License - See [LICENSE](LICENSE) for details.
 
+## 📚 Documentation
+
+Comprehensive documentation for developers:
+
+- **[NEW_DEVELOPER_GUIDE.md](docs/NEW_DEVELOPER_GUIDE.md)** - Start here! 30-minute introduction to the codebase
+- **[ADDING_FEATURES.md](docs/ADDING_FEATURES.md)** - Step-by-step guides for common development tasks
+- **[TRANSFER_FLOW.md](docs/TRANSFER_FLOW.md)** - Detailed transfer lifecycle with sequence diagrams
+- **[DEBUGGING.md](docs/DEBUGGING.md)** - Troubleshooting guide for common issues
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Complete architectural overview and design decisions
+- **[stores/README.md](src/stores/README.md)** - Store vs hook state management guidelines
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please read our contributing guidelines before submitting PRs.
+
+**Before contributing:**
+1. Read the [NEW_DEVELOPER_GUIDE.md](docs/NEW_DEVELOPER_GUIDE.md)
+2. Follow the architectural patterns in [ARCHITECTURE.md](ARCHITECTURE.md)
+3. Use [ADDING_FEATURES.md](docs/ADDING_FEATURES.md) for implementation guidance
 
 ## 👥 Team
 
