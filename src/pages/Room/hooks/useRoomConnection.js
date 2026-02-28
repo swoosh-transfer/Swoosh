@@ -74,6 +74,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
 
   const dataChannelRef = useRef(null);
   const handshakeSentRef = useRef(false); // Prevent double handshake
+  const webrtcSetupRef = useRef(false); // Track if guest set up WebRTC early (before join)
 
   /**
    * Send JSON message through data channel
@@ -208,6 +209,71 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
         await waitForConnection();
         if (cancelled) return;
 
+        // --- Guest: set up WebRTC BEFORE joining to prevent offer race ---
+        // When the guest joins, the host immediately creates and sends an offer.
+        // If we rely on a React effect to set up signaling listeners, the offer
+        // may arrive before the effect runs (React state updates are deferred).
+        setPolite(true); // Guest is polite
+        logger.log('[Room] Set polite mode: true');
+
+        initializePeerConnection(socket, roomId, (channel) => {
+          logger.log('[Room] Data channel ready');
+          dataChannelRef.current = channel;
+          setDataChannelReady(true);
+          channel.binaryType = 'arraybuffer';
+          setConnInfo(prev => ({ ...prev, dataChannelState: 'open' }));
+          onDataChannelReady(channel);
+          channel.onclose = () => {
+            setDataChannelReady(false);
+            setConnInfo(prev => ({ ...prev, dataChannelState: 'closed' }));
+            logger.log('[Room] Data channel closed');
+            handshakeSentRef.current = false;
+          };
+        }, (state) => {
+          setConnectionState(state);
+          setConnInfo(prev => ({ ...prev, rtcState: state }));
+          logger.log(`[Room] Connection: ${state}`);
+        }, (stats) => {
+          setConnInfo(prev => ({ ...prev, rtt: stats.rtt, packetLoss: stats.packetLoss }));
+        });
+
+        setupSignalingListeners({
+          onUserJoined: async (data) => {
+            const userId = typeof data === 'object' ? data.userId : data;
+            logger.log(`[Room] Peer joined: ${userId}`);
+          },
+          onUserLeft: (data) => {
+            logger.log(`[Room] Peer left: ${data?.userId}`);
+            addLog('Peer disconnected', 'warning');
+            setDataChannelReady(false);
+            setConnInfo(prev => ({ ...prev, dataChannelState: 'closed' }));
+            handshakeSentRef.current = false;
+          },
+          onRoomFull: (data) => {
+            logger.log(`[Room] Room full: ${data?.message}`);
+            addLog('Room is full', 'warning');
+          },
+          onRoomDismissed: (data) => {
+            logger.log(`[Room] Room dismissed: ${data?.reason}`);
+            addLog(`Room closed: ${data?.reason || 'host left'}`, 'warning');
+          },
+          onOffer: async (offer) => {
+            logger.log('[Room] Received offer');
+            await handleOffer(offer, socket, roomId);
+          },
+          onAnswer: async (answer) => {
+            logger.log('[Room] Received answer');
+            await handleAnswer(answer);
+          },
+          onIceCandidate: async (candidate) => {
+            await handleIceCandidate(candidate);
+          },
+        });
+
+        webrtcSetupRef.current = true;
+        addLog('WebRTC ready, joining room...', 'info');
+        // --- end early setup ---
+
         await joinRoom(roomId);
         setConnectionState('connecting');
         setRoomJoined(true);
@@ -230,6 +296,11 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     const socket = getSocket() ?? initSocket();
     if (!socket || !roomId || !roomJoined || !socket.connected) {
       return; // Wait until socket is connected and room is joined before setting up WebRTC
+    }
+
+    // Guest already set up WebRTC in init effect (before join, to prevent offer race)
+    if (webrtcSetupRef.current) {
+      return;
     }
 
     // Set polite mode FIRST, before any negotiation can happen

@@ -337,12 +337,15 @@ export function setupSignalingListeners(handlers) {
   }
 
   if (handlers.onOffer) {
-    socket.on('offer', async ({ offer, encrypted }) => {
+    socket.on('offer', async (data) => {
       try {
-        const decrypted = (encrypted && encryptionKey)
-          ? await decryptSignaling(offer, encryptionKey)
-          : offer;
-        logger.log('[Socket] Received offer', encrypted ? '(encrypted)' : '(plaintext)');
+        // Backend may relay as { offer } wrapper or raw offer object
+        const raw = data?.offer ?? data;
+        const isEncrypted = !!(raw?.iv && raw?.ciphertext);
+        const decrypted = (isEncrypted && encryptionKey)
+          ? await decryptSignaling(raw, encryptionKey)
+          : raw;
+        logger.log('[Socket] Received offer', isEncrypted ? '(encrypted)' : '(plaintext)');
         handlers.onOffer(decrypted);
       } catch (err) {
         logger.error('[Socket] Failed to decrypt offer – wrong key?', err);
@@ -351,12 +354,14 @@ export function setupSignalingListeners(handlers) {
   }
 
   if (handlers.onAnswer) {
-    socket.on('answer', async ({ answer, encrypted }) => {
+    socket.on('answer', async (data) => {
       try {
-        const decrypted = (encrypted && encryptionKey)
-          ? await decryptSignaling(answer, encryptionKey)
-          : answer;
-        logger.log('[Socket] Received answer', encrypted ? '(encrypted)' : '(plaintext)');
+        const raw = data?.answer ?? data;
+        const isEncrypted = !!(raw?.iv && raw?.ciphertext);
+        const decrypted = (isEncrypted && encryptionKey)
+          ? await decryptSignaling(raw, encryptionKey)
+          : raw;
+        logger.log('[Socket] Received answer', isEncrypted ? '(encrypted)' : '(plaintext)');
         handlers.onAnswer(decrypted);
       } catch (err) {
         logger.error('[Socket] Failed to decrypt answer – wrong key?', err);
@@ -365,12 +370,14 @@ export function setupSignalingListeners(handlers) {
   }
 
   if (handlers.onIceCandidate) {
-    socket.on('ice-candidate', async ({ candidate, encrypted }) => {
+    socket.on('ice-candidate', async (data) => {
       try {
-        const decrypted = (encrypted && encryptionKey)
-          ? await decryptSignaling(candidate, encryptionKey)
-          : candidate;
-        logger.log('[Socket] Received ICE candidate', encrypted ? '(encrypted)' : '(plaintext)');
+        const raw = data?.candidate ?? data;
+        const isEncrypted = !!(raw?.iv && raw?.ciphertext);
+        const decrypted = (isEncrypted && encryptionKey)
+          ? await decryptSignaling(raw, encryptionKey)
+          : raw;
+        logger.log('[Socket] Received ICE candidate', isEncrypted ? '(encrypted)' : '(plaintext)');
         handlers.onIceCandidate(decrypted);
       } catch (err) {
         logger.error('[Socket] Failed to decrypt ICE candidate – wrong key?', err);
