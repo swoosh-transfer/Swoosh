@@ -12,6 +12,7 @@ import {
   initSocket,
   getSocket,
   joinRoom,
+  leaveRoom,
   setupSignalingListeners,
   waitForConnection,
   setEncryptionKey,
@@ -209,13 +210,14 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
 
         await joinRoom(roomId);
         setConnectionState('connecting');
-        setRoomJoined(true); // Mark room as joined
+        setRoomJoined(true);
         addLog(`Joined room: ${roomId}`, 'success');
 
       } catch (err) {
         if (cancelled) return;
         if (err.message === 'Already joining room') return;
-        addLog(`Failed: ${err.message}`, 'error');
+        const code = err.code || '';
+        addLog(`Failed: ${code ? `[${code}] ` : ''}${err.message}`, 'error');
       }
     };
 
@@ -321,12 +323,30 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
 
     // Setup signaling listeners
     setupSignalingListeners({
-      onUserJoined: async (peerId) => {
-        logger.log(`[Room] Peer joined: ${peerId}`);
+      onUserJoined: async (data) => {
+        // Support both old (string) and new (object) payloads
+        const userId = typeof data === 'object' ? data.userId : data;
+        logger.log(`[Room] Peer joined: ${userId}`);
         if (isHost) {
           logger.log('[Room] Creating offer...');
           await createOffer(socket, roomId, onChannelReady);
         }
+      },
+      onUserLeft: (data) => {
+        const userId = data?.userId;
+        logger.log(`[Room] Peer left: ${userId}`);
+        addLog('Peer disconnected', 'warning');
+        setDataChannelReady(false);
+        setConnInfo(prev => ({ ...prev, dataChannelState: 'closed' }));
+        handshakeSentRef.current = false;
+      },
+      onRoomFull: (data) => {
+        logger.log(`[Room] Room full: ${data?.message}`);
+        addLog('Room is full', 'warning');
+      },
+      onRoomDismissed: (data) => {
+        logger.log(`[Room] Room dismissed: ${data?.reason}`);
+        addLog(`Room closed: ${data?.reason || 'host left'}`, 'warning');
       },
       onOffer: async (offer) => {
         logger.log('[Room] Received offer');

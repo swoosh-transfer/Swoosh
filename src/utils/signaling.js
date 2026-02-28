@@ -176,15 +176,20 @@ export function createRoom() {
       return;
     }
 
-    const onRoomCreated = (roomId) => {
+    const onRoomCreated = (data) => {
       cleanup();
-      logger.log('[Socket] Room created:', roomId);
-      resolve(roomId);
+      // Support both old (string) and new (object) payloads
+      const roomId = typeof data === 'object' ? data.roomId : data;
+      logger.log('[Socket] Room created:', roomId, typeof data === 'object' ? `(${data.occupancy}/${data.capacity})` : '');
+      resolve(data);
     };
 
     const onError = (error) => {
       cleanup();
-      reject(new Error(error));
+      const message = typeof error === 'object' ? error.message : error;
+      const err = new Error(message);
+      if (typeof error === 'object' && error.code) err.code = error.code;
+      reject(err);
     };
 
     const cleanup = () => {
@@ -235,18 +240,23 @@ export function joinRoom(roomId) {
     isJoining = true;
 
     // Create one-time handlers that clean up after themselves
-    const onRoomJoined = (joinedRoomId) => {
+    const onRoomJoined = (data) => {
       cleanup();
       isJoining = false;
+      // Support both old (string) and new (object) payloads
+      const joinedRoomId = typeof data === 'object' ? data.roomId : data;
       currentRoom = joinedRoomId;
-      logger.log('[Socket] Joined room:', joinedRoomId);
-      resolve(joinedRoomId);
+      logger.log('[Socket] Joined room:', joinedRoomId, typeof data === 'object' ? `(${data.occupancy}/${data.capacity})` : '');
+      resolve(data);
     };
 
     const onError = (error) => {
       cleanup();
       isJoining = false;
-      reject(new Error(error));
+      const message = typeof error === 'object' ? error.message : error;
+      const err = new Error(message);
+      if (typeof error === 'object' && error.code) err.code = error.code;
+      reject(err);
     };
 
     const cleanup = () => {
@@ -272,7 +282,10 @@ export function joinRoom(roomId) {
 /**
  * Set up signaling event listeners for WebRTC
  * @param {Object} handlers - Event handlers object
- * @param {Function} handlers.onUserJoined - Called when a user joins the room
+ * @param {Function} handlers.onUserJoined - Called when a user joins the room (receives { userId, occupancy, capacity, isFull } or peerId string)
+ * @param {Function} [handlers.onUserLeft] - Called when a user leaves the room (receives { userId, occupancy, capacity })
+ * @param {Function} [handlers.onRoomFull] - Called when room reaches max capacity (receives { roomId, occupancy, message })
+ * @param {Function} [handlers.onRoomDismissed] - Called when room is deleted (receives { roomId, reason })
  * @param {Function} handlers.onOffer - Called when receiving an offer
  * @param {Function} handlers.onAnswer - Called when receiving an answer
  * @param {Function} handlers.onIceCandidate - Called when receiving an ICE candidate
@@ -285,14 +298,41 @@ export function setupSignalingListeners(handlers) {
 
   // Clear previous listeners to avoid duplicates
   socket.off('user-joined');
+  socket.off('user-left');
+  socket.off('room-full');
+  socket.off('room-dismissed');
   socket.off('offer');
   socket.off('answer');
   socket.off('ice-candidate');
 
   if (handlers.onUserJoined) {
-    socket.on('user-joined', (peerId) => {
-      logger.log('[Socket] User joined:', peerId);
-      handlers.onUserJoined(peerId);
+    socket.on('user-joined', (data) => {
+      // Support both old (string peerId) and new (object) payloads
+      const userId = typeof data === 'object' ? data.userId : data;
+      logger.log('[Socket] User joined:', userId);
+      handlers.onUserJoined(data);
+    });
+  }
+
+  if (handlers.onUserLeft) {
+    socket.on('user-left', (data) => {
+      const userId = data?.userId;
+      logger.log('[Socket] User left:', userId);
+      handlers.onUserLeft(data);
+    });
+  }
+
+  if (handlers.onRoomFull) {
+    socket.on('room-full', (data) => {
+      logger.log('[Socket] Room full:', data?.message);
+      handlers.onRoomFull(data);
+    });
+  }
+
+  if (handlers.onRoomDismissed) {
+    socket.on('room-dismissed', (data) => {
+      logger.log('[Socket] Room dismissed:', data?.reason);
+      handlers.onRoomDismissed(data);
     });
   }
 
@@ -409,6 +449,18 @@ export async function sendIceCandidate(candidate, roomId) {
 }
 
 /**
+ * Leave current room explicitly
+ * Emits 'leave-room' so the server can update occupancy and notify peers.
+ */
+export function leaveRoom() {
+  if (!socket) return;
+  socket.emit('leave-room');
+  currentRoom = null;
+  isJoining = false;
+  logger.log('[Socket] Left room');
+}
+
+/**
  * Disconnect socket connection
  */
 export function disconnectSocket() {
@@ -423,6 +475,7 @@ export default {
   getSocket,
   createRoom,
   joinRoom,
+  leaveRoom,
   setupSignalingListeners,
   sendOffer,
   sendAnswer,

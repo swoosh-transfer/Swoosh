@@ -102,7 +102,8 @@ export default function Home() {
       const tofuSetup = await createTOFUSetup();
       
       // Create room on signaling server
-      const roomId = await createRoom();
+      const roomData = await createRoom();
+      const roomId = typeof roomData === 'object' ? roomData.roomId : roomData;
       
       // Store state
       setSelectedFile(file);

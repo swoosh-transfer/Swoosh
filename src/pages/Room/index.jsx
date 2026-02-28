@@ -8,7 +8,7 @@ import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useRoomStore } from '../../stores/roomStore.js';
 import { ErrorDisplay, CrashRecoveryPrompt } from '../../components/RoomUI.jsx';
-import { disconnectSocket } from '../../utils/signaling.js';
+import { disconnectSocket, leaveRoom } from '../../utils/signaling.js';
 import { getQRCodeUrl } from '../../utils/qrCode.js';
 
 // Custom hooks
@@ -124,6 +124,7 @@ export default function Room() {
       dataChannelRef.current.close();
     }
 
+    leaveRoom();
     disconnectSocket();
 
     resetRoom();

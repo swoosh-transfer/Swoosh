@@ -11,7 +11,7 @@ import { create } from 'zustand';
  * 
  * WHAT THIS STORE NO LONGER MANAGES (delegated to hooks):
  * - Connection state → useRoomConnection hook
- * - TOFU verification → useSecurity hook
+ * - Security verification → useSecurity hook
  * - Transfer progress → useFileTransfer hook
  * - Data channel state → useRoomConnection hook
  * 
@@ -26,7 +26,7 @@ export const useRoomStore = create((set, get) => ({
   isHost: false,
   
   // Security payload (secret, peerID) embedded in share URL
-  // Used for TOFU verification between peers
+  // Used for encrypted signaling verification between peers
   securityPayload: null,
   
   // File selected on Home.jsx, persists to Room.jsx for transfer
@@ -50,7 +50,7 @@ export const useRoomStore = create((set, get) => ({
   setIsHost: (isHost) => set({ isHost }),
   
   /**
-   * Set security payload for TOFU verification
+   * Set security payload for signaling encryption
    * @param {Object} payload - Security payload { secret, peerID }
    */
   setSecurityPayload: (payload) => set({ securityPayload: payload }),

@@ -41,16 +41,31 @@ export const MESSAGE_TYPES = MESSAGE_TYPE;
 
 /**
  * Signaling Event Types
+ * Events exchanged between client and signaling server via Socket.IO.
  */
 export const SIGNALING_EVENT = {
   ROOM_CREATED: 'room-created',
   ROOM_JOINED: 'room-joined',
   PEER_JOINED: 'peer-joined',
   PEER_LEFT: 'peer-left',
+  USER_JOINED: 'user-joined',
+  USER_LEFT: 'user-left',
+  ROOM_FULL: 'room-full',
+  ROOM_DISMISSED: 'room-dismissed',
+  LEAVE_ROOM: 'leave-room',
+  ROOM_LEFT: 'room-left',
   OFFER: 'offer',
   ANSWER: 'answer',
   ICE_CANDIDATE: 'ice-candidate',
   ERROR: 'error',
+};
+
+/**
+ * Signaling Error Codes
+ */
+export const ERROR_CODE = {
+  ROOM_NOT_FOUND: 'ROOM_NOT_FOUND',
+  ROOM_FULL: 'ROOM_FULL',
 };
 
 /**
