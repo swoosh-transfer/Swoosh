@@ -371,11 +371,18 @@ export class FileReceiver {
         timestamp: Date.now(),
       });
 
-      // Update resumable transfer progress
-      await resumableTransferManager.updateProgress(transferId, {
-        chunkIndex,
-        bytesProcessed: state.bytesReceived
-      });
+      // Update resumable transfer progress (ignore errors if transfer already cleaned up)
+      try {
+        await resumableTransferManager.updateProgress(transferId, {
+          chunkIndex,
+          bytesProcessed: state.bytesReceived
+        });
+      } catch (err) {
+        // Ignore "transfer not found" errors - happens when transfer completes before last chunk finishes processing
+        if (!err.message.includes('transfer not found')) {
+          throw err;
+        }
+      }
 
       // Calculate progress
       const progress = Math.round((state.bytesReceived / state.fileSize) * 100);
@@ -399,7 +406,10 @@ export class FileReceiver {
 
       return { success: true, chunkIndex, progress };
     } catch (err) {
-      logger.error('[FileReceiver] Chunk receive error:', err);
+      // Log error unless it's "transfer not found" (happens during cleanup phase)
+      if (!err.message || !err.message.includes('transfer not found')) {
+        logger.error('[FileReceiver] Chunk receive error:', err);
+      }
       state.missingChunks.add(chunkIndex);
       return { success: false, error: err.message, chunkIndex };
     }

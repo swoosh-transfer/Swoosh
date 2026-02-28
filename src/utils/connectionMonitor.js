@@ -1,16 +1,33 @@
+/**
+ * Connection Health Monitor
+ * 
+ * Monitors WebRTC connection quality by polling RTCPeerConnection statistics.
+ * Tracks round-trip time (RTT) and packet loss for connection health.
+ */
+
 import logger from './logger.js';
+import { CONNECTION_MONITOR_INTERVAL } from '../constants/timing.constants.js';
 
 let monitorInterval = null;
 
 /**
- * Starts periodic polling of WebRTC statistics.
- * @param {RTCPeerConnection} pc - The active peer connection.
- * @param {Function} onStats - Callback receiving { rtt, packetLoss }.
+ * Start periodic monitoring of WebRTC connection statistics
+ * 
+ * Polls RTCPeerConnection.getStats() to extract:
+ * - Round-trip time (RTT) in milliseconds
+ * - Packet loss percentage
+ * 
+ * @param {RTCPeerConnection} pc - Active WebRTC peer connection
+ * @param {Function} onStats - Callback receiving { rtt: number, packetLoss: string }
+ * 
+ * @example
+ * startHealthMonitoring(peerConnection, ({ rtt, packetLoss }) => {
+ *   console.log(`RTT: ${rtt}ms, Loss: ${packetLoss}%`);
+ * });
  */
-function startHealthMonitoring(pc, onStats) {
+export function startHealthMonitoring(pc, onStats) {
   if (monitorInterval) clearInterval(monitorInterval);
 
-  // Poll stats every 1000ms
   monitorInterval = setInterval(async () => {
     if (!pc || pc.connectionState !== 'connected') return;
 
@@ -45,15 +62,18 @@ function startHealthMonitoring(pc, onStats) {
     } catch (err) {
       logger.error("Stats monitoring error:", err);
     }
-  }, 1000);
+  }, CONNECTION_MONITOR_INTERVAL);
 }
 
 /**
- * Stops the monitoring interval.
+ * Stop connection health monitoring
+ * 
+ * Clears the monitoring interval and stops collecting statistics.
+ * 
+ * @example
+ * stopHealthMonitoring();
  */
-function stopHealthMonitoring() {
+export function stopHealthMonitoring() {
   if (monitorInterval) clearInterval(monitorInterval);
   monitorInterval = null;
 }
-
-export { startHealthMonitoring, stopHealthMonitoring}
