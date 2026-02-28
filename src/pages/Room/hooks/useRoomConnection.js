@@ -26,6 +26,7 @@ import {
   setPolite,
 } from '../../../utils/p2pManager.js';
 import { useRoomStore } from '../../../stores/roomStore.js';
+import logger from '../../../utils/logger.js';
 
 /**
  * @typedef {Object} ConnectionInfo
@@ -54,6 +55,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
   const [socketId, setSocketId] = useState(null);
   const [dataChannelReady, setDataChannelReady] = useState(false);
   const [shareUrl, setShareUrl] = useState('');
+  const [roomJoined, setRoomJoined] = useState(isHost); // Host doesn't need to join, guest does
   
   /** @type {React.MutableRefObject<ConnectionInfo>} */
   const [connInfo, setConnInfo] = useState({
@@ -122,7 +124,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
   useEffect(() => {
     if (!isHost) return;
     
-    const socket = getSocket();
+    const socket = getSocket() ?? initSocket();
     if (!socket) return;
 
     // Check current state immediately
@@ -198,6 +200,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
 
         await joinRoom(roomId);
         setConnectionState('connecting');
+        setRoomJoined(true); // Mark room as joined
         addLog(`Joined room: ${roomId}`, 'success');
 
       } catch (err) {
@@ -211,14 +214,21 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     return () => { cancelled = true; };
   }, [roomId, isHost, setSecurityPayload, setRoomId, setConnectionState, addLog]);
 
-  // WebRTC setup
+  // WebRTC setup - wait until room is joined
   useEffect(() => {
-    const socket = getSocket();
-    if (!socket || !roomId) return;
+    const socket = getSocket() ?? initSocket();
+    if (!socket || !roomId || !roomJoined || !socket.connected) {
+      return; // Wait until socket is connected and room is joined before setting up WebRTC
+    }
+
+    // Set polite mode FIRST, before any negotiation can happen
+    // Host (sender) is impolite, Guest (receiver) is polite
+    setPolite(!isHost);
+    logger.log(`[Room] Set polite mode: ${!isHost}`);
 
     // Callback when data channel opens
     const onChannelReady = (channel) => {
-      addLog('Data channel ready', 'success');
+      logger.log('[Room] Data channel ready');
       dataChannelRef.current = channel;
       setDataChannelReady(true);
       channel.binaryType = 'arraybuffer';
@@ -230,7 +240,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
       channel.onclose = () => {
         setDataChannelReady(false);
         setConnInfo(prev => ({ ...prev, dataChannelState: 'closed' }));
-        addLog('Data channel closed', 'warning');
+        logger.log('[Room] Data channel closed');
         handshakeSentRef.current = false;
       };
     };
@@ -239,7 +249,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     const onStateChange = (state) => {
       setConnectionState(state);
       setConnInfo(prev => ({ ...prev, rtcState: state }));
-      addLog(`Connection: ${state}`, state === 'connected' ? 'success' : 'info');
+      logger.log(`[Room] Connection: ${state}`);
     };
 
     // Stats callback
@@ -249,16 +259,13 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
 
     // Initialize peer connection
     const pc = initializePeerConnection(socket, roomId, onChannelReady, onStateChange, onStats);
-    
-    // Set polite mode: joiner (receiver) is polite, host (sender) is impolite
-    setPolite(!isHost);
 
     if (pc) {
       pc.oniceconnectionstatechange = () => {
         setConnInfo(prev => ({ ...prev, iceState: pc.iceConnectionState }));
         
         if (pc.iceConnectionState === 'failed') {
-          addLog('ICE connection failed, attempting restart...', 'warning');
+          logger.log('[Room] ICE connection failed, attempting restart...');
         }
       };
       pc.onsignalingstatechange = () => {
@@ -268,12 +275,12 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
 
     // Handle socket reconnection
     const handleReconnection = async (rejoinedRoomId) => {
-      addLog('Socket reconnected, re-establishing connection...', 'info');
+      logger.log('[Room] Socket reconnected, re-establishing connection...');
       handshakeSentRef.current = false;
       
       // If we're the host, create a new offer
       if (isHost) {
-        addLog('Re-creating offer after reconnect...', 'info');
+        logger.log('[Room] Re-creating offer after reconnect...');
         setTimeout(async () => {
           await createOffer(socket, roomId, onChannelReady);
         }, 500);
@@ -285,18 +292,18 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     // Setup signaling listeners
     setupSignalingListeners({
       onUserJoined: async (peerId) => {
-        addLog(`Peer joined: ${peerId}`, 'success');
+        logger.log(`[Room] Peer joined: ${peerId}`);
         if (isHost) {
-          addLog('Creating offer...', 'info');
+          logger.log('[Room] Creating offer...');
           await createOffer(socket, roomId, onChannelReady);
         }
       },
       onOffer: async (offer) => {
-        addLog('Received offer', 'info');
+        logger.log('[Room] Received offer');
         await handleOffer(offer, socket, roomId);
       },
       onAnswer: async (answer) => {
-        addLog('Received answer', 'info');
+        logger.log('[Room] Received answer');
         await handleAnswer(answer);
       },
       onIceCandidate: async (candidate) => {
@@ -307,7 +314,9 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     return () => {
       offReconnect(handleReconnection);
     };
-  }, [roomId, isHost, onDataChannelReady, setConnectionState, addLog]);
+    // Functions (onDataChannelReady, setConnectionState) are captured in closure and shouldn't be dependencies
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomId, isHost, roomJoined, socketConnected]);
 
   return {
     // State

@@ -24,10 +24,11 @@ import { useRoomStore } from '../../../stores/roomStore.js';
  * @returns {Object} Security state and methods
  */
 export function useSecurity(roomId, sendJSON, addLog) {
-  const { securityPayload, setTofuVerified, tofuVerified } = useRoomStore();
+  const { securityPayload } = useRoomStore();
   
   const [verificationStatus, setVerificationStatus] = useState('pending');
   const [identityVerified, setIdentityVerified] = useState(false);
+  const [tofuVerified, setTofuVerified] = useState(false);
   
   const myUUID = useRef(getLocalUUID());
   const challengeRef = useRef(null);
@@ -216,7 +217,7 @@ export function useSecurity(roomId, sendJSON, addLog) {
     setTofuVerified(false);
     setIdentityVerified(false);
     setVerificationStatus('pending');
-  }, [setTofuVerified]);
+  }, []);
 
   return {
     // State

@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useRoomStore } from '../stores/roomStore';
-import { initSocket, createRoom } from '../utils/signaling';
+import { initSocket, waitForConnection, createRoom } from '../utils/signaling';
 import { createTOFUSetup } from '../utils/tofuSecurity';
 import logger from '../utils/logger.js';
 
@@ -96,6 +96,7 @@ export default function Home() {
     try {
       // Initialize socket connection
       initSocket();
+      await waitForConnection();
       
       // Create TOFU security setup
       const tofuSetup = await createTOFUSetup();
@@ -269,7 +270,7 @@ export default function Home() {
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                       </svg>
                     </div>
-                    <p className="text-zinc-100 font-medium truncate mb-1">
+                    <p className="text-zinc-100 font-medium mb-1 px-4 break-words">
                       {selectedFile.name}
                     </p>
                     <p className="text-zinc-500 text-sm">

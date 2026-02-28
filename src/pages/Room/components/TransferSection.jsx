@@ -51,6 +51,23 @@ export function TransferSection({
         </div>
       )}
 
+      {/* Receiver: Waiting for file loading state */}
+      {!isHost && !pendingFile && dataChannelReady && (
+        <div className="bg-zinc-900 border border-emerald-800 rounded-xl p-8">
+          <div className="flex flex-col items-center justify-center">
+            <div className="mb-6">
+              <div className="flex gap-2">
+                <div className="w-3 h-3 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                <div className="w-3 h-3 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                <div className="w-3 h-3 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+              </div>
+            </div>
+            <h2 className="text-lg font-medium text-emerald-400 mb-2">Waiting for file...</h2>
+            <p className="text-sm text-zinc-500 text-center">Connected and ready. Sender can now share a file.</p>
+          </div>
+        </div>
+      )}
+
       {/* Receiver: Incoming file prompt */}
       {awaitingSaveLocation && pendingFile && (
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
@@ -94,7 +111,7 @@ export function TransferSection({
       )}
 
       {/* Host: Send Button */}
-      {isHost && tofuVerified && dataChannelReady && transferState === 'idle' && (
+      {isHost && selectedFile && tofuVerified && dataChannelReady && transferState === 'idle' && (
         <button
           onClick={onStartTransfer}
           className="w-full py-3 bg-zinc-100 text-zinc-900 hover:bg-white rounded-xl font-medium transition-colors"

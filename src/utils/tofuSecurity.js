@@ -6,11 +6,11 @@
 import logger from './logger.js';
 
 /**
- * Generate a cryptographically secure 32-byte random secret
+ * Generate a cryptographically secure 8-byte random secret (11 chars when base64 encoded)
  * @returns {Promise<string>} Base64-encoded secret
  */
 export async function generateSharedSecret() {
-  const secretBytes = new Uint8Array(32);
+  const secretBytes = new Uint8Array(8);
   crypto.getRandomValues(secretBytes);
   
   // Convert to base64 for safe transmission
@@ -18,11 +18,11 @@ export async function generateSharedSecret() {
 }
 
 /**
- * Generate a unique peer ID
+ * Generate a unique peer ID (6-byte = 8 chars when base64 encoded)
  * @returns {Promise<string>} Base64-encoded peer ID
  */
 export async function generatePeerID() {
-  const idBytes = new Uint8Array(16);
+  const idBytes = new Uint8Array(6);
   crypto.getRandomValues(idBytes);
   
   return btoa(String.fromCharCode(...idBytes));

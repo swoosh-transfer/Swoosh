@@ -376,9 +376,18 @@ export function useFileTransfer(
         });
         addLog('File saved!', 'success');
 
-        // Clean up
+        // Clean up - mark transfer as complete in resumable manager, catching "not found" errors
         try {
           await resumableTransferManager.completeTransfer(transferIdRef.current);
+        } catch (completeErr) {
+          // Ignore "transfer not found" - metadata may have been cleaned up already
+          if (!completeErr.message || !completeErr.message.includes('transfer not found')) {
+            throw completeErr;
+          }
+        }
+        
+        // Now cleanup remaining data
+        try {
           await cleanupTransferData(transferIdRef.current);
           logger.log('[Transfer] Full cleanup completed for receiver:', transferIdRef.current);
         } catch (cleanupErr) {

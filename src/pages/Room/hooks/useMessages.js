@@ -5,12 +5,13 @@
  * - Manages chunk metadata/binary queuing
  * - Coordinates security verification with data processing
  */
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useRef } from 'react';
 import logger from '../../../utils/logger.js';
 
 /**
  * Hook for managing message protocol handling
  * @param {Object} dataChannelRef - Ref to data channel
+ * @param {boolean} dataChannelReady - Whether data channel is open
  * @param {boolean} isHost - Whether user is the host
  * @param {Object} security - Security hook return value
  * @param {Object} transfer - Transfer hook return value
@@ -20,6 +21,7 @@ import logger from '../../../utils/logger.js';
  */
 export function useMessages(
   dataChannelRef,
+  dataChannelReady,
   isHost,
   security,
   transfer,
@@ -53,6 +55,9 @@ export function useMessages(
     setDownloadResultData,
   } = uiState;
 
+  const pendingFileMetadataRef = useRef(null);
+  const receiverReadyRef = useRef(false);
+
   /**
    * Process pending binary data after TOFU verification
    */
@@ -66,6 +71,21 @@ export function useMessages(
       }
     }
   }, [pendingBinaryQueueRef, chunkMetaQueueRef, receiveChunk]);
+
+  const processPendingControl = useCallback(async () => {
+    if (!tofuVerifiedRef.current) return;
+
+    if (pendingFileMetadataRef.current) {
+      const pendingMeta = pendingFileMetadataRef.current;
+      pendingFileMetadataRef.current = null;
+      await initializeReceive(pendingMeta, setPendingFileData);
+    }
+
+    if (receiverReadyRef.current && isHost) {
+      receiverReadyRef.current = false;
+      await sendFileChunks();
+    }
+  }, [initializeReceive, isHost, sendFileChunks, setPendingFileData, tofuVerifiedRef]);
 
   /**
    * Handle incoming binary chunk data
@@ -110,21 +130,31 @@ export function useMessages(
         }
 
         case 'tofu-challenge':
-          await handleTOFUChallenge(msg, processPendingData);
+          await handleTOFUChallenge(msg, async () => {
+            await processPendingData();
+            await processPendingControl();
+          });
           break;
 
         case 'tofu-response':
-          await handleTOFUResponse(msg, processPendingData);
+          await handleTOFUResponse(msg, async () => {
+            await processPendingData();
+            await processPendingControl();
+          });
           break;
 
         case 'tofu-verified':
-          handleTOFUVerified(processPendingData);
+          handleTOFUVerified(async () => {
+            await processPendingData();
+            await processPendingControl();
+          });
           break;
 
         case 'file-metadata':
           // SECURITY: Block until TOFU is verified
           if (!tofuVerifiedRef.current) {
-            addLog('Received file metadata before TOFU verification - ignoring', 'warning');
+            addLog('Received file metadata before TOFU verification - queued', 'warning');
+            pendingFileMetadataRef.current = msg;
             return;
           }
           await initializeReceive(msg, setPendingFileData);
@@ -144,7 +174,8 @@ export function useMessages(
           if (isHost) {
             // SECURITY: Only send after TOFU verification
             if (!tofuVerifiedRef.current) {
-              addLog('Ignoring receiver-ready: TOFU not verified', 'warning');
+              addLog('Receiver ready before TOFU - queued', 'warning');
+              receiverReadyRef.current = true;
               return;
             }
             addLog('Receiver ready, sending...', 'success');
@@ -199,6 +230,7 @@ export function useMessages(
     setPendingFileData,
     setDownloadResultData,
     processPendingData,
+    processPendingControl,
     addLog,
   ]);
 
@@ -207,7 +239,7 @@ export function useMessages(
    */
   useEffect(() => {
     const channel = dataChannelRef.current;
-    if (!channel) return;
+    if (!channel || !dataChannelReady) return;
 
     // Set up message handler
     channel.onmessage = handleMessage;
@@ -220,7 +252,7 @@ export function useMessages(
     return () => {
       // Cleanup is handled by channel.onclose in useRoomConnection
     };
-  }, [dataChannelRef, handleMessage, sendHandshake]);
+  }, [dataChannelRef, dataChannelReady, handleMessage, sendHandshake]);
 
   return {
     handleMessage,

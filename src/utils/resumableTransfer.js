@@ -238,11 +238,20 @@ class ResumableTransferManager {
    * @param {string} transferId Transfer ID
    */
   async completeTransfer(transferId) {
-    await updateTransferMeta(transferId, {
-      status: TransferState.COMPLETED,
-      completedAt: Date.now(),
-      updatedAt: Date.now()
-    });
+    try {
+      await updateTransferMeta(transferId, {
+        status: TransferState.COMPLETED,
+        completedAt: Date.now(),
+        updatedAt: Date.now()
+      });
+    } catch (err) {
+      // If transfer metadata is not found, it's already been cleaned up - this is OK
+      if (err.message && err.message.includes('transfer not found')) {
+        logger.log(`[ResumableTransfer] Transfer ${transferId} already cleaned up`);
+        return;
+      }
+      throw err;
+    }
 
     // Cleanup
     this.pausedTransfers.delete(transferId);
