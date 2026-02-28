@@ -1,9 +1,11 @@
 import { startHealthMonitoring, stopHealthMonitoring } from './connectionMonitor';
 import { sendOffer, sendAnswer, sendIceCandidate } from './signaling.js';
+import { ChannelPool } from '../transfer/multichannel/ChannelPool.js';
 import logger from './logger.js';
 
 let peerConnection = null;
-let dataChannel = null;
+/** @type {ChannelPool|null} */
+let channelPool = null;
 let remoteDescriptionSet = false;
 let iceCandidateQueue = [];
 let isNegotiating = false; // Track if we're in the middle of negotiation
@@ -40,11 +42,13 @@ export function canNegotiate() {
  * Get current connection state
  */
 export function getConnectionState() {
+  const ch0 = channelPool?.getControlChannel();
   return {
     peerConnection: peerConnection?.connectionState,
     signaling: peerConnection?.signalingState,
     ice: peerConnection?.iceConnectionState,
-    dataChannel: dataChannel?.readyState,
+    dataChannel: ch0?.readyState,
+    channelCount: channelPool?.openCount ?? 0,
     isNegotiating,
     remoteDescriptionSet
   };
@@ -60,6 +64,10 @@ export function getConnectionState() {
  */
 export function initializePeerConnection(socket, roomId, onChannelReady, onStateChange, onStats) {
   // Cleanup existing connection to prevent memory leaks
+  if (channelPool) {
+    channelPool.destroy();
+    channelPool = null;
+  }
   if (peerConnection) {
     stopHealthMonitoring();
     peerConnection.close();
@@ -71,6 +79,7 @@ export function initializePeerConnection(socket, roomId, onChannelReady, onState
   makingOffer = false;
 
   peerConnection = new RTCPeerConnection(rtcConfig);
+  channelPool = new ChannelPool(peerConnection);
 
   // Send local ICE candidates to the remote peer via signaling (encrypted)
   peerConnection.onicecandidate = (event) => {
@@ -98,8 +107,20 @@ export function initializePeerConnection(socket, roomId, onChannelReady, onState
   };
 
   // Handle incoming DataChannel from the remote peer
+  // Route to ChannelPool; fire onChannelReady when channel-0 opens
   peerConnection.ondatachannel = (event) => {
-    setupDataChannel(event.channel, onChannelReady);
+    const idx = channelPool.acceptChannel(event.channel);
+    if (idx === 0) {
+      // Channel-0 is the control channel — notify legacy callback
+      const ch = channelPool.getControlChannel();
+      if (ch.readyState === 'open') {
+        if (onChannelReady) onChannelReady(ch);
+      } else {
+        ch.addEventListener('open', () => {
+          if (onChannelReady) onChannelReady(ch);
+        }, { once: true });
+      }
+    }
   };
 
   return peerConnection;
@@ -122,13 +143,13 @@ export async function createOffer(socket, roomId, onChannelReady) {
     makingOffer = true;
     isNegotiating = true;
     
-    // Create reliable and ordered data channel for file transfer
-    if (!dataChannel || dataChannel.readyState === 'closed') {
-      dataChannel = peerConnection.createDataChannel("file-transfer", { 
-        reliable: true, 
-        ordered: true 
-      });
-      setupDataChannel(dataChannel, onChannelReady);
+    // Create channel-0 (control channel) via ChannelPool
+    if (!channelPool.getControlChannel() ||
+        channelPool.getControlChannel().readyState === 'closed') {
+      const ch = channelPool.addChannel(0);
+      ch.addEventListener('open', () => {
+        if (onChannelReady) onChannelReady(ch);
+      }, { once: true });
     }
 
     const offer = await peerConnection.createOffer();
@@ -236,20 +257,12 @@ function processIceQueue() {
   }
 }
 
-// Configures DataChannel listeners
-function setupDataChannel(channel, onReady) {
-  dataChannel = channel;
-  channel.onopen = () => {
-    if (onReady) onReady(channel);
-  };
-}
-
 // Attempts ICE restart if the connection fails
 async function handleAutoReconnection(socket, roomId) {
   if (!peerConnection) return;
 
-  // Only the initiator (who created the channel) should restart to avoid conflicts
-  if (dataChannel && dataChannel.id !== null) {
+  const ch0 = channelPool?.getControlChannel();
+  if (ch0 && ch0.id !== null) {
      try {
        const offer = await peerConnection.createOffer({ iceRestart: true });
        await peerConnection.setLocalDescription(offer);
@@ -258,4 +271,30 @@ async function handleAutoReconnection(socket, roomId) {
        logger.error("Reconnection failed:", err);
      }
   }
+}
+
+// ─── Public accessors ──────────────────────────────────────────────
+
+/**
+ * Get the ChannelPool instance (for multi-channel transfers).
+ * @returns {ChannelPool|null}
+ */
+export function getChannelPool() {
+  return channelPool;
+}
+
+/**
+ * Backward-compatible: get channel-0 (the single legacy data channel).
+ * @returns {RTCDataChannel|undefined}
+ */
+export function getDataChannel() {
+  return channelPool?.getControlChannel();
+}
+
+/**
+ * Get the current RTCPeerConnection.
+ * @returns {RTCPeerConnection|null}
+ */
+export function getPeerConnection() {
+  return peerConnection;
 }
