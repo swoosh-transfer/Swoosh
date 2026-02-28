@@ -16,14 +16,17 @@ import {
   NETWORK_CHUNK_SIZE, 
   STORAGE_CHUNK_SIZE,
   MAX_CHUNK_SIZE,
-  MIN_CHUNK_SIZE 
+  MIN_CHUNK_SIZE,
+  SPEED_HIGH_THRESHOLD,
+  SPEED_LOW_THRESHOLD,
+  SPEED_ADJUSTMENT_INCREMENT
 } from '../../constants/transfer.constants.js';
 
 export class ChunkingEngine {
   constructor() {
     this.activeChunkings = new Map(); // transferId -> chunking state
     this.storageBuffers = new Map(); // transferId -> storage buffer
-    this.chunkSize = NETWORK_CHUNK_SIZE;
+    this.chunkSizes = new Map(); // transferId -> current chunk size (per-transfer)
     this.performanceMetrics = new Map(); // transferId -> metrics
     this.pauseControllers = new Map(); // transferId -> { isPaused, resumeResolve }
     this.fileReaders = new Map(); // transferId -> reader (for resume)
@@ -94,8 +97,15 @@ export class ChunkingEngine {
   /**
    * CHUNKING LOOP - Sender side implementation
    * Reads file, buffers chunks, calculates checksums, sends data
+   * 
+   * @param {string} transferId - Unique transfer identifier
+   * @param {File} file - File object to send
+   * @param {string} peerId - Receiver peer ID
+   * @param {Function} onChunkReady - Callback when chunk is ready
+   * @param {number} resumeFromChunk - Resume from specific chunk (default: 0)
+   * @param {number} initialChunkSize - Initial chunk size from bandwidth test (optional)
    */
-  async startChunking(transferId, file, peerId, onChunkReady, resumeFromChunk = 0) {
+  async startChunking(transferId, file, peerId, onChunkReady, resumeFromChunk = 0, initialChunkSize = NETWORK_CHUNK_SIZE) {
     // Create file metadata and transfer record
     const fileMetadata = createFileMetadata({
       name: file.name,
@@ -108,12 +118,18 @@ export class ChunkingEngine {
     const transferRecord = await createTransferRecord({ transferId, fileMeta: fileMetadata, peerId });
     const totalChunks = Math.ceil(file.size / STORAGE_CHUNK_SIZE);
     
-    // Initialize progress tracking
+    // Set initial chunk size from bandwidth test result (per-transfer tracking)
+    const chunkSize = initialChunkSize || NETWORK_CHUNK_SIZE;
+    this.chunkSizes.set(transferId, chunkSize);
+    logger.log(`[ChunkingEngine] Starting with chunk size: ${chunkSize / 1024}KB`);
+    
+    // Initialize progress tracking with initial chunk size
     progressTracker.initialize(transferId, {
       totalChunks,
       fileSize: file.size,
       fileName: file.name,
-      direction: 'send'
+      direction: 'send',
+      initialChunkSize: chunkSize
     });
 
     // Register with resumable transfer manager
@@ -176,7 +192,7 @@ export class ChunkingEngine {
       startTime: Date.now(),
       chunksProcessed: storageChunkIndex,
       bytesPerSecond: 0,
-      adaptiveChunkSize: this.chunkSize
+      adaptiveChunkSize: chunkSize
     });
 
     try {
@@ -346,6 +362,13 @@ export class ChunkingEngine {
 
   /**
    * Adaptive chunk size monitoring and adjustment
+   * 
+   * Uses speed bands to adjust chunk size:
+   * - > 1.5 MB/s: increase chunk size by 15% (toward max)
+   * - 750 KB/s - 1.5 MB/s: maintain current size
+   * - 512 KB/s - 750 KB/s: decrease slightly (5%)
+   * - < 512 KB/s: decrease by 15% (toward min)
+   * 
    * @private
    */
   _adaptChunkSize(transferId) {
@@ -355,18 +378,57 @@ export class ChunkingEngine {
     const currentTime = Date.now();
     const timeDiff = currentTime - metrics.startTime;
     
-    if (timeDiff > 1000) { // Adjust every second
-      const bytesPerSecond = (metrics.chunksProcessed * this.chunkSize * 1000) / timeDiff;
+    // Adjust every 1-2 seconds for stability
+    if (timeDiff > 1000) {
+      let chunkSize = this.chunkSizes.get(transferId) || NETWORK_CHUNK_SIZE;
+      const bytesPerSecond = (metrics.chunksProcessed * chunkSize * 1000) / timeDiff;
       metrics.bytesPerSecond = bytesPerSecond;
 
-      // Adapt based on throughput
-      if (bytesPerSecond > 1024 * 1024) { // > 1MB/s - increase chunk size
-        this.chunkSize = Math.min(MAX_CHUNK_SIZE, this.chunkSize * 1.2);
-      } else if (bytesPerSecond < 512 * 1024) { // < 512KB/s - decrease chunk size
-        this.chunkSize = Math.max(MIN_CHUNK_SIZE, this.chunkSize * 0.8);
+      const oldChunkSize = chunkSize;
+
+      // Speed-based adaptive algorithm (gradual 15% adjustments)
+      if (bytesPerSecond >= SPEED_HIGH_THRESHOLD) {
+        // Fast connection: increase chunk size
+        chunkSize = Math.min(
+          MAX_CHUNK_SIZE,
+          Math.floor(chunkSize * (1 + SPEED_ADJUSTMENT_INCREMENT))
+        );
+      } else if (bytesPerSecond >= SPEED_HIGH_THRESHOLD / 2) {
+        // Good connection: slightly increase or maintain
+        if (chunkSize < (MAX_CHUNK_SIZE + NETWORK_CHUNK_SIZE) / 2) {
+          chunkSize = Math.min(
+            MAX_CHUNK_SIZE,
+            Math.floor(chunkSize * (1 + SPEED_ADJUSTMENT_INCREMENT * 0.5))
+          );
+        }
+      } else if (bytesPerSecond >= SPEED_LOW_THRESHOLD) {
+        // Moderate connection: maintain or slightly decrease
+        if (chunkSize > NETWORK_CHUNK_SIZE) {
+          chunkSize = Math.max(
+            MIN_CHUNK_SIZE,
+            Math.floor(chunkSize * (1 - SPEED_ADJUSTMENT_INCREMENT * 0.3))
+          );
+        }
+      } else {
+        // Slow connection: decrease chunk size
+        chunkSize = Math.max(
+          MIN_CHUNK_SIZE,
+          Math.floor(chunkSize * (1 - SPEED_ADJUSTMENT_INCREMENT))
+        );
       }
 
-      metrics.adaptiveChunkSize = this.chunkSize;
+      // Update per-transfer chunk size
+      this.chunkSizes.set(transferId, chunkSize);
+
+      // Log if chunk size changed
+      if (oldChunkSize !== chunkSize) {
+        logger.log(
+          `[ChunkingEngine] ${transferId}: Speed ${(bytesPerSecond / (1024 * 1024)).toFixed(2)} MB/s ` +
+          `→ chunk size ${Math.floor(oldChunkSize / 1024)}KB → ${Math.floor(chunkSize / 1024)}KB`
+        );
+      }
+
+      metrics.adaptiveChunkSize = chunkSize;
       metrics.startTime = currentTime;
       metrics.chunksProcessed = 0;
     }
@@ -475,6 +537,7 @@ export class ChunkingEngine {
   cleanup(transferId) {
     this.activeChunkings.delete(transferId);
     this.storageBuffers.delete(transferId);
+    this.chunkSizes.delete(transferId);
     this.performanceMetrics.delete(transferId);
     this.pauseControllers.delete(transferId);
     this.fileReaders.delete(transferId);

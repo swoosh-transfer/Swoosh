@@ -36,6 +36,18 @@ export const MAX_CHUNK_SIZE = 32 * 1024;     // 32KB - ceiling for good connecti
 export const MIN_CHUNK_SIZE = 8 * 1024;      // 8KB - floor for poor connections
 
 /**
+ * Speed Thresholds for Adaptive Chunking
+ * 
+ * Used by BandwidthTester and ChunkingEngine to determine optimal chunk sizes.
+ * SPEED_HIGH_THRESHOLD: Threshold above which chunks increase (~1.5 MB/s)
+ * SPEED_LOW_THRESHOLD: Threshold below which chunks decrease (~512 KB/s)
+ * SPEED_ADJUSTMENT_INCREMENT: How much to adjust in each direction (10-20%)
+ */
+export const SPEED_HIGH_THRESHOLD = 1.5 * 1024 * 1024;  // 1.5 MB/s
+export const SPEED_LOW_THRESHOLD = 512 * 1024;          // 512 KB/s
+export const SPEED_ADJUSTMENT_INCREMENT = 0.15;          // 15% adjustment per step
+
+/**
  * BUFFER_SIZE: Maximum buffered chunks in memory
  * 
  * Limits the number of chunks held in memory before writing to storage.

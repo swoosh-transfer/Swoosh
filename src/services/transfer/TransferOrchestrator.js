@@ -44,6 +44,7 @@ import {
   createTransferId
 } from '../../transfer/index.js';
 import { progressTracker } from '../../transfer/shared/ProgressTracker.js';
+import { BandwidthTester } from '../../utils/bandwidthTester.js';
 import { 
   resumableTransferManager,
   TransferState,
@@ -223,12 +224,49 @@ export class TransferOrchestrator {
           throw err;
         }
       };
+
+      // Measure bandwidth before starting transfer (optional, ~1-2 seconds)
+      let recommendedChunkSize = undefined; // Will use default if test fails
+      try {
+        const dataChannel = this.connectionService.getDataChannel?.(peerId);
+        if (dataChannel && dataChannel.readyState === 'open') {
+          this._emit('bandwidth-testing', {
+            transferId,
+            message: 'Testing connection speed...'
+          });
+
+          const tester = new BandwidthTester(dataChannel);
+          const testResult = await tester.measureBandwidth({
+            testDuration: 1500, // 1.5 seconds
+            packetSize: 8 * 1024 // 8KB packets
+          });
+
+          if (testResult.status === 'success') {
+            recommendedChunkSize = testResult.recommendedChunkSize;
+            logger.log(
+              `[TransferOrchestrator] Bandwidth test: ${testResult.kilobytesPerSecond} KB/s, ` +
+              `recommended chunk: ${recommendedChunkSize / 1024}KB`
+            );
+
+            this._emit('bandwidth-tested', {
+              transferId,
+              kilobytesPerSecond: testResult.kilobytesPerSecond,
+              megabytesPerSecond: testResult.megabytesPerSecond,
+              recommendedChunkSize
+            });
+          } else {
+            logger.warn('[TransferOrchestrator] Bandwidth test failed, using default chunk size');
+          }
+        }
+      } catch (err) {
+        logger.warn('[TransferOrchestrator] Bandwidth test error, using default chunk size:', err);
+      }
       
       // Start chunking process
       this._updateStatus(transferId, TransferStatus.ACTIVE);
       this._emit('started', transferId);
       
-      await startFileChunking(transferId, file, peerId, onChunkReady);
+      await startFileChunking(transferId, file, peerId, onChunkReady, 0, recommendedChunkSize);
       
       // Transfer complete
       this._updateStatus(transferId, TransferStatus.COMPLETED);

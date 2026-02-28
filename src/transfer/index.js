@@ -77,10 +77,11 @@ export async function initializeFileTransfer(file, peerId) {
  * @param {string} peerId - Receiver peer ID
  * @param {Function} onChunkReady - Callback for each chunk
  * @param {number} [resumeFromChunk=0] - Chunk to resume from
+ * @param {number} [initialChunkSize] - Initial chunk size from bandwidth test (optional)
  * @returns {Promise<void>}
  */
-export async function startFileChunking(transferId, file, peerId, onChunkReady, resumeFromChunk = 0) {
-  return await chunkingEngine.startChunking(transferId, file, peerId, onChunkReady, resumeFromChunk);
+export async function startFileChunking(transferId, file, peerId, onChunkReady, resumeFromChunk = 0, initialChunkSize) {
+  return await chunkingEngine.startChunking(transferId, file, peerId, onChunkReady, resumeFromChunk, initialChunkSize);
 }
 
 /**

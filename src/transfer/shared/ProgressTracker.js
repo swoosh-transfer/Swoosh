@@ -8,11 +8,21 @@
  */
 
 import logger from '../../utils/logger.js';
+import {
+  SPEED_HIGH_THRESHOLD,
+  SPEED_LOW_THRESHOLD,
+  SPEED_ADJUSTMENT_INCREMENT,
+  MIN_CHUNK_SIZE,
+  MAX_CHUNK_SIZE,
+  INITIAL_CHUNK_SIZE
+} from '../../constants/transfer.constants.js';
 
 export class ProgressTracker {
   constructor() {
     this.transfers = new Map(); // transferId -> progress state
     this.listeners = new Map(); // transferId -> Set of callbacks
+    this.speedHistory = new Map(); // transferId -> array of speed samples for moving average
+    this.SPEED_WINDOW_SIZE = 5; // Number of samples to keep for moving average
   }
 
   /**
@@ -24,8 +34,9 @@ export class ProgressTracker {
    * @param {number} options.fileSize - Total file size in bytes
    * @param {string} options.fileName - File name
    * @param {string} options.direction - 'send' or 'receive'
+   * @param {number} options.initialChunkSize - Initial chunk size in bytes (optional)
    */
-  initialize(transferId, { totalChunks, fileSize, fileName, direction = 'send' }) {
+  initialize(transferId, { totalChunks, fileSize, fileName, direction = 'send', initialChunkSize = INITIAL_CHUNK_SIZE }) {
     const state = {
       transferId,
       fileName,
@@ -37,11 +48,15 @@ export class ProgressTracker {
       startTime: Date.now(),
       lastUpdateTime: Date.now(),
       estimatedTimeRemaining: null,
-      transferSpeed: 0, // bytes per second
+      transferSpeed: 0, // bytes per second (current)
+      averageSpeed: 0, // bytes per second (moving average)
+      recommendedChunkSize: initialChunkSize,
       status: 'active', // active | paused | completed | failed
     };
 
     this.transfers.set(transferId, state);
+    this.speedHistory.set(transferId, []);
+    
     logger.log(`[ProgressTracker] Initialized ${direction} transfer: ${transferId}`);
     
     this._notifyListeners(transferId, state);
@@ -68,10 +83,27 @@ export class ProgressTracker {
     const elapsed = now - state.startTime;
     const timeSinceLastUpdate = now - state.lastUpdateTime;
 
-    // Calculate transfer speed (bytes per second)
+    // Calculate current transfer speed (bytes per second)
     if (elapsed > 0) {
       state.transferSpeed = Math.round((state.bytesTransferred / elapsed) * 1000);
     }
+
+    // Update speed history for moving average
+    const speedHistory = this.speedHistory.get(transferId);
+    if (speedHistory) {
+      speedHistory.push(state.transferSpeed);
+      // Keep only recent samples
+      if (speedHistory.length > this.SPEED_WINDOW_SIZE) {
+        speedHistory.shift();
+      }
+      // Calculate moving average
+      state.averageSpeed = Math.round(
+        speedHistory.reduce((a, b) => a + b, 0) / speedHistory.length
+      );
+    }
+
+    // Calculate recommended chunk size based on average speed
+    state.recommendedChunkSize = this._getRecommendedChunkSize(state.averageSpeed);
 
     // Estimate time remaining
     if (state.chunksCompleted > 0 && state.status === 'active') {
@@ -111,6 +143,21 @@ export class ProgressTracker {
     if (elapsed > 0) {
       state.transferSpeed = Math.round((state.bytesTransferred / elapsed) * 1000);
     }
+
+    // Update speed history for moving average
+    const speedHistory = this.speedHistory.get(transferId);
+    if (speedHistory) {
+      speedHistory.push(state.transferSpeed);
+      if (speedHistory.length > this.SPEED_WINDOW_SIZE) {
+        speedHistory.shift();
+      }
+      state.averageSpeed = Math.round(
+        speedHistory.reduce((a, b) => a + b, 0) / speedHistory.length
+      );
+    }
+
+    // Calculate recommended chunk size based on average speed
+    state.recommendedChunkSize = this._getRecommendedChunkSize(state.averageSpeed);
 
     if (state.chunksCompleted > 0 && state.status === 'active') {
       const chunksRemaining = state.totalChunks - state.chunksCompleted;
@@ -210,6 +257,7 @@ export class ProgressTracker {
   clear(transferId) {
     this.transfers.delete(transferId);
     this.listeners.delete(transferId);
+    this.speedHistory.delete(transferId);
     logger.log(`[ProgressTracker] Cleared transfer: ${transferId}`);
   }
 
@@ -230,6 +278,34 @@ export class ProgressTracker {
         logger.error('[ProgressTracker] Listener error:', err);
       }
     });
+  }
+
+  /**
+   * Get recommended chunk size based on measured speed
+   * Uses speed bands to determine optimal chunk size
+   * 
+   * @private
+   * @param {number} bytesPerSecond - Current average speed
+   * @returns {number} - Recommended chunk size
+   */
+  _getRecommendedChunkSize(bytesPerSecond) {
+    if (!bytesPerSecond || bytesPerSecond === 0) {
+      return INITIAL_CHUNK_SIZE;
+    }
+
+    if (bytesPerSecond >= SPEED_HIGH_THRESHOLD) {
+      // Fast connection: use larger chunks
+      return Math.min(MAX_CHUNK_SIZE, Math.floor(INITIAL_CHUNK_SIZE * (1 + SPEED_ADJUSTMENT_INCREMENT)));
+    } else if (bytesPerSecond >= SPEED_HIGH_THRESHOLD / 2) {
+      // Good connection: use initial chunk size
+      return INITIAL_CHUNK_SIZE;
+    } else if (bytesPerSecond >= SPEED_LOW_THRESHOLD) {
+      // Moderate connection: use slightly smaller chunks
+      return Math.max(MIN_CHUNK_SIZE, Math.floor(INITIAL_CHUNK_SIZE * (1 - SPEED_ADJUSTMENT_INCREMENT * 0.5)));
+    } else {
+      // Slow connection: use minimum chunk size
+      return MIN_CHUNK_SIZE;
+    }
   }
 
   /**
