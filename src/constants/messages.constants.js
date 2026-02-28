@@ -12,11 +12,6 @@ export const MESSAGE_TYPE = {
   // Connection & Handshake
   HANDSHAKE: 'handshake',
   
-  // TOFU Security
-  TOFU_CHALLENGE: 'tofu-challenge',
-  TOFU_RESPONSE: 'tofu-response',
-  TOFU_VERIFIED: 'tofu-verified',
-  
   // File Transfer Setup
   FILE_METADATA: 'file-metadata',
   CHUNK_METADATA: 'chunk-metadata',
@@ -69,13 +64,15 @@ export const CONNECTION_STATE = {
 };
 
 /**
- * TOFU Verification Status
+ * Security Verification Status
+ * With encrypted signaling, verification is implicit:
+ * 'pending' → 'verified' once the data channel opens.
  */
-export const TOFU_STATUS = {
+export const SECURITY_STATUS = {
   PENDING: 'pending',
-  VERIFYING: 'verifying',
   VERIFIED: 'verified',
   FAILED: 'failed',
-  TRUSTED: 'trusted',
-  NEW_KEY: 'new_key',
 };
+
+// Backward-compatible alias
+export const TOFU_STATUS = SECURITY_STATUS;

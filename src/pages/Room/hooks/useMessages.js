@@ -1,9 +1,11 @@
 /**
  * useMessages Hook
- * Manages all message protocol handling for the data channel
- * - Routes messages to appropriate handlers
- * - Manages chunk metadata/binary queuing
- * - Coordinates security verification with data processing
+ * Manages all message protocol handling for the data channel.
+ * Routes messages to appropriate handlers.
+ *
+ * With encrypted signaling, verification happens at the signaling layer —
+ * if the data channel opens the peer is already trusted, so there is no
+ * TOFU challenge/response exchange and no pre-verification queuing.
  */
 import { useEffect, useCallback, useRef } from 'react';
 import logger from '../../../utils/logger.js';
@@ -29,13 +31,7 @@ export function useMessages(
   addLog
 ) {
   const {
-    tofuVerifiedRef,
-    chunkMetaQueueRef,
-    pendingBinaryQueueRef,
     handleHandshake,
-    handleTOFUChallenge,
-    handleTOFUResponse,
-    handleTOFUVerified,
     sendHandshake,
   } = security;
 
@@ -55,68 +51,33 @@ export function useMessages(
     setDownloadResultData,
   } = uiState;
 
-  const pendingFileMetadataRef = useRef(null);
-  const receiverReadyRef = useRef(false);
-
-  /**
-   * Process pending binary data after TOFU verification
-   */
-  const processPendingData = useCallback(async () => {
-    // Process all pending binary data that was queued during verification
-    while (pendingBinaryQueueRef.current.length > 0 && chunkMetaQueueRef.current.length > 0) {
-      const binary = pendingBinaryQueueRef.current.shift();
-      const meta = chunkMetaQueueRef.current.shift();
-      if (meta && binary) {
-        await receiveChunk(meta, binary);
-      }
-    }
-  }, [pendingBinaryQueueRef, chunkMetaQueueRef, receiveChunk]);
-
-  const processPendingControl = useCallback(async () => {
-    if (!tofuVerifiedRef.current) return;
-
-    if (pendingFileMetadataRef.current) {
-      const pendingMeta = pendingFileMetadataRef.current;
-      pendingFileMetadataRef.current = null;
-      await initializeReceive(pendingMeta, setPendingFileData);
-    }
-
-    if (receiverReadyRef.current && isHost) {
-      receiverReadyRef.current = false;
-      await sendFileChunks();
-    }
-  }, [initializeReceive, isHost, sendFileChunks, setPendingFileData, tofuVerifiedRef]);
+  const chunkMetaQueueRef = useRef([]);
+  const pendingBinaryQueueRef = useRef([]);
 
   /**
    * Handle incoming binary chunk data
    * @param {Uint8Array} data - Binary chunk data
    */
   const handleChunkData = useCallback(async (data) => {
-    // Check if we have metadata waiting
     if (chunkMetaQueueRef.current.length > 0) {
       const meta = chunkMetaQueueRef.current.shift();
       await receiveChunk(meta, data);
     } else {
-      // Binary arrived before metadata - queue it
+      // Binary arrived before metadata — queue it
       pendingBinaryQueueRef.current.push(data);
     }
-  }, [chunkMetaQueueRef, pendingBinaryQueueRef, receiveChunk]);
+  }, [receiveChunk]);
 
   /**
-   * Main message handler for data channel
-   * Routes messages to appropriate handlers
+   * Main message handler for data channel.
+   * All messages arrive only after encrypted signaling succeeded,
+   * so they are implicitly trusted.
    * @param {MessageEvent} event - Message event
    */
   const handleMessage = useCallback(async (event) => {
     try {
       // Binary data = file chunk
       if (event.data instanceof ArrayBuffer) {
-        // SECURITY: Queue chunks until TOFU is verified
-        if (!tofuVerifiedRef.current) {
-          addLog('Received chunk before TOFU verification - queuing', 'warning');
-          pendingBinaryQueueRef.current.push(new Uint8Array(event.data));
-          return;
-        }
         await handleChunkData(new Uint8Array(event.data));
         return;
       }
@@ -124,46 +85,17 @@ export function useMessages(
       const msg = JSON.parse(event.data);
 
       switch (msg.type) {
-        case 'handshake': {
+        case 'handshake':
           await handleHandshake(msg);
-          break;
-        }
-
-        case 'tofu-challenge':
-          await handleTOFUChallenge(msg, async () => {
-            await processPendingData();
-            await processPendingControl();
-          });
-          break;
-
-        case 'tofu-response':
-          await handleTOFUResponse(msg, async () => {
-            await processPendingData();
-            await processPendingControl();
-          });
-          break;
-
-        case 'tofu-verified':
-          handleTOFUVerified(async () => {
-            await processPendingData();
-            await processPendingControl();
-          });
           break;
 
         case 'file-metadata':
-          // SECURITY: Block until TOFU is verified
-          if (!tofuVerifiedRef.current) {
-            addLog('Received file metadata before TOFU verification - queued', 'warning');
-            pendingFileMetadataRef.current = msg;
-            return;
-          }
           await initializeReceive(msg, setPendingFileData);
           break;
 
         case 'chunk-metadata':
-          // Queue metadata - binary may arrive before or after
           chunkMetaQueueRef.current.push(msg);
-          // Check if we have pending binaries waiting for metadata
+          // Drain any pending binaries waiting for metadata
           while (pendingBinaryQueueRef.current.length > 0 && chunkMetaQueueRef.current.length > 0) {
             const binary = pendingBinaryQueueRef.current.shift();
             await handleChunkData(binary);
@@ -172,12 +104,6 @@ export function useMessages(
 
         case 'receiver-ready':
           if (isHost) {
-            // SECURITY: Only send after TOFU verification
-            if (!tofuVerifiedRef.current) {
-              addLog('Receiver ready before TOFU - queued', 'warning');
-              receiverReadyRef.current = true;
-              return;
-            }
             addLog('Receiver ready, sending...', 'success');
             await sendFileChunks();
           }
@@ -212,13 +138,7 @@ export function useMessages(
     }
   }, [
     isHost,
-    tofuVerifiedRef,
-    chunkMetaQueueRef,
-    pendingBinaryQueueRef,
     handleHandshake,
-    handleTOFUChallenge,
-    handleTOFUResponse,
-    handleTOFUVerified,
     sendFileChunks,
     initializeReceive,
     handleChunkData,
@@ -229,8 +149,6 @@ export function useMessages(
     handleRemoteCancel,
     setPendingFileData,
     setDownloadResultData,
-    processPendingData,
-    processPendingControl,
     addLog,
   ]);
 
@@ -241,17 +159,12 @@ export function useMessages(
     const channel = dataChannelRef.current;
     if (!channel || !dataChannelReady) return;
 
-    // Set up message handler
     channel.onmessage = handleMessage;
 
     // Send handshake when channel is ready
     if (channel.readyState === 'open') {
       sendHandshake(channel);
     }
-
-    return () => {
-      // Cleanup is handled by channel.onclose in useRoomConnection
-    };
   }, [dataChannelRef, dataChannelReady, handleMessage, sendHandshake]);
 
   return {

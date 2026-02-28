@@ -1,5 +1,6 @@
 import { io } from 'socket.io-client';
 import logger from './logger.js';
+import { encryptSignaling, decryptSignaling } from './tofuSecurity.js';
 
 const SIGNALING_SERVER = import.meta.env.VITE_SIGNALING_SERVER || 'http://localhost:5000';
 
@@ -8,6 +9,7 @@ let roomErrorHandler = null;
 let isJoining = false; // Track if currently joining to prevent duplicates
 let currentRoom = null; // Track current room
 let reconnectCallbacks = []; // Callbacks to call on reconnection
+let encryptionKey = null; // AES-GCM key for signaling encryption
 
 /**
  * Register a callback to be called when socket reconnects
@@ -295,56 +297,113 @@ export function setupSignalingListeners(handlers) {
   }
 
   if (handlers.onOffer) {
-    socket.on('offer', ({ offer }) => {
-      logger.log('[Socket] Received offer');
-      handlers.onOffer(offer);
+    socket.on('offer', async ({ offer, encrypted }) => {
+      try {
+        const decrypted = (encrypted && encryptionKey)
+          ? await decryptSignaling(offer, encryptionKey)
+          : offer;
+        logger.log('[Socket] Received offer', encrypted ? '(encrypted)' : '(plaintext)');
+        handlers.onOffer(decrypted);
+      } catch (err) {
+        logger.error('[Socket] Failed to decrypt offer – wrong key?', err);
+      }
     });
   }
 
   if (handlers.onAnswer) {
-    socket.on('answer', ({ answer }) => {
-      logger.log('[Socket] Received answer');
-      handlers.onAnswer(answer);
+    socket.on('answer', async ({ answer, encrypted }) => {
+      try {
+        const decrypted = (encrypted && encryptionKey)
+          ? await decryptSignaling(answer, encryptionKey)
+          : answer;
+        logger.log('[Socket] Received answer', encrypted ? '(encrypted)' : '(plaintext)');
+        handlers.onAnswer(decrypted);
+      } catch (err) {
+        logger.error('[Socket] Failed to decrypt answer – wrong key?', err);
+      }
     });
   }
 
   if (handlers.onIceCandidate) {
-    socket.on('ice-candidate', ({ candidate }) => {
-      logger.log('[Socket] Received ICE candidate');
-      handlers.onIceCandidate(candidate);
+    socket.on('ice-candidate', async ({ candidate, encrypted }) => {
+      try {
+        const decrypted = (encrypted && encryptionKey)
+          ? await decryptSignaling(candidate, encryptionKey)
+          : candidate;
+        logger.log('[Socket] Received ICE candidate', encrypted ? '(encrypted)' : '(plaintext)');
+        handlers.onIceCandidate(decrypted);
+      } catch (err) {
+        logger.error('[Socket] Failed to decrypt ICE candidate – wrong key?', err);
+      }
     });
   }
 }
 
 /**
- * Send WebRTC offer through signaling server
+ * Set the AES-GCM encryption key for signaling messages.
+ * Must be called before any offer/answer/ICE exchange.
+ * @param {CryptoKey} key - AES-GCM CryptoKey from deriveEncryptionKey()
+ */
+export function setEncryptionKey(key) {
+  encryptionKey = key;
+  logger.log('[Socket] Encryption key set for signaling');
+}
+
+/**
+ * Send WebRTC offer through signaling server (encrypted)
  * @param {Object} offer - WebRTC offer
  * @param {string} roomId - Room ID
  */
-export function sendOffer(offer, roomId) {
-  if (socket) {
+export async function sendOffer(offer, roomId) {
+  if (!socket) return;
+  if (encryptionKey) {
+    try {
+      const payload = await encryptSignaling(offer, encryptionKey);
+      socket.emit('offer', { offer: payload, roomId, encrypted: true });
+      logger.log('[Socket] Sent encrypted offer');
+    } catch (err) {
+      logger.error('[Socket] Failed to encrypt offer:', err);
+    }
+  } else {
     socket.emit('offer', { offer, roomId });
   }
 }
 
 /**
- * Send WebRTC answer through signaling server
+ * Send WebRTC answer through signaling server (encrypted)
  * @param {Object} answer - WebRTC answer
  * @param {string} roomId - Room ID
  */
-export function sendAnswer(answer, roomId) {
-  if (socket) {
+export async function sendAnswer(answer, roomId) {
+  if (!socket) return;
+  if (encryptionKey) {
+    try {
+      const payload = await encryptSignaling(answer, encryptionKey);
+      socket.emit('answer', { answer: payload, roomId, encrypted: true });
+      logger.log('[Socket] Sent encrypted answer');
+    } catch (err) {
+      logger.error('[Socket] Failed to encrypt answer:', err);
+    }
+  } else {
     socket.emit('answer', { answer, roomId });
   }
 }
 
 /**
- * Send ICE candidate through signaling server
+ * Send ICE candidate through signaling server (encrypted)
  * @param {Object} candidate - ICE candidate
  * @param {string} roomId - Room ID
  */
-export function sendIceCandidate(candidate, roomId) {
-  if (socket) {
+export async function sendIceCandidate(candidate, roomId) {
+  if (!socket) return;
+  if (encryptionKey) {
+    try {
+      const payload = await encryptSignaling(candidate, encryptionKey);
+      socket.emit('ice-candidate', { candidate: payload, roomId, encrypted: true });
+    } catch (err) {
+      logger.error('[Socket] Failed to encrypt ICE candidate:', err);
+    }
+  } else {
     socket.emit('ice-candidate', { candidate, roomId });
   }
 }
@@ -368,5 +427,6 @@ export default {
   sendOffer,
   sendAnswer,
   sendIceCandidate,
+  setEncryptionKey,
   disconnectSocket,
 };

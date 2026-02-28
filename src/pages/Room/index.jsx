@@ -45,15 +45,16 @@ export default function Room() {
     roomId,
     isHost,
     (channel) => {
-      // Data channel ready callback
-      // Message handler will be set up by useMessages
+      // Data channel opened — encrypted signaling succeeded, peer is verified
+      security.markVerified();
+      // Send optional identity handshake for session resumption
       security.sendHandshake(channel);
     },
     addLog
   );
   const { socketConnected, dataChannelReady, shareUrl, connInfo, sendJSON, sendBinary, waitForDrain, dataChannelRef } = connection;
 
-  // TOFU Security (identity verification, challenge/response)
+  // Security (encrypted signaling verification)
   const security = useSecurity(roomId, sendJSON, addLog);
   const { verificationStatus, identityVerified, tofuVerified } = security;
 

@@ -6,9 +6,6 @@
  * 
  * Message Types:
  * - handshake: Initial peer greeting
- * - tofu-challenge: TOFU verification challenge
- * - tofu-response: TOFU verification response
- * - tofu-verified: TOFU verification confirmed
  * - file-metadata: File transfer metadata
  * - chunk-metadata: Chunk metadata
  * - chunk-data: Chunk binary data
@@ -63,8 +60,6 @@ export class MessageService {
    * 
    * Events:
    * - 'handshakeReceived': (data) => {}
-   * - 'tofuChallengeReceived': (challenge) => {}
-   * - 'tofuVerified': (peerInfo) => {}
    * - 'fileOffered': (fileMetadata) => {}
    * - 'chunkReceived': (chunkInfo) => {}
    * - 'transferComplete': (transferId) => {}
@@ -144,44 +139,6 @@ export class MessageService {
     await this.send(MESSAGE_TYPES.HANDSHAKE, {
       peerId,
       ...metadata
-    });
-  }
-
-  /**
-   * Send TOFU challenge
-   * 
-   * @param {string} challenge - Challenge string
-   * @param {string} peerID - Peer ID
-   */
-  async sendTOFUChallenge(challenge, peerID) {
-    await this.send(MESSAGE_TYPES.TOFU_CHALLENGE, {
-      challenge,
-      peerID
-    });
-  }
-
-  /**
-   * Send TOFU response
-   * 
-   * @param {string} response - Signed response
-   * @param {string} challenge - Original challenge
-   */
-  async sendTOFUResponse(response, challenge) {
-    await this.send(MESSAGE_TYPES.TOFU_RESPONSE, {
-      response,
-      challenge
-    });
-  }
-
-  /**
-   * Send TOFU verified confirmation
-   * 
-   * @param {string} peerID - Verified peer ID
-   */
-  async sendTOFUVerified(peerID) {
-    await this.send(MESSAGE_TYPES.TOFU_VERIFIED, {
-      peerID,
-      verified: true
     });
   }
 
@@ -305,9 +262,6 @@ export class MessageService {
    */
   _registerHandlers() {
     this.messageHandlers.set(MESSAGE_TYPES.HANDSHAKE, this._handleHandshake);
-    this.messageHandlers.set(MESSAGE_TYPES.TOFU_CHALLENGE, this._handleTOFUChallenge);
-    this.messageHandlers.set(MESSAGE_TYPES.TOFU_RESPONSE, this._handleTOFUResponse);
-    this.messageHandlers.set(MESSAGE_TYPES.TOFU_VERIFIED, this._handleTOFUVerified);
     this.messageHandlers.set(MESSAGE_TYPES.FILE_METADATA, this._handleFileMetadata);
     this.messageHandlers.set(MESSAGE_TYPES.CHUNK_METADATA, this._handleChunkMetadata);
     this.messageHandlers.set(MESSAGE_TYPES.CHUNK_DATA, this._handleChunkData);
@@ -328,58 +282,6 @@ export class MessageService {
     this._emit('handshakeReceived', {
       peerId: message.peerId,
       timestamp: message.timestamp
-    });
-  }
-
-  /**
-   * Handle TOFU challenge
-   * @private
-   */
-  async _handleTOFUChallenge(message) {
-    logger.log('[MessageService] Received TOFU challenge');
-    
-    // Respond to challenge using security service
-    const response = await this.securityService.respondToChallenge(message.challenge);
-    
-    await this.sendTOFUResponse(response, message.challenge);
-    
-    this._emit('tofuChallengeReceived', {
-      challenge: message.challenge,
-      peerID: message.peerID
-    });
-  }
-
-  /**
-   * Handle TOFU response
-   * @private
-   */
-  async _handleTOFUResponse(message) {
-    logger.log('[MessageService] Received TOFU response');
-    
-    // Verify response using security service
-    const isValid = await this.securityService.verifyResponse(
-      message.challenge, 
-      message.response
-    );
-    
-    if (isValid) {
-      await this.sendTOFUVerified(this.securityService.credentials?.peerID);
-    }
-    
-    this._emit('tofuResponseReceived', {
-      verified: isValid
-    });
-  }
-
-  /**
-   * Handle TOFU verified
-   * @private
-   */
-  async _handleTOFUVerified(message) {
-    logger.log('[MessageService] Peer verified');
-    this._emit('tofuVerified', {
-      peerID: message.peerID,
-      verified: message.verified
     });
   }
 

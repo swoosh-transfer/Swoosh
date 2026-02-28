@@ -1,6 +1,14 @@
 /**
- * TOFU (Trust On First Use) Security Implementation
- * Provides cryptographically secure peer-to-peer authentication and verification
+ * Signaling Security Implementation
+ * Provides:
+ *   - Shared secret generation and URL-fragment embedding
+ *   - AES-GCM-256 encryption/decryption for signaling messages (SDP, ICE)
+ *
+ * The shared secret in the URL fragment is used to derive an AES-GCM key.
+ * All signaling traffic (offer, answer, ICE candidates) is encrypted before
+ * passing through the signaling server. If the WebRTC data channel establishes
+ * successfully, both peers provably hold the same secret — no separate TOFU
+ * challenge-response is needed.
  */
 
 import logger from './logger.js';
@@ -108,19 +116,21 @@ export function extractSecurityFromURL(url) {
   }
 }
 
+// ── AES-GCM Signaling Encryption ──────────────────────────────────────────────
+
 /**
- * Derive HMAC key from shared secret using PBKDF2
+ * Derive an AES-GCM-256 encryption key from the shared secret using PBKDF2.
+ * Uses a dedicated salt ("signaling-encryption") so the key is distinct from
+ * any other derivation of the same secret.
+ *
  * @param {string} sharedSecret - Base64-encoded shared secret
- * @param {string} salt - Salt for key derivation (optional)
- * @returns {Promise<CryptoKey>} Derived HMAC key
+ * @returns {Promise<CryptoKey>} AES-GCM CryptoKey
  */
-export async function deriveHMACKey(sharedSecret, salt = 'p2p-verification') {
-  // Convert base64 secret to ArrayBuffer
+export async function deriveEncryptionKey(sharedSecret) {
   const secretBytes = new Uint8Array(
-    atob(sharedSecret).split('').map(char => char.charCodeAt(0))
+    atob(sharedSecret).split('').map(c => c.charCodeAt(0))
   );
-  
-  // Import the secret as a key
+
   const baseKey = await crypto.subtle.importKey(
     'raw',
     secretBytes,
@@ -128,221 +138,91 @@ export async function deriveHMACKey(sharedSecret, salt = 'p2p-verification') {
     false,
     ['deriveKey']
   );
-  
-  // Convert salt to ArrayBuffer
-  const saltBytes = new TextEncoder().encode(salt);
-  
-  // Derive HMAC key
-  return await crypto.subtle.deriveKey(
+
+  const salt = new TextEncoder().encode('signaling-encryption');
+
+  return crypto.subtle.deriveKey(
     {
       name: 'PBKDF2',
-      salt: saltBytes,
+      salt,
       iterations: 100000,
-      hash: 'SHA-256'
+      hash: 'SHA-256',
     },
     baseKey,
-    {
-      name: 'HMAC',
-      hash: 'SHA-256'
-    },
+    { name: 'AES-GCM', length: 256 },
     false,
-    ['sign', 'verify']
+    ['encrypt', 'decrypt']
   );
 }
 
 /**
- * Generate a random challenge for peer verification
- * @returns {string} Base64-encoded challenge
+ * Encrypt a signaling payload (object) with AES-GCM.
+ * Returns a JSON-safe envelope { iv, ciphertext } with base64-encoded fields.
+ *
+ * @param {Object} plainObject - The signaling data to encrypt (offer / answer / candidate)
+ * @param {CryptoKey} aesKey   - AES-GCM key from deriveEncryptionKey()
+ * @returns {Promise<{iv: string, ciphertext: string}>}
  */
-export function generateChallenge() {
-  const challengeBytes = new Uint8Array(32);
-  crypto.getRandomValues(challengeBytes);
-  
-  return btoa(String.fromCharCode(...challengeBytes));
-}
+export async function encryptSignaling(plainObject, aesKey) {
+  const iv = crypto.getRandomValues(new Uint8Array(12)); // 96-bit IV
+  const plainBytes = new TextEncoder().encode(JSON.stringify(plainObject));
 
-/**
- * Sign a challenge using HMAC with the shared secret
- * @param {string} challenge - Base64-encoded challenge
- * @param {CryptoKey} hmacKey - HMAC key derived from shared secret
- * @returns {Promise<string>} Base64-encoded signature
- */
-export async function signChallenge(challenge, hmacKey) {
-  const challengeBytes = new TextEncoder().encode(challenge);
-  const signatureBytes = await crypto.subtle.sign('HMAC', hmacKey, challengeBytes);
-  
-  return btoa(String.fromCharCode(...new Uint8Array(signatureBytes)));
-}
+  const cipherBytes = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    aesKey,
+    plainBytes
+  );
 
-/**
- * Verify a challenge signature
- * @param {string} challenge - Original challenge
- * @param {string} signature - Base64-encoded signature to verify
- * @param {CryptoKey} hmacKey - HMAC key for verification
- * @returns {Promise<boolean>} True if signature is valid
- */
-export async function verifyChallenge(challenge, signature, hmacKey) {
-  try {
-    const challengeBytes = new TextEncoder().encode(challenge);
-    const signatureBytes = new Uint8Array(
-      atob(signature).split('').map(char => char.charCodeAt(0))
-    );
-    
-    return await crypto.subtle.verify('HMAC', hmacKey, signatureBytes, challengeBytes);
-  } catch (error) {
-    logger.error('Challenge verification failed:', error);
-    return false;
-  }
-}
-
-/**
- * Complete peer verification flow
- * @param {string} sharedSecret - Shared secret between peers
- * @param {string} peerID - ID of the peer being verified
- * @returns {Promise<Object>} Verification session object
- */
-export async function initiatePeerVerification(sharedSecret, peerID) {
-  const hmacKey = await deriveHMACKey(sharedSecret);
-  const challenge = generateChallenge();
-  
   return {
-    challenge,
-    hmacKey,
-    peerID,
-    timestamp: Date.now(),
-    
-    // Method to sign the challenge (for responding peer)
-    async respondToChallenge() {
-      return await signChallenge(challenge, hmacKey);
-    },
-    
-    // Method to verify a response (for challenging peer)
-    async verifyResponse(signature) {
-      return await verifyChallenge(challenge, signature, hmacKey);
-    }
+    iv: btoa(String.fromCharCode(...iv)),
+    ciphertext: btoa(String.fromCharCode(...new Uint8Array(cipherBytes))),
   };
 }
 
 /**
- * Security session manager for ongoing peer verification
+ * Decrypt a signaling envelope back to the original object.
+ * Throws if the key is wrong or the ciphertext has been tampered with
+ * (AES-GCM provides authentication).
+ *
+ * @param {{iv: string, ciphertext: string}} envelope - Encrypted envelope
+ * @param {CryptoKey} aesKey - AES-GCM key from deriveEncryptionKey()
+ * @returns {Promise<Object>} Decrypted signaling data
  */
-export class SecuritySession {
-  constructor(sharedSecret, peerID) {
-    this.sharedSecret = sharedSecret;
-    this.peerID = peerID;
-    this.hmacKey = null;
-    this.verified = false;
-    this.lastVerification = null;
-  }
-  
-  async initialize() {
-    this.hmacKey = await deriveHMACKey(this.sharedSecret);
-  }
-  
-  async performMutualVerification(peerVerificationMethod) {
-    if (!this.hmacKey) {
-      await this.initialize();
-    }
-    
-    try {
-      // Generate our challenge
-      const ourChallenge = generateChallenge();
-      const ourSignature = await signChallenge(ourChallenge, this.hmacKey);
-      
-      // Send challenge and receive peer's challenge and signature
-      const { peerChallenge, peerSignature, responseSignature } = await peerVerificationMethod({
-        challenge: ourChallenge,
-        signature: ourSignature,
-        peerID: this.peerID
-      });
-      
-      // Verify peer's signature of our challenge
-      const peerValid = await verifyChallenge(ourChallenge, peerSignature, this.hmacKey);
-      
-      // Sign peer's challenge
-      const ourResponse = await signChallenge(peerChallenge, this.hmacKey);
-      
-      // Send our response and get verification result
-      const mutuallyVerified = peerValid && responseSignature && 
-        await verifyChallenge(peerChallenge, responseSignature, this.hmacKey);
-      
-      this.verified = mutuallyVerified;
-      this.lastVerification = Date.now();
-      
-      return {
-        verified: mutuallyVerified,
-        response: ourResponse
-      };
-      
-    } catch (error) {
-      logger.error('Mutual verification failed:', error);
-      this.verified = false;
-      return { verified: false, error: error.message };
-    }
-  }
-  
-  isVerified(maxAge = 300000) { // 5 minutes default
-    return this.verified && 
-           this.lastVerification && 
-           (Date.now() - this.lastVerification) < maxAge;
-  }
-  
-  async generateSecureToken() {
-    if (!this.isVerified()) {
-      throw new Error('Peer not verified');
-    }
-    
-    const tokenData = {
-      peerID: this.peerID,
-      timestamp: Date.now(),
-      nonce: generateChallenge()
-    };
-    
-    const signature = await signChallenge(JSON.stringify(tokenData), this.hmacKey);
-    
-    return {
-      ...tokenData,
-      signature
-    };
-  }
-  
-  async verifySecureToken(token) {
-    if (!this.hmacKey) {
-      await this.initialize();
-    }
-    
-    const { signature, ...tokenData } = token;
-    return await verifyChallenge(JSON.stringify(tokenData), signature, this.hmacKey);
-  }
+export async function decryptSignaling(envelope, aesKey) {
+  const iv = new Uint8Array(
+    atob(envelope.iv).split('').map(c => c.charCodeAt(0))
+  );
+  const cipherBytes = new Uint8Array(
+    atob(envelope.ciphertext).split('').map(c => c.charCodeAt(0))
+  );
+
+  const plainBytes = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv },
+    aesKey,
+    cipherBytes
+  );
+
+  return JSON.parse(new TextDecoder().decode(plainBytes));
 }
 
+// ── Setup Helper ──────────────────────────────────────────────────────────────
+
 /**
- * Utility function to create a complete TOFU security setup
- * @returns {Promise<Object>} Complete security setup
+ * Create a complete security setup (secret, peerID, URL helpers).
+ * @returns {Promise<Object>} { secret, peerID, createURL(baseURL, metadata) }
  */
-export async function createTOFUSetup() {
+export async function createSecuritySetup() {
   const secret = await generateSharedSecret();
   const peerID = await generatePeerID();
-  
+
   return {
     secret,
     peerID,
-    
-    // Create shareable URL
     createURL(baseURL, metadata = {}) {
       return createSecurityURL(baseURL, secret, peerID, metadata);
     },
-    
-    // Create security session
-    async createSession() {
-      const session = new SecuritySession(secret, peerID);
-      await session.initialize();
-      return session;
-    },
-    
-    // Initialize verification with another peer
-    async initVerification() {
-      return await initiatePeerVerification(secret, peerID);
-    }
   };
 }
+
+// Backward-compatible alias
+export const createTOFUSetup = createSecuritySetup;

@@ -14,6 +14,7 @@ import {
   joinRoom,
   setupSignalingListeners,
   waitForConnection,
+  setEncryptionKey,
   onReconnect,
   offReconnect
 } from '../../../utils/signaling.js';
@@ -25,6 +26,7 @@ import {
   handleIceCandidate,
   setPolite,
 } from '../../../utils/p2pManager.js';
+import { deriveEncryptionKey } from '../../../utils/tofuSecurity.js';
 import { useRoomStore } from '../../../stores/roomStore.js';
 import logger from '../../../utils/logger.js';
 
@@ -178,6 +180,13 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
         setRoomId(roomId);
         addLog('Parsed security payload', 'success');
 
+        // Derive encryption key from shared secret BEFORE joining room
+        if (decoded.secret) {
+          const aesKey = await deriveEncryptionKey(decoded.secret);
+          setEncryptionKey(aesKey);
+          addLog('Signaling encryption key derived', 'success');
+        }
+
         // Initialize socket
         const socket = initSocket();
 
@@ -225,6 +234,27 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     // Host (sender) is impolite, Guest (receiver) is polite
     setPolite(!isHost);
     logger.log(`[Room] Set polite mode: ${!isHost}`);
+
+    // Derive encryption key for host (guest already derived in init effect)
+    let keyReady = false;
+    const setupEncryption = async () => {
+      const payload = useRoomStore.getState().securityPayload;
+      if (payload?.secret) {
+        try {
+          const aesKey = await deriveEncryptionKey(payload.secret);
+          setEncryptionKey(aesKey);
+          logger.log('[Room] Host: signaling encryption key derived');
+          keyReady = true;
+        } catch (err) {
+          logger.error('[Room] Failed to derive encryption key:', err);
+        }
+      }
+    };
+
+    // For host, derive key before setting up listeners
+    if (isHost) {
+      setupEncryption();
+    }
 
     // Callback when data channel opens
     const onChannelReady = (channel) => {

@@ -1,4 +1,5 @@
 import { startHealthMonitoring, stopHealthMonitoring } from './connectionMonitor';
+import { sendOffer, sendAnswer, sendIceCandidate } from './signaling.js';
 import logger from './logger.js';
 
 let peerConnection = null;
@@ -71,10 +72,10 @@ export function initializePeerConnection(socket, roomId, onChannelReady, onState
 
   peerConnection = new RTCPeerConnection(rtcConfig);
 
-  // Send local ICE candidates to the remote peer via signaling
+  // Send local ICE candidates to the remote peer via signaling (encrypted)
   peerConnection.onicecandidate = (event) => {
     if (event.candidate) {
-      socket.emit('ice-candidate', { candidate: event.candidate, roomId });
+      sendIceCandidate(event.candidate, roomId);
     }
   };
 
@@ -133,7 +134,7 @@ export async function createOffer(socket, roomId, onChannelReady) {
     const offer = await peerConnection.createOffer();
     await peerConnection.setLocalDescription(offer);
 
-    socket.emit('offer', { offer, roomId });
+    await sendOffer(offer, roomId);
     logger.log('[P2P] Offer sent');
   } catch (err) {
     logger.error("Error creating offer:", err);
@@ -172,7 +173,7 @@ export async function handleOffer(offer, socket, roomId) {
     const answer = await peerConnection.createAnswer();
     await peerConnection.setLocalDescription(answer);
 
-    socket.emit('answer', { answer, roomId });
+    await sendAnswer(answer, roomId);
     logger.log('[P2P] Answer sent');
     isNegotiating = false;
   } catch (err) {
@@ -252,7 +253,7 @@ async function handleAutoReconnection(socket, roomId) {
      try {
        const offer = await peerConnection.createOffer({ iceRestart: true });
        await peerConnection.setLocalDescription(offer);
-       socket.emit('offer', { offer, roomId });
+       await sendOffer(offer, roomId);
      } catch (err) {
        logger.error("Reconnection failed:", err);
      }
