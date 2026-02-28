@@ -6,7 +6,7 @@ import { create } from 'zustand';
  * WHAT THIS STORE MANAGES:
  * - Room metadata (roomId, isHost)
  * - Security payload for TOFU verification
- * - Selected file from Home.jsx (persists to Room.jsx)
+ * - Selected files from Home.jsx (persists to Room.jsx) — supports multi-file & folder drops
  * - Global room errors
  * 
  * WHAT THIS STORE NO LONGER MANAGES (delegated to hooks):
@@ -29,8 +29,15 @@ export const useRoomStore = create((set, get) => ({
   // Used for encrypted signaling verification between peers
   securityPayload: null,
   
-  // File selected on Home.jsx, persists to Room.jsx for transfer
-  selectedFile: null,
+  // Files selected on Home.jsx, persists to Room.jsx for transfer
+  // Each entry: { file: File, relativePath: string | null }
+  selectedFiles: [],
+
+  // Backward-compat alias (returns first file or null)
+  get selectedFile() {
+    const files = get().selectedFiles;
+    return files.length > 0 ? files[0].file : null;
+  },
   
   // Global room-level error (navigation failures, critical issues)
   error: null,
@@ -56,10 +63,36 @@ export const useRoomStore = create((set, get) => ({
   setSecurityPayload: (payload) => set({ securityPayload: payload }),
   
   /**
-   * Set selected file for transfer
-   * @param {File} file - File object from Home.jsx
+   * Set selected files for transfer (replaces all)
+   * @param {Array<{file: File, relativePath: string|null}>} files
    */
-  setSelectedFile: (file) => set({ selectedFile: file }),
+  setSelectedFiles: (files) => set({ selectedFiles: files }),
+
+  /**
+   * Add files to the selection (appends)
+   * @param {Array<{file: File, relativePath: string|null}>} newFiles
+   */
+  addFiles: (newFiles) => set((state) => ({
+    selectedFiles: [...state.selectedFiles, ...newFiles],
+  })),
+
+  /**
+   * Remove a file from selection by index
+   * @param {number} index
+   */
+  removeFile: (index) => set((state) => ({
+    selectedFiles: state.selectedFiles.filter((_, i) => i !== index),
+  })),
+
+  /**
+   * Clear all selected files
+   */
+  clearFiles: () => set({ selectedFiles: [] }),
+
+  /** @deprecated Use setSelectedFiles instead */
+  setSelectedFile: (file) => set({
+    selectedFiles: file ? [{ file, relativePath: null }] : [],
+  }),
   
   /**
    * Set global room error
@@ -74,7 +107,7 @@ export const useRoomStore = create((set, get) => ({
     roomId: null,
     isHost: false,
     securityPayload: null,
-    selectedFile: null,
+    selectedFiles: [],
     error: null,
   }),
   
