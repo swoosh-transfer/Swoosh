@@ -74,6 +74,8 @@ export function useMessages(
   const isMultiFileRef = useRef(false);
   /** Per-channel metadata queues for correct binary↔metadata matching in multi-channel mode */
   const perChannelMetaRef = useRef(new Map());
+  /** Per-channel pending binary queues (for chunks arriving before metadata) */
+  const perChannelPendingBinaryRef = useRef(new Map());
   /** Message processing serialization */
   const messageQueueRef = useRef([]);
   const isProcessingRef = useRef(false);
@@ -94,10 +96,23 @@ export function useMessages(
     if (isMultiFileRef.current) {
       // Multi-file: match binary to metadata from the SAME channel.
       // This prevents cross-channel interleaving from corrupting file data.
+      // Since messages are serialized, metadata should always be in the queue when binary arrives.
       const queue = perChannelMetaRef.current.get(channelIndex);
       const meta = queue?.length > 0 ? queue.shift() : null;
-      const fileIndex = meta?.fileIndex;
-      await handleMultiBinaryChunk(data, fileIndex);
+      
+      if (meta) {
+        // Metadata found — process immediately
+        const fileIndex = meta.fileIndex;
+        await handleMultiBinaryChunk(data, fileIndex);
+      } else {
+        // No metadata yet — this should rarely happen due to message serialization,
+        // but queue the binary just in case of out-of-order network delivery
+        if (!perChannelPendingBinaryRef.current.has(channelIndex)) {
+          perChannelPendingBinaryRef.current.set(channelIndex, []);
+        }
+        perChannelPendingBinaryRef.current.get(channelIndex).push(data);
+        logger.warn(`[Room] Binary arrived before metadata on channel ${channelIndex}, queued`);
+      }
       return;
     }
 
@@ -137,8 +152,9 @@ export function useMessages(
         // ─── Multi-file messages ──────────────────────────────
         case MESSAGE_TYPE.MULTI_FILE_MANIFEST:
           isMultiFileRef.current = true;
-          // Clear per-channel metadata queues for new transfer
+          // Clear per-channel metadata & pending binary queues for new transfer
           perChannelMetaRef.current.clear();
+          perChannelPendingBinaryRef.current.clear();
           await handleMultiFileManifest(msg);
           break;
 
@@ -169,6 +185,15 @@ export function useMessages(
             }
             perChannelMetaRef.current.get(chIdx).push(msg);
             handleMultiChunkMetadata(msg);
+            
+            // Drain any pending binaries on this channel that were waiting for metadata
+            const pendingQueue = perChannelPendingBinaryRef.current.get(chIdx);
+            if (pendingQueue?.length > 0) {
+              let nextBinary;
+              while ((nextBinary = pendingQueue.shift()) !== undefined) {
+                await handleChunkData(nextBinary, chIdx);
+              }
+            }
           } else {
             chunkMetaQueueRef.current.push(msg);
             // Drain any pending binaries waiting for metadata

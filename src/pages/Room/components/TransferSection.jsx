@@ -75,7 +75,7 @@ export function TransferSection({
     <div className="space-y-4">
       {/* FileDropZone for adding files in-room — shown when idle for both sender and receiver */}
       {isIdle && !awaitingDirectory && !incomingManifest && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 overflow-hidden">
           <h2 className="text-sm font-medium text-zinc-400 mb-3">
             {isHost ? 'Files to Send' : 'Send Files Back'}
           </h2>

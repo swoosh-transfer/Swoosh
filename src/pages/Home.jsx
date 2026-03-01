@@ -203,8 +203,8 @@ export default function Home() {
           </div>
 
           {/* Main Transfer Card - Right on Large, Top on Small */}
-          <div className="order-1 lg:order-2 w-full lg:flex-1">
-            <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-8">
+          <div className="order-1 lg:order-2 w-full lg:flex-1 lg:max-w-2xl">
+            <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 overflow-hidden">
           {/* File Input */}
           <div className="mb-6">
             <FileDropZone

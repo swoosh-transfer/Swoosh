@@ -220,7 +220,7 @@ export class MultiFileReceiver {
    * @param {Object} metadata — includes fileIndex, chunkIndex, size, checksum, etc.
    */
   handleChunkMetadata(metadata) {
-    const { fileIndex } = metadata;
+    const { fileIndex, chunkIndex } = metadata;
 
     // Use a per-file queue of pending metadata to handle interleaving
     if (!this._pendingMetaQueues) this._pendingMetaQueues = new Map();
@@ -234,6 +234,11 @@ export class MultiFileReceiver {
     // Track the order of metadata arrivals for binary matching
     if (!this._metaOrder) this._metaOrder = [];
     this._metaOrder.push(fileIndex);
+    
+    // Log chunk arrivals for sequential mode debugging
+    if (chunkIndex === 0) {
+      logger.log(`[MultiFileReceiver] File ${fileIndex} chunk 0 metadata received (transfer started)`);
+    }
   }
 
   /**
@@ -256,6 +261,13 @@ export class MultiFileReceiver {
       }
     }
 
+    // Safeguard: verify fileIndex has pending metadata
+    if (!this._pendingMeta.has(fileIndex) && 
+        (!this._pendingMetaQueues?.has(fileIndex) || this._pendingMetaQueues.get(fileIndex).length === 0)) {
+      logger.error(`[MultiFileReceiver] Binary for file ${fileIndex} has no pending metadata, data mismatch!`);
+      return;
+    }
+
     // Get metadata from per-file queue
     let meta = null;
     if (this._pendingMetaQueues?.has(fileIndex)) {
@@ -271,21 +283,36 @@ export class MultiFileReceiver {
     // Fallback to flat map
     if (!meta) {
       meta = this._pendingMeta.get(fileIndex);
-      this._pendingMeta.delete(fileIndex);
+      if (meta) {
+        this._pendingMeta.delete(fileIndex);
+      }
     } else {
-      // Clean up flat map too
+      // Clean up flat map too if we got metadata from the queue
       if (!this._pendingMetaQueues?.has(fileIndex)) {
         this._pendingMeta.delete(fileIndex);
       }
     }
 
+    // Warn if no metadata found, but still try to process (with generic metadata)
+    if (!meta) {
+      logger.warn(`[MultiFileReceiver] No pending metadata for file ${fileIndex}, using generic chunk index`);
+      meta = { fileIndex, chunkIndex: undefined };
+    }
+
     const fileState = this._files.get(fileIndex);
     if (!fileState) {
-      logger.warn(`[MultiFileReceiver] Unknown fileIndex ${fileIndex}`);
+      logger.error(`[MultiFileReceiver] Unknown fileIndex ${fileIndex}`);
       return;
     }
 
     const chunkIndex = meta?.chunkIndex ?? fileState.receivedChunks.size;
+    
+    // Safeguard: warn if we see unexpected chunk indices (indicates metadata mismatch)
+    if (fileState.receivedChunks.has(chunkIndex)) {
+      logger.warn(`[MultiFileReceiver] File ${fileIndex} chunk ${chunkIndex} received twice (duplicate), skipping`);
+      return;
+    }
+    
     fileState.receivedChunks.add(chunkIndex);
     fileState.bytesReceived += data.byteLength;
     this._totalBytesReceived += data.byteLength;
@@ -307,7 +334,13 @@ export class MultiFileReceiver {
     this._emitProgress();
 
     // Check if this file is complete
-    if (fileState.receivedChunks.size >= fileState.totalChunks) {
+    const isComplete = fileState.receivedChunks.size >= fileState.totalChunks;
+    if (isComplete) {
+      // Sanity check: verify byte count matches expected total
+      if (fileState.bytesReceived !== fileState.totalBytes) {
+        logger.warn(`[MultiFileReceiver] File ${fileIndex}: chunk count complete but byte mismatch! ` +
+                   `Expected ${fileState.totalBytes}, got ${fileState.bytesReceived}`);
+      }
       await this._completeFile(fileIndex);
     }
   }
@@ -324,8 +357,15 @@ export class MultiFileReceiver {
 
   async _completeFile(fileIndex) {
     const state = this._files.get(fileIndex);
-    if (!state || state.completed) return;
+    if (!state) return;
+    if (state.completed) {
+      logger.warn(`[MultiFileReceiver] File ${fileIndex} completion called twice`);
+      return;
+    }
 
+    // Log completion with diagnostic info for sequential debugging
+    logger.log(`[MultiFileReceiver] File ${fileIndex} complete: ${state.bytesReceived}/${state.totalBytes} bytes, ` +
+              `${state.receivedChunks.size}/${state.totalChunks} chunks`);
     state.completed = true;
 
     // Close writable stream if using File System API

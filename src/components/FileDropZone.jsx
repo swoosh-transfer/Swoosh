@@ -217,16 +217,16 @@ export default function FileDropZone({
                 </button>
               </div>
             </div>
-            <div className="max-h-32 overflow-y-auto space-y-1">
+            <div className="max-h-32 overflow-y-auto overflow-x-hidden space-y-1 w-full min-w-0">
               {files.map((f, idx) => (
-                <div key={idx} className="flex items-center justify-between text-xs py-1 px-2 bg-zinc-800/50 rounded">
-                  <span className="text-zinc-300 truncate flex-1 mr-2">
+                <div key={idx} className="flex items-center justify-between gap-2 text-xs py-1 px-2 bg-zinc-800/50 rounded w-full min-w-0">
+                  <span className="text-zinc-300 truncate min-w-0">
                     {f.relativePath ? `${f.relativePath}/` : ''}{f.file.name}
                   </span>
-                  <span className="text-zinc-500 shrink-0 mr-2">{formatFileSize(f.file.size)}</span>
+                  <span className="text-zinc-500 shrink-0 whitespace-nowrap">{formatFileSize(f.file.size)}</span>
                   <button
                     onClick={() => onFileRemoved?.(idx)}
-                    className="text-zinc-600 hover:text-red-400 transition-colors shrink-0"
+                    className="text-zinc-600 hover:text-red-400 transition-colors shrink-0 flex-shrink-0"
                   >
                     ×
                   </button>
@@ -327,27 +327,27 @@ export default function FileDropZone({
 
       {/* File list */}
       {hasFiles && (
-        <div className="max-h-48 overflow-y-auto space-y-1 border border-zinc-800 rounded-xl p-2">
+        <div className="max-h-48 overflow-y-auto overflow-x-hidden space-y-1 border border-zinc-800 rounded-xl p-2 w-full min-w-0">
           {files.map((f, idx) => (
             <div
               key={idx}
-              className="flex items-center justify-between py-1.5 px-3 bg-zinc-900 rounded-lg text-sm"
+              className="flex items-center justify-between py-1.5 px-3 bg-zinc-900 rounded-lg text-sm w-full min-w-0"
             >
               <div className="flex items-center gap-2 flex-1 min-w-0">
                 <svg className="w-4 h-4 text-zinc-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>
-                <span className="text-zinc-300 truncate">
+                <span className="text-zinc-300 truncate min-w-0">
                   {f.relativePath ? (
                     <span className="text-zinc-500">{f.relativePath}/</span>
                   ) : null}
                   {f.file.name}
                 </span>
               </div>
-              <span className="text-zinc-500 text-xs shrink-0 mx-2">{formatFileSize(f.file.size)}</span>
+              <span className="text-zinc-500 text-xs shrink-0 whitespace-nowrap mx-2">{formatFileSize(f.file.size)}</span>
               <button
                 onClick={(e) => { e.stopPropagation(); onFileRemoved?.(idx); }}
-                className="text-zinc-600 hover:text-red-400 transition-colors shrink-0 p-1"
+                className="text-zinc-600 hover:text-red-400 transition-colors shrink-0 p-1 flex-shrink-0"
                 title="Remove file"
               >
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
