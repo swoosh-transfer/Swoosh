@@ -4,7 +4,7 @@ console.warn('[DEPRECATED] utils/indexedDB.js is deprecated. Use infrastructure/
 import logger from './logger.js';
 
 const DB_NAME = 'P2PFileTransfer';
-const DB_VERSION = 4; // Bumped to force re-creation of all stores
+const DB_VERSION = 5; // Keep in sync with infrastructure/database/client.js to avoid VersionError conflicts
 
 const REQUIRED_STORES = ['transfers', 'files', 'chunks', 'sessions'];
 

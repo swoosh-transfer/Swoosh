@@ -1,13 +1,13 @@
 /**
  * Identity Manager
  * Handles ephemeral identity (sessionStorage) and room-scoped session persistence (IndexedDB).
- * Uses the shared IndexedDB from indexedDB.js to avoid version conflicts.
+ * Uses the shared infrastructure database client to avoid version conflicts.
  */
 
-import { ensureDB } from './indexedDB.js';
+import { getDatabase, STORE_NAMES } from '../infrastructure/database/client.js';
 import logger from './logger.js';
 
-const STORE_NAME = 'sessions';
+const STORE_NAME = STORE_NAMES.SESSIONS;
 
 // 1. Get Local UUID (Ephemeral - dies on tab close)
 export function getLocalUUID() {
@@ -28,7 +28,7 @@ export function getLocalUUID() {
 // 2. Clear old session data (Housekeeping)
 async function clearOldSessions() {
   try {
-    const db = await ensureDB();
+    const db = await getDatabase();
     const tx = db.transaction(STORE_NAME, 'readwrite');
     const store = tx.objectStore(STORE_NAME);
     store.clear(); 
@@ -47,7 +47,7 @@ export async function savePeerSession(peerUuid, roomId) {
   }
   
   try {
-    const db = await ensureDB();
+    const db = await getDatabase();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
@@ -76,7 +76,7 @@ export async function verifyPeer(peerUuid, currentRoomId) {
   }
   
   try {
-    const db = await ensureDB();
+    const db = await getDatabase();
     return new Promise((resolve) => {
       const tx = db.transaction(STORE_NAME, 'readonly');
       const store = tx.objectStore(STORE_NAME);

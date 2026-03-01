@@ -300,14 +300,21 @@ export function getPeerConnection() {
 }
 
 /**
- * Close the peer connection and clean up resources.
+ * Close the peer connection and clean up all resources.
  */
 export function closePeerConnection() {
+  stopHealthMonitoring();
+  if (channelPool) {
+    channelPool.destroy();
+    channelPool = null;
+  }
   if (peerConnection) {
     peerConnection.close();
     peerConnection = null;
   }
-  if (channelPool) {
-    channelPool = null;
-  }
+  remoteDescriptionSet = false;
+  iceCandidateQueue = [];
+  isNegotiating = false;
+  makingOffer = false;
+  logger.log('[P2P] Peer connection closed and cleaned up');
 }

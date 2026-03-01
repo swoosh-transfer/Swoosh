@@ -9,8 +9,7 @@
  */
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { ChunkingEngine } from '../../../transfer/sending/ChunkingEngine.js';
-// TODO: Migrate to AssemblyEngine once it supports pause/resume and two-step init flow
-import { fileReceiver } from '../../../utils/fileReceiver.js';
+import { AssemblyEngine } from '../../../transfer/receiving/AssemblyEngine.js';
 import { getSocket } from '../../../utils/signaling.js';
 import { cleanupTransferData } from '../../../infrastructure/database/index.js';
 import { resumableTransferManager } from '../../../transfer/resumption/ResumableTransferManager.js';
@@ -62,6 +61,7 @@ export function useFileTransfer(
 
   // Refs
   const chunkingEngineRef = useRef(new ChunkingEngine());
+  const assemblyEngineRef = useRef(new AssemblyEngine()); // NEW: Replace old fileReceiver
   const transferIdRef = useRef(null);
   const sessionIdRef = useRef(null);
   const receivedBytesRef = useRef(0);
@@ -297,8 +297,8 @@ export function useFileTransfer(
     setPendingFile({ name, size, totalChunks });
     receivedBytesRef.current = 0;
 
-    // Initialize FileReceiver for this transfer
-    await fileReceiver.initializeReceive({
+    // Initialize AssemblyEngine for this transfer (replacing old fileReceiver)
+    await assemblyEngineRef.current.initializeReceive({
       transferId,
       name,
       size,
@@ -306,18 +306,18 @@ export function useFileTransfer(
     });
 
     // Set up progress callback
-    fileReceiver.onProgress = (tid, progress) => {
+    assemblyEngineRef.current.onProgress = (tid, progress) => {
       setTransferProgress(progress.progress);
       setTransferSpeed(progress.speed);
       setTransferEta(progress.eta);
       receivedBytesRef.current = progress.bytesReceived;
     };
 
-    fileReceiver.onComplete = (tid, result) => {
+    assemblyEngineRef.current.onComplete = (tid, result) => {
       addLog('File saved!', 'success');
     };
 
-    fileReceiver.onError = (tid, error) => {
+    assemblyEngineRef.current.onError = (tid, error) => {
       addLog(`Receive error: ${error}`, 'error');
     };
 
@@ -338,7 +338,7 @@ export function useFileTransfer(
    */
   const setupFileWriter = useCallback(async (fileName, onReady) => {
     try {
-      const result = await fileReceiver.setupFileWriter(transferIdRef.current, fileName);
+      const result = await assemblyEngineRef.current.setupFileWriter(transferIdRef.current, fileName);
       addLog(`Save location selected (${result.method})`, 'success');
       setTransferState('receiving');
       startTimeRef.current = Date.now();
@@ -363,7 +363,7 @@ export function useFileTransfer(
    */
   const receiveChunk = useCallback(async (metadata, data) => {
     try {
-      const result = await fileReceiver.receiveChunk(
+      const result = await assemblyEngineRef.current.receiveChunk(
         transferIdRef.current,
         {
           chunkIndex: metadata.chunkIndex,
@@ -399,7 +399,7 @@ export function useFileTransfer(
     await new Promise(resolve => setTimeout(resolve, 300));
 
     try {
-      const result = await fileReceiver.completeTransfer(transferIdRef.current);
+      const result = await assemblyEngineRef.current.completeTransfer(transferIdRef.current);
 
       if (result.success) {
         setTransferState('completed');
@@ -458,7 +458,7 @@ export function useFileTransfer(
     addLog('Retrying completion after pending chunks...', 'info');
     await new Promise(resolve => setTimeout(resolve, 1000));
     
-    const retryResult = await fileReceiver.completeTransfer(transferIdRef.current);
+    const retryResult = await assemblyEngineRef.current.completeTransfer(transferIdRef.current);
     if (retryResult.success) {
       setTransferState('completed');
       setTransferProgress(100);
@@ -490,7 +490,7 @@ export function useFileTransfer(
     addLog('Checking transfer again after retransmission...', 'info');
     await new Promise(resolve => setTimeout(resolve, 1000));
     
-    const retryResult = await fileReceiver.completeTransfer(transferIdRef.current);
+    const retryResult = await assemblyEngineRef.current.completeTransfer(transferIdRef.current);
     if (retryResult.success) {
       setTransferState('completed');
       setTransferProgress(100);
@@ -501,7 +501,7 @@ export function useFileTransfer(
       });
       addLog('File saved after retransmission!', 'success');
       
-      fileReceiver.forceCleanup(transferIdRef.current);
+      assemblyEngineRef.current.forceCleanup(transferIdRef.current);
       try {
         await resumableTransferManager.completeTransfer(transferIdRef.current);
         await cleanupTransferData(transferIdRef.current);
@@ -525,7 +525,7 @@ export function useFileTransfer(
       sendJSON({ type: 'transfer-paused', transferId });
       addLog('Sending paused', 'warning');
     } else {
-      const result = await fileReceiver.pause(transferId);
+      const result = await assemblyEngineRef.current.pause(transferId);
       sendJSON({ type: 'transfer-paused', transferId, lastChunk: result.lastChunk });
       addLog(`Receiving paused at chunk ${result.lastChunk}`, 'warning');
     }
@@ -570,7 +570,7 @@ export function useFileTransfer(
       addLog('Sending resumed', 'success');
       receiverLastChunkRef.current = -1;
     } else {
-      const result = await fileReceiver.resume(transferId);
+      const result = await assemblyEngineRef.current.resume(transferId);
       const resumeFromChunk = result.lastChunk + 1;
       sendJSON({ type: 'transfer-resumed', transferId, resumeFromChunk });
       addLog(`Receiving resumed, requesting sender to resume from chunk ${resumeFromChunk}`, 'success');
@@ -591,7 +591,7 @@ export function useFileTransfer(
     if (isHost) {
       chunkingEngineRef.current.cleanup(transferId);
     } else {
-      fileReceiver.cancelTransfer(transferId);
+      assemblyEngineRef.current.cancelTransfer(transferId);
     }
     setTransferState('idle');
     setTransferProgress(0);
@@ -615,7 +615,7 @@ export function useFileTransfer(
         addLog('Peer paused transfer', 'warning');
       }
     } else {
-      await fileReceiver.pause(transferId);
+      await assemblyEngineRef.current.pause(transferId);
       addLog('Sender paused transfer', 'warning');
     }
     setIsPaused(true);
@@ -671,7 +671,7 @@ export function useFileTransfer(
     if (isHost) {
       chunkingEngineRef.current.cleanup(transferId);
     } else {
-      fileReceiver.cancelTransfer(transferId);
+      assemblyEngineRef.current.cancelTransfer(transferId);
     }
     setTransferState('idle');
     setTransferProgress(0);

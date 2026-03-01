@@ -101,11 +101,12 @@ export class ChunkingEngine {
    * @param {string} transferId - Unique transfer identifier
    * @param {File} file - File object to send
    * @param {string} peerId - Receiver peer ID
-   * @param {Function} onChunkReady - Callback when chunk is ready
-   * @param {number} resumeFromChunk - Resume from specific chunk (default: 0)
-   * @param {number} initialChunkSize - Initial chunk size from bandwidth test (optional)
+   * @param {Function} onChunkReady - Callback when chunk is ready: ({ metadata, binaryData }) => void
+   * @param {Function} [onProgress] - Progress callback: (bytesRead, totalSize) => void
+   * @param {number} [resumeFromChunk=0] - Resume from specific chunk
+   * @param {number} [initialChunkSize] - Initial chunk size from bandwidth test
    */
-  async startChunking(transferId, file, peerId, onChunkReady, resumeFromChunk = 0, initialChunkSize = NETWORK_CHUNK_SIZE) {
+  async startChunking(transferId, file, peerId, onChunkReady, onProgress = null, resumeFromChunk = 0, initialChunkSize = NETWORK_CHUNK_SIZE) {
     // Create file metadata and transfer record
     const fileMetadata = createFileMetadata({
       name: file.name,
@@ -218,6 +219,11 @@ export class ChunkingEngine {
 
         bytesRead += chunk.length;
         this.activeChunkings.get(transferId).bytesRead = bytesRead;
+
+        // Notify caller of progress
+        if (onProgress) {
+          onProgress(bytesRead, totalSize);
+        }
 
         // Update resumable transfer progress
         const chunkingState = this.activeChunkings.get(transferId);

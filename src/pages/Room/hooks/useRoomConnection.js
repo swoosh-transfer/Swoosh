@@ -26,6 +26,7 @@ import {
   handleAnswer,
   handleIceCandidate,
   setPolite,
+  getPeerConnection,
 } from '../../../utils/p2pManager.js';
 import { deriveEncryptionKey } from '../../../utils/tofuSecurity.js';
 import { useRoomStore } from '../../../stores/roomStore.js';
@@ -175,6 +176,9 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
       return;
     }
 
+    // Prevent re-init (React strict mode or deps change after first setup)
+    if (webrtcSetupRef.current) return;
+
     let cancelled = false;
 
     const init = async () => {
@@ -219,32 +223,38 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
         setPolite(true); // Guest is polite
         logger.log('[Room] Set polite mode: true');
 
-        const guestPc = initializePeerConnection(socket, roomId, (channel) => {
+        // Named callbacks so they can be reused if peer connection is re-initialized
+        const guestOnChannelReady = (channel) => {
           logger.log('[Room] Data channel ready');
           dataChannelRef.current = channel;
           setDataChannelReady(true);
+          setPeerDisconnected(false); // Clear disconnect banner on reconnect
           channel.binaryType = 'arraybuffer';
           setConnInfo(prev => ({ ...prev, dataChannelState: 'open' }));
           onDataChannelReady(channel);
           channel.onclose = () => {
             setDataChannelReady(false);
+            setPeerDisconnected(true);
             setConnInfo(prev => ({ ...prev, dataChannelState: 'closed' }));
             logger.log('[Room] Data channel closed');
             handshakeSentRef.current = false;
           };
-        }, (state) => {
+        };
+        const guestOnStateChange = (state) => {
           setConnInfo(prev => ({ ...prev, rtcState: state }));
           logger.log(`[Room] Connection: ${state}`);
-        }, (stats) => {
+        };
+        const guestOnStats = (stats) => {
           setConnInfo(prev => ({ ...prev, rtt: stats.rtt, packetLoss: stats.packetLoss }));
-        });
+        };
 
-        // Attach ICE state handler for connection details (same as host path)
-        if (guestPc) {
-          guestPc.oniceconnectionstatechange = () => {
-            setConnInfo(prev => ({ ...prev, iceState: guestPc.iceConnectionState }));
-            if (guestPc.iceConnectionState === 'connected' || guestPc.iceConnectionState === 'completed') {
-              guestPc.getStats().then(stats => {
+        // Attach ICE detail handlers to a peer connection (for Connection Details UI)
+        const attachGuestIceHandlers = (targetPc) => {
+          if (!targetPc) return;
+          targetPc.oniceconnectionstatechange = () => {
+            setConnInfo(prev => ({ ...prev, iceState: targetPc.iceConnectionState }));
+            if (targetPc.iceConnectionState === 'connected' || targetPc.iceConnectionState === 'completed') {
+              targetPc.getStats().then(stats => {
                 stats.forEach(report => {
                   if (report.type === 'candidate-pair' && report.state === 'succeeded') {
                     const localCandidate = stats.get(report.localCandidateId);
@@ -261,19 +271,29 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
                 });
               }).catch(() => { /* stats unavailable */ });
             }
-            if (guestPc.iceConnectionState === 'failed') {
+            if (targetPc.iceConnectionState === 'failed') {
               logger.log('[Room] ICE connection failed, attempting restart...');
             }
           };
-          guestPc.onsignalingstatechange = () => {
-            setConnInfo(prev => ({ ...prev, signalingState: guestPc.signalingState }));
+          targetPc.onsignalingstatechange = () => {
+            setConnInfo(prev => ({ ...prev, signalingState: targetPc.signalingState }));
           };
-        }
+        };
+
+        // Helper to create fresh peer connection for guest
+        const createGuestPeerConnection = () => {
+          const newPc = initializePeerConnection(socket, roomId, guestOnChannelReady, guestOnStateChange, guestOnStats);
+          attachGuestIceHandlers(newPc);
+          return newPc;
+        };
+
+        createGuestPeerConnection();
 
         setupSignalingListeners({
           onUserJoined: async (data) => {
             const userId = typeof data === 'object' ? data.userId : data;
             logger.log(`[Room] Peer joined: ${userId}`);
+            setPeerDisconnected(false); // Clear disconnect banner when peer (re-)joins
           },
           onUserLeft: (data) => {
             logger.log(`[Room] Peer left: ${data?.userId}`);
@@ -294,6 +314,12 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
           },
           onOffer: async (offer) => {
             logger.log('[Room] Received offer');
+            // If peer connection is dead (host reconnected), create a fresh one
+            const existingPc = getPeerConnection();
+            if (!existingPc || existingPc.connectionState === 'failed' || existingPc.connectionState === 'closed' || existingPc.connectionState === 'disconnected') {
+              logger.log('[Room] Peer connection stale, re-initializing for new offer');
+              createGuestPeerConnection();
+            }
             await handleOffer(offer, socket, roomId);
           },
           onAnswer: async (answer) => {
@@ -368,6 +394,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
       logger.log('[Room] Data channel ready');
       dataChannelRef.current = channel;
       setDataChannelReady(true);
+      setPeerDisconnected(false); // Clear disconnect banner on new channel
       channel.binaryType = 'arraybuffer';
       setConnInfo(prev => ({ ...prev, dataChannelState: 'open' }));
 
@@ -376,6 +403,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
       
       channel.onclose = () => {
         setDataChannelReady(false);
+        setPeerDisconnected(true);
         setConnInfo(prev => ({ ...prev, dataChannelState: 'closed' }));
         logger.log('[Room] Data channel closed');
         handshakeSentRef.current = false;
@@ -393,16 +421,13 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
       setConnInfo(prev => ({ ...prev, rtt: stats.rtt, packetLoss: stats.packetLoss }));
     };
 
-    // Initialize peer connection
-    const pc = initializePeerConnection(socket, roomId, onChannelReady, onStateChange, onStats);
-
-    if (pc) {
-      pc.oniceconnectionstatechange = () => {
-        setConnInfo(prev => ({ ...prev, iceState: pc.iceConnectionState }));
-        
-        // When ICE connects, gather candidate pair details for Connection Details
-        if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
-          pc.getStats().then(stats => {
+    // Attach ICE detail handlers to a peer connection (for Connection Details UI)
+    const attachIceHandlers = (targetPc) => {
+      if (!targetPc) return;
+      targetPc.oniceconnectionstatechange = () => {
+        setConnInfo(prev => ({ ...prev, iceState: targetPc.iceConnectionState }));
+        if (targetPc.iceConnectionState === 'connected' || targetPc.iceConnectionState === 'completed') {
+          targetPc.getStats().then(stats => {
             stats.forEach(report => {
               if (report.type === 'candidate-pair' && report.state === 'succeeded') {
                 const localCandidate = stats.get(report.localCandidateId);
@@ -419,25 +444,35 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
             });
           }).catch(() => { /* stats unavailable */ });
         }
-        
-        if (pc.iceConnectionState === 'failed') {
+        if (targetPc.iceConnectionState === 'failed') {
           logger.log('[Room] ICE connection failed, attempting restart...');
         }
       };
-      pc.onsignalingstatechange = () => {
-        setConnInfo(prev => ({ ...prev, signalingState: pc.signalingState }));
+      targetPc.onsignalingstatechange = () => {
+        setConnInfo(prev => ({ ...prev, signalingState: targetPc.signalingState }));
       };
-    }
+    };
+
+    // Create a fresh peer connection (used both on initial setup and reconnect)
+    const createFreshPeerConnection = () => {
+      const newPc = initializePeerConnection(socket, roomId, onChannelReady, onStateChange, onStats);
+      attachIceHandlers(newPc);
+      return newPc;
+    };
+
+    // Initialize peer connection
+    createFreshPeerConnection();
 
     // Handle socket reconnection
     const handleReconnection = async (rejoinedRoomId) => {
       logger.log('[Room] Socket reconnected, re-establishing connection...');
       handshakeSentRef.current = false;
       
-      // If we're the host, create a new offer
+      // Fresh peer connection for the reconnected socket
       if (isHost) {
-        logger.log('[Room] Re-creating offer after reconnect...');
+        logger.log('[Room] Re-creating connection after socket reconnect...');
         setTimeout(async () => {
+          createFreshPeerConnection();
           await createOffer(socket, roomId, onChannelReady);
         }, 500);
       }
@@ -451,8 +486,11 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
         // Support both old (string) and new (object) payloads
         const userId = typeof data === 'object' ? data.userId : data;
         logger.log(`[Room] Peer joined: ${userId}`);
+        setPeerDisconnected(false); // Clear disconnect banner when a peer (re-)joins
         if (isHost) {
-          logger.log('[Room] Creating offer...');
+          // Always create fresh peer connection — old one was connected to previous socket
+          createFreshPeerConnection();
+          logger.log('[Room] Creating offer for (re-)joined peer...');
           await createOffer(socket, roomId, onChannelReady);
         }
       },
