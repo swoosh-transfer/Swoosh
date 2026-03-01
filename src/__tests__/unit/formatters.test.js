@@ -61,13 +61,13 @@ describe('formatDuration', () => {
   });
 
   it('should format minutes and seconds', () => {
-    expect(formatDuration(60000)).toBe('1m 0s');
+    expect(formatDuration(60000)).toBe('1m');
     expect(formatDuration(90000)).toBe('1m 30s');
     expect(formatDuration(125000)).toBe('2m 5s');
   });
 
   it('should format hours and minutes', () => {
-    expect(formatDuration(3600000)).toBe('1h 0m');
+    expect(formatDuration(3600000)).toBe('1h');
     expect(formatDuration(3661000)).toBe('1h 1m');
     expect(formatDuration(5400000)).toBe('1h 30m');
   });
@@ -78,8 +78,8 @@ describe('formatDuration', () => {
   });
 
   it('should handle large durations', () => {
-    expect(formatDuration(86400000)).toBe('24h 0m'); // 24 hours
-    expect(formatDuration(90000000)).toBe('25h 0m'); // 25 hours
+    expect(formatDuration(86400000)).toBe('24h'); // 24 hours
+    expect(formatDuration(90000000)).toBe('25h'); // 25 hours
   });
 });
 

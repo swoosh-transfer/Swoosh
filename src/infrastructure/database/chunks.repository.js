@@ -60,18 +60,27 @@ export async function getChunksByTransfer(transferId) {
 /**
  * Get chunks by status
  * 
- * Uses transferId index to narrow query first, then filters by status.
- * This is more efficient than filtering all status entries in JS.
+ * Uses the status index with a cursor, then filters by transferId.
+ * For transfers with many chunks, this is more efficient than fetching
+ * all chunks for a transfer and filtering in JS.
  * 
  * @param {string} transferId - Transfer ID
  * @param {string} status - Chunk status ('pending', 'received', 'validated', 'written')
  * @returns {Promise<Object[]>} Array of matching chunks
  */
 export async function getChunksByStatus(transferId, status) {
-  // First, get all chunks for this transfer (indexed by transferId)
-  const chunksForTransfer = await getChunksByTransfer(transferId);
-  // Then filter by status in-memory (small result set)
-  return chunksForTransfer.filter(c => c.status === status);
+  const db = await getDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAMES.CHUNKS, 'readonly');
+    const store = tx.objectStore(STORE_NAMES.CHUNKS);
+    const index = store.index('status');
+    const req = index.getAll(status);
+    req.onsuccess = () => {
+      // Filter by transferId since the status index doesn't include it
+      resolve(req.result.filter(c => c.transferId === transferId));
+    };
+    req.onerror = () => reject(req.error);
+  });
 }
 
 /**

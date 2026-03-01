@@ -1,7 +1,9 @@
 /**
  * Transfer Orchestrator Service
  * 
- * **THE KEY SERVICE FOR NEW DEVELOPERS TO UNDERSTAND**
+ * @deprecated This service is not imported by any UI code. The multi-file path uses
+ * MultiFileTransferManager directly and the single-file path uses ChunkingEngine +
+ * AssemblyEngine directly via useFileTransfer. This file will be removed in a future release.
  * 
  * Orchestrates file transfer operations - both sending and receiving.
  * Coordinates ChunkingEngine, AssemblyEngine, and ResumableTransferManager.

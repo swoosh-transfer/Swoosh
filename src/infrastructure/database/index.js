@@ -22,11 +22,21 @@ export {
 
 // Repositories
 export * from './transfers.repository.js';
-export * from './chunks.repository.js';
+export {
+  saveChunk,
+  getChunk,
+  getChunksByTransfer,
+  getChunksByStatus,
+  getMissingChunks as getMissingChunksFromDB,
+  updateChunkStatus,
+  saveChunksBatch,
+  deleteChunksByTransfer,
+  getChunkStats,
+  chunksRepository,
+} from './chunks.repository.js';
 export * from './metadata.repository.js';
 
-// Bitmap utilities (NOTE: getMissingChunks exported from here for bitmap operations)
-// chunks.repository also exports getMissingChunks for DB queries - this is intentional
+// Bitmap utilities — canonical getMissingChunks for bitmap operations
 export * from './chunkBitmap.js';
 
 

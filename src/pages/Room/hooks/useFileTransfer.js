@@ -305,13 +305,20 @@ export function useFileTransfer(
       mimeType,
     });
 
-    // Set up progress callback
-    assemblyEngineRef.current.onProgress = (tid, progress) => {
-      setTransferProgress(progress.progress);
-      setTransferSpeed(progress.speed);
-      setTransferEta(progress.eta);
-      receivedBytesRef.current = progress.bytesReceived;
-    };
+    // Subscribe to ProgressTracker for canonical progress updates (receive side)
+    // AssemblyEngine already updates ProgressTracker internally — we just subscribe.
+    if (progressUnsubRef.current) progressUnsubRef.current();
+    progressUnsubRef.current = progressTracker.subscribe(
+      transferId,
+      (progress) => {
+        setTransferProgress(Math.round(progress.percentage));
+        setTransferSpeed(progress.transferSpeed);
+        if (progress.estimatedTimeRemaining != null) {
+          setTransferEta(progress.estimatedTimeRemaining / 1000);
+        }
+        receivedBytesRef.current = progress.bytesTransferred || 0;
+      }
+    );
 
     assemblyEngineRef.current.onComplete = (tid, result) => {
       addLog('File saved!', 'success');
@@ -656,7 +663,7 @@ export function useFileTransfer(
       
       receiverLastChunkRef.current = -1;
     } else {
-      await fileReceiver.resume(transferId);
+      await assemblyEngineRef.current.resume(transferId);
       addLog('Sender resumed transfer', 'success');
     }
     setIsPaused(false);
