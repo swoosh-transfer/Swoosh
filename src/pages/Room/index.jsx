@@ -23,6 +23,7 @@ import {
   useMultiFileTransfer,
   useMessages,
   useTransferTracking,
+  useResumeTransfer,
 } from './hooks/index.js';
 
 // UI Components
@@ -114,6 +115,9 @@ export default function Room() {
     multiTransfer.multiTransferState === 'completed' ||
     multiTransfer.multiTransferState === 'error';
 
+  // Resume callbacks ref — breaks circular dependency between useMessages and useResumeTransfer
+  const resumeCallbacksRef = useRef({ onResumeAccepted: null, onResumeRejected: null });
+
   // Message Protocol (routes messages to appropriate handlers)
   const { setMultiFileMode, sendResumeRequest } = useMessages(
     dataChannelRef,
@@ -124,8 +128,20 @@ export default function Room() {
     multiTransfer,
     uiState,
     addLog,
-    sendJSON
+    sendJSON,
+    resumeCallbacksRef.current
   );
+
+  // Resume Transfer (handles resume handshake when entering with resume context)
+  const resumeTransfer = useResumeTransfer({
+    dataChannelReady,
+    sendResumeRequest,
+    addLog,
+  });
+
+  // Wire resume callbacks after both hooks are initialized
+  resumeCallbacksRef.current.onResumeAccepted = resumeTransfer.onResumeAccepted;
+  resumeCallbacksRef.current.onResumeRejected = resumeTransfer.onResumeRejected;
 
   // Transfer Tracking (IndexedDB persistence for cross-session resume)
   const tracking = useTransferTracking({
