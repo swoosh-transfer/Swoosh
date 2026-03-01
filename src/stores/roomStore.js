@@ -33,6 +33,11 @@ export const useRoomStore = create((set, get) => ({
   // Each entry: { file: File, relativePath: string | null }
   selectedFiles: [],
   
+  // Resume context — set when user clicks "Resume" on Home page
+  // Contains transfer metadata needed to resume in a new room
+  // { transferId, fileName, fileSize, fileHash, totalChunks, chunkBitmap, direction, fileManifest }
+  resumeContext: null,
+
   // Global room-level error (navigation failures, critical issues)
   error: null,
 
@@ -89,6 +94,17 @@ export const useRoomStore = create((set, get) => ({
   }),
   
   /**
+   * Set resume context for resuming a failed transfer in a new room
+   * @param {Object|null} context - Resume metadata
+   */
+  setResumeContext: (context) => set({ resumeContext: context }),
+
+  /**
+   * Clear resume context (after resume completes or is aborted)
+   */
+  clearResumeContext: () => set({ resumeContext: null }),
+
+  /**
    * Set global room error
    * @param {string} error - Error message
    */
@@ -102,6 +118,7 @@ export const useRoomStore = create((set, get) => ({
     isHost: false,
     securityPayload: null,
     selectedFiles: [],
+    resumeContext: null,
     error: null,
   }),
   

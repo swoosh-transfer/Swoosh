@@ -1,18 +1,26 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useRoomStore } from '../stores/roomStore';
 import { initSocket, waitForConnection, createRoom } from '../utils/signaling';
 import { createTOFUSetup } from '../utils/tofuSecurity';
 import FileDropZone from '../components/FileDropZone';
 import logger from '../utils/logger.js';
+import {
+  listTransfers,
+  deleteTransfer,
+} from '../infrastructure/database/transfers.repository.js';
+import {
+  deleteChunksByTransfer,
+} from '../infrastructure/database/chunks.repository.js';
 
 export default function Home() {
   const navigate = useNavigate();
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [stats, setStats] = useState(null);
+  const [incompleteTransfers, setIncompleteTransfers] = useState([]);
   
-  const { selectedFiles, addFiles, removeFile, clearFiles, setSelectedFiles, setIsHost, setSecurityPayload, setRoomId } = useRoomStore();
+  const { selectedFiles, addFiles, removeFile, clearFiles, setSelectedFiles, setIsHost, setSecurityPayload, setRoomId, setResumeContext } = useRoomStore();
 
   useEffect(() => {
     // Fetch analytics data
@@ -37,9 +45,176 @@ export default function Home() {
     fetchAnalytics();
   }, []);
 
+  // Check IndexedDB for incomplete transfers on mount
+  useEffect(() => {
+    let cancelled = false;
+    async function loadIncomplete() {
+      try {
+        const transfers = await listTransfers();
+        const incomplete = transfers.filter(
+          (t) => t.status === 'active' || t.status === 'paused' || t.status === 'interrupted'
+        );
+        if (cancelled) return;
+
+        // Build UI-friendly list with progress info
+        const items = [];
+        for (const t of incomplete) {
+          // Only surface transfers with real progress
+          if (t.lastChunkIndex > 0 || t.lastProgress > 0) {
+            if (cancelled) return;
+            const progress = t.lastProgress || 0;
+            items.push({
+              transferId: t.transferId,
+              fileName: t.fileName,
+              fileSize: t.fileSize,
+              direction: t.direction,
+              progress,
+              totalChunks: t.totalChunks,
+              chunkBitmap: t.chunkBitmap || null,
+              fileManifest: t.fileManifest || null,
+              fileHash: t.fileHash || null,
+              createdAt: t.createdAt,
+              roomId: t.roomId,
+            });
+          }
+        }
+        setIncompleteTransfers(items);
+      } catch (err) {
+        logger.warn('Failed to load incomplete transfers:', err.message);
+      }
+    }
+    loadIncomplete();
+    return () => { cancelled = true; };
+  }, []);
+
   const handleFilesAdded = (newFiles) => {
     addFiles(newFiles);
     setError(null);
+  };
+
+  const handleDiscardIncomplete = async (transferId) => {
+    try {
+      await deleteChunksByTransfer(transferId);
+      await deleteTransfer(transferId);
+      setIncompleteTransfers(prev => prev.filter(t => t.transferId !== transferId));
+    } catch (err) {
+      logger.warn('Failed to discard transfer:', err.message);
+    }
+  };
+
+  // ── Resume Flow ───────────────────────────────────────────────────
+  const resumeFileInputRef = useRef(null);
+  const [pendingResumeTransfer, setPendingResumeTransfer] = useState(null);
+  const [resumeError, setResumeError] = useState(null);
+
+  /**
+   * Handle clicking "Resume" on a send-direction failed transfer.
+   * Opens a file picker for re-selecting the file, then validates and navigates.
+   */
+  const handleResumeSend = (transfer) => {
+    setPendingResumeTransfer(transfer);
+    setResumeError(null);
+    // Trigger hidden file input
+    if (resumeFileInputRef.current) {
+      resumeFileInputRef.current.click();
+    }
+  };
+
+  /**
+   * Handle file re-selection for send-side resume.
+   * Validates file matches saved metadata, then navigates to new room.
+   */
+  const handleResumeFileSelected = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file || !pendingResumeTransfer) {
+      setPendingResumeTransfer(null);
+      return;
+    }
+
+    const transfer = pendingResumeTransfer;
+
+    // Validate file matches saved metadata
+    if (file.size !== transfer.fileSize) {
+      setResumeError(`File size mismatch: expected ${formatFileSize(transfer.fileSize)}, got ${formatFileSize(file.size)}. Please select the original file.`);
+      setPendingResumeTransfer(null);
+      return;
+    }
+
+    // File matches — create room with resume context
+    await navigateToResumeRoom(transfer, file);
+    setPendingResumeTransfer(null);
+  };
+
+  /**
+   * Handle clicking "Resume" on a receive-direction failed transfer.
+   * Navigates directly to a new room with resume context.
+   */
+  const handleResumeReceive = async (transfer) => {
+    setResumeError(null);
+    await navigateToResumeRoom(transfer, null);
+  };
+
+  /**
+   * Navigate to a new room with resume context.
+   */
+  const navigateToResumeRoom = async (transfer, file) => {
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      initSocket();
+      await waitForConnection();
+
+      const tofuSetup = await createTOFUSetup();
+      const roomData = await createRoom();
+      const roomId = typeof roomData === 'object' ? roomData.roomId : roomData;
+
+      // Set resume context in store
+      setResumeContext({
+        transferId: transfer.transferId,
+        fileName: transfer.fileName,
+        fileSize: transfer.fileSize,
+        totalChunks: transfer.totalChunks,
+        chunkBitmap: transfer.chunkBitmap || null,
+        direction: transfer.direction,
+        fileManifest: transfer.fileManifest || null,
+        progress: transfer.progress,
+      });
+
+      if (file) {
+        setSelectedFiles([{ file, relativePath: null }]);
+      }
+
+      setIsHost(true);
+      setRoomId(roomId);
+      setSecurityPayload({
+        secret: tofuSetup.secret,
+        peerID: tofuSetup.peerID,
+      });
+
+      navigate(`/${roomId}#${btoa(JSON.stringify({
+        secret: tofuSetup.secret,
+        peerID: tofuSetup.peerID,
+        timestamp: Date.now(),
+      }))}`);
+    } catch (err) {
+      logger.error('Failed to create resume room:', err);
+      setError(err.message || 'Failed to create room for resume');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleDiscardAll = async () => {
+    for (const t of incompleteTransfers) {
+      try {
+        await deleteChunksByTransfer(t.transferId);
+        await deleteTransfer(t.transferId);
+      } catch (err) {
+        logger.warn('Failed to discard transfer:', err.message);
+      }
+    }
+    setIncompleteTransfers([]);
   };
 
   const handleStartTransfer = async () => {
@@ -205,6 +380,85 @@ export default function Home() {
           {/* Main Transfer Card - Right on Large, Top on Small */}
           <div className="order-1 lg:order-2 w-full lg:flex-1 lg:max-w-2xl">
             <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 overflow-hidden">
+
+          {/* Incomplete Transfers Recovery */}
+          {incompleteTransfers.length > 0 && (
+            <div className="mb-6 p-4 bg-amber-950/30 border border-amber-800/50 rounded-xl space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <svg className="w-5 h-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  <h3 className="text-sm font-semibold text-amber-200">
+                    {incompleteTransfers.length} Incomplete Transfer{incompleteTransfers.length > 1 ? 's' : ''}
+                  </h3>
+                </div>
+                {incompleteTransfers.length > 1 && (
+                  <button
+                    onClick={handleDiscardAll}
+                    className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+                  >
+                    Discard All
+                  </button>
+                )}
+              </div>
+              <p className="text-xs text-zinc-400">
+                These transfers were interrupted. Click Resume to continue, or Discard to remove.
+              </p>
+              {resumeError && (
+                <div className="p-2 bg-red-950/50 border border-red-900/50 rounded-lg">
+                  <p className="text-xs text-red-400">{resumeError}</p>
+                </div>
+              )}
+              <div className="space-y-2 max-h-48 overflow-y-auto">
+                {incompleteTransfers.map((t) => (
+                  <div key={t.transferId} className="flex items-center gap-3 p-2 bg-zinc-900/60 rounded-lg">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-zinc-200 truncate">{t.fileName}</p>
+                      <div className="flex items-center gap-2 mt-1">
+                        <div className="flex-1 h-1 bg-zinc-700 rounded-full overflow-hidden">
+                          <div className="h-full bg-amber-500" style={{ width: `${t.progress}%` }} />
+                        </div>
+                        <span className="text-xs text-zinc-500 tabular-nums whitespace-nowrap">
+                          {t.progress}% • {formatFileSize(t.fileSize)}
+                        </span>
+                      </div>
+                    </div>
+                    <span className={`text-xs px-1.5 py-0.5 rounded ${
+                      t.direction === 'sending' ? 'bg-blue-900/50 text-blue-400' : 'bg-purple-900/50 text-purple-400'
+                    }`}>
+                      {t.direction === 'sending' ? 'Send' : 'Recv'}
+                    </span>
+                    <button
+                      onClick={() => t.direction === 'sending' ? handleResumeSend(t) : handleResumeReceive(t)}
+                      disabled={isLoading}
+                      className="px-2 py-1 text-xs bg-emerald-900/50 text-emerald-400 hover:bg-emerald-800/50 rounded transition-colors disabled:opacity-50"
+                      title="Resume transfer"
+                    >
+                      Resume
+                    </button>
+                    <button
+                      onClick={() => handleDiscardIncomplete(t.transferId)}
+                      className="p-1 text-zinc-500 hover:text-red-400 transition-colors"
+                      title="Discard"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                ))}
+              </div>
+              {/* Hidden file input for sender-side resume file re-selection */}
+              <input
+                ref={resumeFileInputRef}
+                type="file"
+                className="hidden"
+                onChange={handleResumeFileSelected}
+              />
+            </div>
+          )}
           {/* File Input */}
           <div className="mb-6">
             <FileDropZone
