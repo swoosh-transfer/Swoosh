@@ -30,7 +30,8 @@ import {
   joinRoom, 
   leaveRoom,
   onReconnect,
-  offReconnect
+  offReconnect,
+  setupSignalingListeners
 } from '../../utils/signaling.js';
 import { 
   initializePeerConnection,
@@ -182,6 +183,9 @@ export class ConnectionService {
       // Setup peer connection
       await this._setupPeerConnection();
       
+      // Setup signaling listeners (offer/answer/ICE exchange)
+      this._setupSignalingListeners();
+      
       // Host is impolite in perfect negotiation
       setPolite(false);
       
@@ -221,6 +225,9 @@ export class ConnectionService {
       
       // Setup peer connection
       await this._setupPeerConnection();
+      
+      // Setup signaling listeners (offer/answer/ICE exchange)
+      this._setupSignalingListeners();
       
       // Guest is polite in perfect negotiation
       setPolite(true);
@@ -338,6 +345,32 @@ export class ConnectionService {
   }
 
   /**
+   * Wait for data channel buffer to drain below threshold (backpressure).
+   * @param {number} [threshold=65536] - Buffer threshold in bytes
+   * @returns {Promise<void>}
+   */
+  async waitForDrain(threshold = 65536) {
+    const channel = this.dataChannel || getDataChannel();
+    if (!channel) return;
+    if (channel.bufferedAmount <= threshold) return;
+
+    return new Promise((resolve) => {
+      const check = () => {
+        if (!channel || channel.readyState !== 'open') {
+          resolve();
+          return;
+        }
+        if (channel.bufferedAmount <= threshold) {
+          resolve();
+        } else {
+          setTimeout(check, 16);
+        }
+      };
+      check();
+    });
+  }
+
+  /**
    * Setup peer connection with event handlers
    * @private
    */
@@ -347,14 +380,35 @@ export class ConnectionService {
       this._setState(ConnectionState.CONNECTED);
       this._emit('dataChannelReady', channel);
       
-      // Setup message handler
+      // Setup message handler — supports both JSON strings and binary ArrayBuffers
       channel.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data);
+        const data = event.data;
+
+        // Binary data (ArrayBuffer / Blob) — forward directly
+        if (data instanceof ArrayBuffer) {
           this._emit('dataChannelMessage', data);
-        } catch (err) {
-          logger.error('[ConnectionService] Failed to parse message:', err);
+          return;
         }
+
+        // String data — parse as JSON
+        if (typeof data === 'string') {
+          try {
+            this._emit('dataChannelMessage', JSON.parse(data));
+          } catch (err) {
+            logger.error('[ConnectionService] Failed to parse message:', err);
+          }
+          return;
+        }
+
+        // Blob (unlikely with binaryType='arraybuffer', but handle gracefully)
+        if (data instanceof Blob) {
+          data.arrayBuffer().then(buf => {
+            this._emit('dataChannelMessage', buf);
+          });
+          return;
+        }
+
+        logger.warn('[ConnectionService] Unknown message type:', typeof data);
       };
     };
     
@@ -388,6 +442,41 @@ export class ConnectionService {
       onStateChange,
       onStats
     );
+  }
+
+  /**
+   * Setup signaling listeners for WebRTC offer/answer/ICE exchange
+   * @private
+   */
+  _setupSignalingListeners() {
+    setupSignalingListeners({
+      onUserJoined: (data) => {
+        const userId = typeof data === 'object' ? data.userId : data;
+        logger.log('[ConnectionService] User joined:', userId);
+        this._emit('peerJoined', userId);
+        // Host creates offer when guest joins
+        if (this.role === 'host') {
+          createOffer(this.socket, this.roomId, (channel) => {
+            this.dataChannel = channel;
+            this._emit('dataChannelReady', channel);
+          });
+        }
+      },
+      onUserLeft: (data) => {
+        const userId = data?.userId;
+        logger.log('[ConnectionService] User left:', userId);
+        this._emit('peerLeft', userId);
+      },
+      onOffer: (offer) => {
+        handleOffer(offer, this.socket, this.roomId);
+      },
+      onAnswer: (answer) => {
+        handleAnswer(answer);
+      },
+      onIceCandidate: (candidate) => {
+        handleIceCandidate(candidate);
+      }
+    });
   }
 
   /**

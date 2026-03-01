@@ -21,6 +21,7 @@ import {
   useFileTransfer,
   useMultiFileTransfer,
   useMessages,
+  useTransferTracking,
 } from './hooks/index.js';
 
 // UI Components
@@ -124,6 +125,14 @@ export default function Room() {
     addLog
   );
 
+  // Transfer Tracking (IndexedDB persistence for cross-session resume)
+  const tracking = useTransferTracking({
+    roomId,
+    peerDisconnected,
+    addLog,
+    addRecoverableTransfer: uiState.addRecoverableTransfer,
+  });
+
   // ============ UI HANDLERS ============
 
   const handleStartTransfer = () => {
@@ -135,9 +144,24 @@ export default function Room() {
       setMultiFileMode(false);
       startTransfer();
     }
+
+    // Track transfer start in IndexedDB for crash recovery
+    if (isHost && selectedFile) {
+      tracking.trackTransferStart({
+        transferId: transfer.transferId || `${roomId}-${Date.now()}`,
+        fileName: selectedFile.name,
+        fileSize: selectedFile.size,
+        totalChunks: Math.ceil(selectedFile.size / (64 * 1024)),
+        direction: 'sending',
+      });
+    }
   };
 
   const handleReset = () => {
+    // Clean up tracking for current transfer
+    if (transfer.transferId) {
+      tracking.trackTransferCancel(transfer.transferId);
+    }
     // Reset multi-file transfer state
     multiTransfer.resetTransfer();
     // Reset single-file transfer state so UI doesn't show stale 'completed'
@@ -154,12 +178,19 @@ export default function Room() {
     await setupFileWriter(pendingFile?.name, clearPendingFile);
   };
 
-  const handleRecoverTransfer = (transferId) => {
+  const handleRecoverTransfer = async (transferId) => {
     addLog(`Recovering transfer: ${transferId}`, 'info');
+    // Get full recovery info from IndexedDB for future resume protocol
+    const info = await tracking.getRecoverableTransferInfo(transferId);
+    if (info) {
+      addLog(`Resumable: ${info.fileName} (${info.progress}%, ${info.receivedCount}/${info.totalChunks} chunks)`, 'info');
+    }
     removeRecoverableTransfer(transferId);
   };
 
-  const handleDiscardRecovery = (transferId) => {
+  const handleDiscardRecovery = async (transferId) => {
+    // Clean up IndexedDB records for this transfer
+    await tracking.discardRecoverableTransfer(transferId);
     removeRecoverableTransfer(transferId);
     addLog('Transfer discarded', 'info');
   };
