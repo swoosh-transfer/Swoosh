@@ -7,7 +7,7 @@
  * Supports pause/resume and adaptive chunking.
  */
 
-import { saveChunkMeta } from '../../infrastructure/database/chunks.repository.js';
+import { saveChunk } from '../../infrastructure/database/chunks.repository.js';
 import { createFileMetadata, saveFileMetadata, createTransferRecord, updateTransferProgress } from '../metadata/fileMetadata.js';
 import { resumableTransferManager, TransferState, TransferRole } from '../resumption/ResumableTransferManager.js';
 import logger from '../../utils/logger.js';
@@ -348,7 +348,7 @@ export class ChunkingEngine {
    * @private
    */
   async _storeChunkMetadata(metadata) {
-    await saveChunkMeta({
+    await saveChunk({
       transferId: metadata.transferId,
       chunkIndex: metadata.chunkIndex,
       size: metadata.size,

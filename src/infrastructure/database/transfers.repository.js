@@ -122,3 +122,22 @@ export async function cleanupOldTransfers(maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
   
   return deletedCount;
 }
+
+/**
+ * Namespace adapter for object-style access.
+ * Maps method names expected by consumers to actual functions.
+ */
+export const transfersRepository = {
+  save: saveTransfer,
+  saveTransfer,
+  findById: getTransfer,
+  getTransfer,
+  update: updateTransfer,
+  updateTransfer,
+  delete: deleteTransfer,
+  deleteTransfer,
+  findAll: listTransfers,
+  listTransfers,
+  getTransfersByStatus,
+  cleanupOldTransfers,
+};

@@ -9,7 +9,7 @@
  * Uses the existing ChunkingEngine per-file and ChannelPool for I/O.
  */
 import { FileQueue, FILE_STATE } from './FileQueue.js';
-import { ChunkingEngine } from '../../utils/chunkingSystem.js';
+import { ChunkingEngine } from '../sending/ChunkingEngine.js';
 import { BandwidthMonitor } from '../multichannel/BandwidthMonitor.js';
 import {
   TRANSFER_MODE,

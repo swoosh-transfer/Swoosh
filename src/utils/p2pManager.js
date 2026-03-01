@@ -298,3 +298,16 @@ export function getDataChannel() {
 export function getPeerConnection() {
   return peerConnection;
 }
+
+/**
+ * Close the peer connection and clean up resources.
+ */
+export function closePeerConnection() {
+  if (peerConnection) {
+    peerConnection.close();
+    peerConnection = null;
+  }
+  if (channelPool) {
+    channelPool = null;
+  }
+}

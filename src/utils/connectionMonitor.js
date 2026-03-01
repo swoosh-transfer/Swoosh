@@ -77,3 +77,33 @@ export function stopHealthMonitoring() {
   if (monitorInterval) clearInterval(monitorInterval);
   monitorInterval = null;
 }
+
+/**
+ * Get current connection health snapshot.
+ * Returns cached stats from last monitoring interval.
+ * 
+ * @param {RTCPeerConnection} pc - Active WebRTC peer connection
+ * @returns {Promise<Object>} Health stats { rtt, packetLoss, connectionState }
+ */
+export async function getConnectionHealth(pc) {
+  if (!pc) return { rtt: 0, packetLoss: '0', connectionState: 'closed' };
+  
+  const stats = { rtt: 0, packetLoss: '0', connectionState: pc.connectionState };
+  try {
+    const report = await pc.getStats();
+    report.forEach(entry => {
+      if (entry.type === 'candidate-pair' && entry.state === 'succeeded') {
+        stats.rtt = entry.currentRoundTripTime ? entry.currentRoundTripTime * 1000 : 0;
+      }
+      if (entry.type === 'inbound-rtp') {
+        const lost = entry.packetsLost || 0;
+        const received = entry.packetsReceived || 0;
+        const total = lost + received;
+        stats.packetLoss = total > 0 ? ((lost / total) * 100).toFixed(1) : '0';
+      }
+    });
+  } catch (err) {
+    logger.error('Error getting connection health:', err);
+  }
+  return stats;
+}

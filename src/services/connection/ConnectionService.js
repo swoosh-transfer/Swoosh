@@ -35,12 +35,13 @@ import {
 import { 
   initializePeerConnection,
   createOffer,
-  createAnswer,
-  addAnswer,
-  addIceCandidate,
-  sendData,
+  handleOffer,
+  handleAnswer,
+  handleIceCandidate,
   closePeerConnection,
   getConnectionState,
+  getDataChannel,
+  getPeerConnection,
   setPolite
 } from '../../utils/p2pManager.js';
 import { 
@@ -261,22 +262,47 @@ export class ConnectionService {
   /**
    * Send data through the data channel
    * 
-   * @param {any} data - Data to send (will be JSON stringified)
+   * @param {any} data - Data to send (will be JSON stringified if object)
    * @returns {Promise<boolean>} Success status
    */
   async send(data) {
-    if (!this.dataChannel || this.dataChannel.readyState !== 'open') {
+    const channel = this.dataChannel || getDataChannel();
+    if (!channel || channel.readyState !== 'open') {
       throw new ConnectionError('Data channel not ready', { 
-        state: this.dataChannel?.readyState 
+        state: channel?.readyState 
       });
     }
     
     try {
-      sendData(this.dataChannel, data);
+      const payload = typeof data === 'string' ? data : JSON.stringify(data);
+      channel.send(payload);
       return true;
     } catch (err) {
       logger.error('[ConnectionService] Failed to send data:', err);
       throw new ConnectionError('Failed to send data', { cause: err });
+    }
+  }
+
+  /**
+   * Send binary data through the data channel
+   * 
+   * @param {ArrayBuffer|Uint8Array} data - Binary data to send
+   * @returns {Promise<boolean>} Success status
+   */
+  async sendBinary(data) {
+    const channel = this.dataChannel || getDataChannel();
+    if (!channel || channel.readyState !== 'open') {
+      throw new ConnectionError('Data channel not ready', {
+        state: channel?.readyState
+      });
+    }
+
+    try {
+      channel.send(data);
+      return true;
+    } catch (err) {
+      logger.error('[ConnectionService] Failed to send binary data:', err);
+      throw new ConnectionError('Failed to send binary data', { cause: err });
     }
   }
 

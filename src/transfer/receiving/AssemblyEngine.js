@@ -7,9 +7,9 @@
  * Complements ChunkingEngine on the receiver side.
  */
 
-import { saveChunkMeta } from '../../infrastructure/database/chunks.repository.js';
+import { saveChunk } from '../../infrastructure/database/chunks.repository.js';
 import { createTransferRecord, updateTransferProgress } from '../metadata/fileMetadata.js';
-import { FileWriter } from '../../infrastructure/storage/FileWriter.js';
+import { initFileWriter, writeChunk as writeFileChunk, completeWriter, cancelWriter } from '../../infrastructure/storage/FileWriter.js';
 import logger from '../../utils/logger.js';
 import { progressTracker } from '../shared/ProgressTracker.js';
 import { chunkValidator } from './ChunkValidator.js';
@@ -47,14 +47,12 @@ export class AssemblyEngine {
     // Initialize chunk validator
     chunkValidator.initialize(transferId, totalChunks);
 
-    // Initialize file writer
-    const fileWriter = new FileWriter(transferId, fileMetadata.name, fileMetadata.size);
-    await fileWriter.initialize();
-    this.fileWriters.set(transferId, fileWriter);
+    // Initialize file writer using functional API
+    const writerInfo = await initFileWriter(transferId, fileMetadata.name, fileMetadata.size);
+    this.fileWriters.set(transferId, { transferId, ...writerInfo });
     
     // Initialize assembly state
     this.activeAssemblies.set(transferId, {
-      fileWriter,
       fileMetadata,
       transferRecord,
       receivedChunks: 0,
@@ -72,7 +70,7 @@ export class AssemblyEngine {
     });
     
     logger.log(`[AssemblyEngine] Initialized assembly for ${transferId}: ${totalChunks} chunks expected`);
-    return fileWriter;
+    return writerInfo;
   }
 
   /**
@@ -122,7 +120,6 @@ export class AssemblyEngine {
   async _appendToReceiveBuffer(transferId, chunkData, chunkMetadata) {
     const bufferState = this.receiveBuffers.get(transferId);
     const assemblyState = this.activeAssemblies.get(transferId);
-    const fileWriter = this.fileWriters.get(transferId);
 
     // Convert to Uint8Array if needed
     const data = chunkData instanceof Uint8Array ? chunkData : new Uint8Array(chunkData);
@@ -160,8 +157,8 @@ export class AssemblyEngine {
       // Store validated chunk metadata in IndexedDB
       await this._storeValidatedChunk(transferId, chunkMetadata);
 
-      // Write to file using FileWriter (handles sequential writing and queuing)
-      await fileWriter.writeChunk(chunkMetadata.chunkIndex, actualData);
+      // Write to file using functional FileWriter API (handles sequential writing and queuing)
+      await writeFileChunk(transferId, chunkMetadata.chunkIndex, actualData);
 
       // Update progress
       assemblyState.bytesReceived += bufferState.currentSize;
@@ -201,7 +198,7 @@ export class AssemblyEngine {
    * @private
    */
   async _storeValidatedChunk(transferId, chunkMetadata) {
-    await saveChunkMeta({
+    await saveChunk({
       transferId: chunkMetadata.transferId,
       chunkIndex: chunkMetadata.chunkIndex,
       size: chunkMetadata.size,
@@ -221,10 +218,9 @@ export class AssemblyEngine {
    */
   async _completeAssembly(transferId) {
     const assemblyState = this.activeAssemblies.get(transferId);
-    const fileWriter = this.fileWriters.get(transferId);
     
-    // Complete the file writing
-    const result = await fileWriter.complete();
+    // Complete the file writing using functional API
+    const result = await completeWriter(transferId);
     
     // Update transfer record
     await updateTransferProgress(transferId, {
@@ -300,13 +296,10 @@ export class AssemblyEngine {
    * Cleanup assembly state
    */
   async cleanup(transferId) {
-    const fileWriter = this.fileWriters.get(transferId);
-    if (fileWriter) {
-      try {
-        await fileWriter.close();
-      } catch (err) {
-        logger.warn(`[AssemblyEngine] Error closing file writer for ${transferId}:`, err);
-      }
+    try {
+      await cancelWriter(transferId);
+    } catch (err) {
+      logger.warn(`[AssemblyEngine] Error cleaning up file writer for ${transferId}:`, err);
     }
     
     this.activeAssemblies.delete(transferId);

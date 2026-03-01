@@ -188,3 +188,22 @@ export async function getChunkStats(transferId, totalChunks) {
     byStatus,
   };
 }
+
+/**
+ * Namespace adapter for object-style access.
+ * Maps method names expected by consumers to actual functions.
+ */
+export const chunksRepository = {
+  save: saveChunk,
+  saveChunk,
+  getChunk,
+  findByTransferId: getChunksByTransfer,
+  getChunksByTransfer,
+  getChunksByStatus,
+  getMissingChunks,
+  updateChunkStatus,
+  saveChunksBatch,
+  deleteByTransferId: deleteChunksByTransfer,
+  deleteChunksByTransfer,
+  getChunkStats,
+};
