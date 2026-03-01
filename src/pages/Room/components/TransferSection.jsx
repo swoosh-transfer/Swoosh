@@ -95,8 +95,8 @@ export function TransferSection({
         </div>
       )}
 
-      {/* Transfer mode toggle — shown when multiple files selected */}
-      {isIdle && selectedFiles.length > 1 && (
+      {/* Transfer mode toggle — shown when files are selected (all transfers use multi-file path) */}
+      {isIdle && selectedFiles.length >= 1 && (
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
           <h2 className="text-sm font-medium text-zinc-400 mb-3">Transfer Mode</h2>
           <div className="flex rounded-lg overflow-hidden border border-zinc-700">

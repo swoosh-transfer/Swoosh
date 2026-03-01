@@ -72,6 +72,8 @@ export function useMessages(
   const pendingBinaryQueueRef = useRef([]);
   /** Track whether we're in a multi-file transfer */
   const isMultiFileRef = useRef(false);
+  /** Per-channel metadata queues for correct binary↔metadata matching in multi-channel mode */
+  const perChannelMetaRef = useRef(new Map());
   /** Message processing serialization */
   const messageQueueRef = useRef([]);
   const isProcessingRef = useRef(false);
@@ -86,11 +88,16 @@ export function useMessages(
   /**
    * Handle incoming binary chunk data
    * @param {Uint8Array} data - Binary chunk data
+   * @param {number} channelIndex - Channel the binary arrived on (for multi-channel matching)
    */
-  const handleChunkData = useCallback(async (data) => {
+  const handleChunkData = useCallback(async (data, channelIndex = 0) => {
     if (isMultiFileRef.current) {
-      // Multi-file: route based on pending metadata
-      await handleMultiBinaryChunk(data);
+      // Multi-file: match binary to metadata from the SAME channel.
+      // This prevents cross-channel interleaving from corrupting file data.
+      const queue = perChannelMetaRef.current.get(channelIndex);
+      const meta = queue?.length > 0 ? queue.shift() : null;
+      const fileIndex = meta?.fileIndex;
+      await handleMultiBinaryChunk(data, fileIndex);
       return;
     }
 
@@ -111,9 +118,12 @@ export function useMessages(
    */
   const processMessage = useCallback(async (event) => {
     try {
+      // Extract channel index (set by pool listener for channels 1+, 0 for control)
+      const channelIndex = event._channelIndex ?? 0;
+
       // Binary data = file chunk
       if (event.data instanceof ArrayBuffer) {
-        await handleChunkData(new Uint8Array(event.data));
+        await handleChunkData(new Uint8Array(event.data), channelIndex);
         return;
       }
 
@@ -127,6 +137,8 @@ export function useMessages(
         // ─── Multi-file messages ──────────────────────────────
         case MESSAGE_TYPE.MULTI_FILE_MANIFEST:
           isMultiFileRef.current = true;
+          // Clear per-channel metadata queues for new transfer
+          perChannelMetaRef.current.clear();
           await handleMultiFileManifest(msg);
           break;
 
@@ -149,6 +161,13 @@ export function useMessages(
 
         case 'chunk-metadata':
           if (isMultiFileRef.current) {
+            // Store in per-channel queue so the next binary on this channel
+            // matches the correct metadata (prevents cross-channel corruption)
+            const chIdx = channelIndex;
+            if (!perChannelMetaRef.current.has(chIdx)) {
+              perChannelMetaRef.current.set(chIdx, []);
+            }
+            perChannelMetaRef.current.get(chIdx).push(msg);
             handleMultiChunkMetadata(msg);
           } else {
             chunkMetaQueueRef.current.push(msg);
@@ -286,7 +305,8 @@ export function useMessages(
       // Only handle messages from data channels (1+)
       // Channel-0 is already handled via its own onmessage above
       if (channelIndex >= 1) {
-        handleMessage(event);
+        // Wrap event with channel index for correct per-channel binary↔metadata matching
+        handleMessage({ data: event.data, _channelIndex: channelIndex });
       }
     };
 

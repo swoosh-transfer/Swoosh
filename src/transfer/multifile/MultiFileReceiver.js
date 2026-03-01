@@ -104,8 +104,23 @@ export class MultiFileReceiver {
         state.handle = fileHandle;
         state.writable = await fileHandle.createWritable();
       } catch (err) {
-        logger.error(`[MultiFileReceiver] Failed to create handle for file ${idx}:`, err);
-        // Will fall back to blob-based saving
+        // Sanitized name still rejected by FSAPI — try a safe fallback name
+        logger.warn(`[MultiFileReceiver] Name rejected for file ${idx} ("${state.name}"), trying fallback...`);
+        try {
+          const ext = state.name.includes('.') ? state.name.slice(state.name.lastIndexOf('.')) : '';
+          const fallbackName = `file_${idx}${this._sanitizeFileName(ext) || ''}`;
+          const fileHandle = await this._getOrCreateFileHandle(
+            dirHandle,
+            null,  // skip relativePath — it might also be problematic
+            fallbackName
+          );
+          state.handle = fileHandle;
+          state.writable = await fileHandle.createWritable();
+          logger.log(`[MultiFileReceiver] Using fallback name: ${fallbackName}`);
+        } catch (err2) {
+          logger.error(`[MultiFileReceiver] Fallback also failed for file ${idx}:`, err2);
+          // Will fall back to blob-based saving
+        }
       }
     }
   }
@@ -133,35 +148,41 @@ export class MultiFileReceiver {
     let safe = name
       // Replace characters illegal on Windows / FSAPI
       .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
-      // Replace any remaining control characters or zero-width chars
-      .replace(/[\x7F\u200B-\u200F\uFEFF]/g, '')
-      // Collapse multiple underscores into one
-      .replace(/_{2,}/g, '_')
-      // Remove trailing dots and spaces (Windows rejects these)
-      .replace(/[\s.]+$/, '')
-      // Remove leading dots and spaces
-      .replace(/^[\s.]+/, '')
+      // Replace any remaining control characters, zero-width chars, and surrogates
+      .replace(/[\x7F\u200B-\u200F\uFEFF\uD800-\uDFFF]/g, '')
+      // Replace any non-BMP characters (emoji, etc.) that might cause issues
+      .replace(/[\u{10000}-\u{10FFFF}]/gu, '_')
+      // Collapse runs of underscores/spaces into single underscore
+      .replace(/[_\s]{2,}/g, '_')
+      // Remove trailing dots, spaces, underscores (Windows / FSAPI rejects trailing . and space)
+      .replace(/[\s._]+$/, '')
+      // Remove leading dots, spaces, underscores
+      .replace(/^[\s._]+/, '')
       .trim();
 
     // Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
-    if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(safe.split('.')[0])) {
+    const stem = safe.split('.')[0];
+    if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(stem)) {
       safe = '_' + safe;
     }
 
-    // Ensure non-empty
-    if (!safe) return 'unnamed_file';
+    // Ensure non-empty after all stripping
+    if (!safe || safe === '_') return 'unnamed_file';
 
     // FSAPI / NTFS limit: 255 characters max for a single name component.
-    // Preserve the extension when truncating.
-    if (safe.length > 200) {
+    // Truncate to 180 with extension preserved (leaves room for dedup suffixes).
+    if (safe.length > 180) {
       const dotIdx = safe.lastIndexOf('.');
-      if (dotIdx > 0) {
-        const ext = safe.slice(dotIdx);          // e.g. ".mp4"
-        const stem = safe.slice(0, 200 - ext.length);
+      if (dotIdx > 0 && dotIdx > safe.length - 20) {
+        // Extension is within last 20 chars — preserve it
+        const ext = safe.slice(dotIdx);
+        const stem = safe.slice(0, 180 - ext.length);
         safe = stem + ext;
       } else {
-        safe = safe.slice(0, 200);
+        safe = safe.slice(0, 180);
       }
+      // Re-strip any trailing dots/spaces from truncation
+      safe = safe.replace(/[\s._]+$/, '') || 'unnamed_file';
     }
 
     return safe;
