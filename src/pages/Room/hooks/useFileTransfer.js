@@ -85,7 +85,7 @@ export function useFileTransfer(
    * @param {string} [resumeTransferId] - Optional: reuse existing transferId when resuming
    */
   const startTransfer = useCallback((resumeTransferId) => {
-    if (!selectedFile || !tofuVerified) return;
+    if (!selectedFile || !tofuVerified) return null;
 
     // Use existing transferId when resuming, otherwise generate new UUID
     const transferId = resumeTransferId || crypto.randomUUID();
@@ -128,6 +128,8 @@ export function useFileTransfer(
     });
 
     addLog('Waiting for receiver...', 'info');
+
+    return transferId;
   }, [selectedFile, tofuVerified, roomId, sendJSON, addLog, initiateUpload]);
 
   /**

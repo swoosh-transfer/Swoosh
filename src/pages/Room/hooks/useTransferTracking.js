@@ -62,11 +62,14 @@ export function useTransferTracking({
   const bitmapDirtyRef = useRef(false);
   const bitmapFlushTimerRef = useRef(null);
   const chunksSinceFlushRef = useRef(0);
+  const flushingRef = useRef(false); // mutex to prevent concurrent flushes
 
-  /** Flush the current in-memory bitmap to IndexedDB */
+  /** Flush the current in-memory bitmap to IndexedDB (with mutex) */
   const flushBitmap = useCallback(async () => {
     if (!bitmapDirtyRef.current || !activeTransferIdRef.current || !bitmapRef.current) return;
+    if (flushingRef.current) return; // already flushing — skip to avoid concurrent writes
     
+    flushingRef.current = true;
     const transferId = activeTransferIdRef.current;
     const bitmap = bitmapRef.current;
     
@@ -80,6 +83,8 @@ export function useTransferTracking({
       logger.log(`[TransferTracking] Bitmap flushed for ${transferId}`);
     } catch (err) {
       logger.warn('[TransferTracking] Failed to flush bitmap:', err.message);
+    } finally {
+      flushingRef.current = false;
     }
   }, []);
 
@@ -95,8 +100,14 @@ export function useTransferTracking({
       }
     };
 
-    const handleBeforeUnload = () => {
+    const handleBeforeUnload = (event) => {
+      // Fire-and-forget — browser may allow async IDB writes a brief window
       flushBitmap();
+      // If there's a dirty bitmap still in memory, hint the browser to delay unload
+      if (bitmapDirtyRef.current && activeTransferIdRef.current) {
+        event.preventDefault();
+        event.returnValue = ''; // Chrome requires returnValue
+      }
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -180,7 +191,7 @@ export function useTransferTracking({
   /**
    * Track a chunk being sent or received (metadata only — no binary in IDB).
    * Updates in-memory bitmap and queues throttled flush to IndexedDB.
-   * Flushes every 50 chunks or every 2 seconds, whichever comes first.
+   * Flushes every 25 chunks or every 2 seconds, whichever comes first.
    */
   const trackChunkProgress = useCallback((transferId, chunkIndex) => {
     if (!bitmapRef.current) return;
@@ -189,8 +200,8 @@ export function useTransferTracking({
     bitmapDirtyRef.current = true;
     chunksSinceFlushRef.current++;
 
-    // Flush every 50 chunks
-    if (chunksSinceFlushRef.current >= 50) {
+    // Flush every 25 chunks
+    if (chunksSinceFlushRef.current >= 25) {
       flushBitmap();
     } else if (!bitmapFlushTimerRef.current) {
       // Or schedule a flush in 2 seconds

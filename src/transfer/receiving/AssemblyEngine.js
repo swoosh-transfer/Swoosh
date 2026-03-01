@@ -5,15 +5,17 @@
  * and writes to file using File System Access API.
  * 
  * Complements ChunkingEngine on the receiver side.
+ * 
+ * Two-step initialization:
+ *   1. initializeReceive(metadata)  — set up state, progress, validator (no user prompt)
+ *   2. setupFileWriter(transferId, fileName) — prompt user for save location
  */
 
-import { saveChunk } from '../../infrastructure/database/chunks.repository.js';
-import { createTransferRecord, updateTransferProgress } from '../metadata/fileMetadata.js';
 import { initFileWriter, writeChunk as writeFileChunk, completeWriter, cancelWriter } from '../../infrastructure/storage/FileWriter.js';
 import logger from '../../utils/logger.js';
 import { progressTracker } from '../shared/ProgressTracker.js';
 import { chunkValidator } from './ChunkValidator.js';
-import { NETWORK_CHUNK_SIZE, STORAGE_CHUNK_SIZE } from '../../constants/transfer.constants.js';
+import { STORAGE_CHUNK_SIZE } from '../../constants/transfer.constants.js';
 import { ValidationError } from '../../lib/errors.js';
 
 export class AssemblyEngine {
@@ -21,55 +23,96 @@ export class AssemblyEngine {
     this.activeAssemblies = new Map(); // transferId -> assembly state
     this.receiveBuffers = new Map(); // transferId -> receive buffer
     this.fileWriters = new Map(); // transferId -> FileWriter instance
+
+    // Event callbacks (set by consumer)
+    this.onComplete = null; // (transferId, result) => void
+    this.onError = null;    // (transferId, error) => void
   }
 
   /**
-   * Initialize assembly for a transfer
+   * Step 1: Initialize receive state (no user prompt).
+   * Called when file-metadata arrives from sender.
+   * 
+   * @param {Object} metadata
+   * @param {string} metadata.transferId
+   * @param {string} metadata.name
+   * @param {number} metadata.size
+   * @param {string} [metadata.mimeType]
+   * @param {number} [metadata.totalChunks]
    */
-  async initializeAssembly(transferId, fileMetadata, peerId) {
-    // Create transfer record
-    const transferRecord = await createTransferRecord({ 
-      transferId, 
-      fileMeta: fileMetadata, 
-      peerId 
-    });
-    
-    const totalChunks = Math.ceil(fileMetadata.size / STORAGE_CHUNK_SIZE);
-    
+  async initializeReceive({ transferId, name, size, mimeType, totalChunks: providedTotalChunks }) {
+    const totalChunks = providedTotalChunks || Math.ceil(size / STORAGE_CHUNK_SIZE);
+
     // Initialize progress tracking
     progressTracker.initialize(transferId, {
       totalChunks,
-      fileSize: fileMetadata.size,
-      fileName: fileMetadata.name,
-      direction: 'receive'
+      fileSize: size,
+      fileName: name,
+      direction: 'receive',
     });
 
     // Initialize chunk validator
     chunkValidator.initialize(transferId, totalChunks);
 
-    // Initialize file writer using functional API
-    const writerInfo = await initFileWriter(transferId, fileMetadata.name, fileMetadata.size);
-    this.fileWriters.set(transferId, { transferId, ...writerInfo });
-    
-    // Initialize assembly state
+    // Initialize assembly state (file writer comes later in step 2)
     this.activeAssemblies.set(transferId, {
-      fileMetadata,
-      transferRecord,
+      fileMetadata: { name, size, mimeType },
       receivedChunks: 0,
       totalChunks,
       bytesReceived: 0,
       isComplete: false,
-      currentFileChunkIndex: 0 // Track network-sized chunks for file writing
     });
 
     // Initialize receive buffer
     this.receiveBuffers.set(transferId, {
       buffer: new Uint8Array(STORAGE_CHUNK_SIZE),
       currentSize: 0,
-      expectedSize: STORAGE_CHUNK_SIZE
+      expectedSize: STORAGE_CHUNK_SIZE,
     });
-    
-    logger.log(`[AssemblyEngine] Initialized assembly for ${transferId}: ${totalChunks} chunks expected`);
+
+    logger.log(`[AssemblyEngine] Initialized receive for ${transferId}: ${totalChunks} chunks expected`);
+    return { transferId, totalChunks, fileName: name, fileSize: size };
+  }
+
+  /**
+   * Step 2: Prompt user for save location and set up file writer.
+   * Called when user clicks "Select save location".
+   * 
+   * @param {string} transferId
+   * @param {string} fileName
+   * @returns {Promise<Object>} Writer info including method used
+   */
+  async setupFileWriter(transferId, fileName) {
+    const assemblyState = this.activeAssemblies.get(transferId);
+    if (!assemblyState) {
+      throw new ValidationError(
+        `No assembly initialized for transfer ${transferId}`,
+        { transferId }
+      );
+    }
+
+    const writerInfo = await initFileWriter(transferId, fileName, assemblyState.fileMetadata.size);
+    this.fileWriters.set(transferId, { transferId, ...writerInfo });
+
+    logger.log(`[AssemblyEngine] File writer ready for ${transferId}`);
+    return { ...writerInfo, method: 'file-system-access' };
+  }
+
+  /**
+   * Legacy one-step init (combines initializeReceive + setupFileWriter).
+   * Kept for multi-file path and resume.
+   */
+  async initializeAssembly(transferId, fileMetadata, peerId) {
+    await this.initializeReceive({
+      transferId,
+      name: fileMetadata.name,
+      size: fileMetadata.size,
+      mimeType: fileMetadata.type,
+    });
+
+    const writerInfo = await this.setupFileWriter(transferId, fileMetadata.name);
+
+    logger.log(`[AssemblyEngine] Full assembly initialized for ${transferId}`);
     return writerInfo;
   }
 
@@ -154,9 +197,6 @@ export class AssemblyEngine {
         );
       }
 
-      // Store validated chunk metadata in IndexedDB
-      await this._storeValidatedChunk(transferId, chunkMetadata);
-
       // Write to file using functional FileWriter API (handles sequential writing and queuing)
       await writeFileChunk(transferId, chunkMetadata.chunkIndex, actualData);
 
@@ -164,14 +204,8 @@ export class AssemblyEngine {
       assemblyState.bytesReceived += bufferState.currentSize;
       assemblyState.receivedChunks++;
       
-      // Update progress tracker
+      // Update progress tracker (canonical progress — bitmap tracking is handled by useTransferTracking)
       progressTracker.updateChunk(transferId, chunkMetadata.chunkIndex, bufferState.currentSize);
-
-      // Update transfer progress in metadata
-      await updateTransferProgress(transferId, {
-        receivedChunks: assemblyState.receivedChunks,
-        status: 'in-progress'
-      });
 
       // Reset buffer
       bufferState.currentSize = 0;
@@ -194,25 +228,6 @@ export class AssemblyEngine {
   }
 
   /**
-   * Store validated chunk in IndexedDB
-   * @private
-   */
-  async _storeValidatedChunk(transferId, chunkMetadata) {
-    await saveChunk({
-      transferId: chunkMetadata.transferId,
-      chunkIndex: chunkMetadata.chunkIndex,
-      size: chunkMetadata.size,
-      checksum: chunkMetadata.checksum,
-      timestamp: chunkMetadata.timestamp,
-      isFinal: chunkMetadata.isFinal,
-      fileOffset: chunkMetadata.fileOffset,
-      status: 'received',
-      validated: true,
-      receivedAt: Date.now()
-    });
-  }
-
-  /**
    * Complete file assembly
    * @private
    */
@@ -222,13 +237,6 @@ export class AssemblyEngine {
     // Complete the file writing using functional API
     const result = await completeWriter(transferId);
     
-    // Update transfer record
-    await updateTransferProgress(transferId, {
-      status: 'completed',
-      receivedChunks: assemblyState.totalChunks,
-      completedAt: Date.now()
-    });
-    
     // Update progress tracker
     progressTracker.updateStatus(transferId, 'completed');
     
@@ -236,6 +244,10 @@ export class AssemblyEngine {
     assemblyState.isComplete = true;
 
     logger.log(`[AssemblyEngine] File assembly complete: ${result.fileSize} bytes received`);
+
+    // Notify consumer
+    if (this.onComplete) this.onComplete(transferId, result);
+
     return result;
   }
 

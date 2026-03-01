@@ -7,8 +7,7 @@
  * Supports pause/resume and adaptive chunking.
  */
 
-import { saveChunk } from '../../infrastructure/database/chunks.repository.js';
-import { createFileMetadata, saveFileMetadata, createTransferRecord, updateTransferProgress } from '../metadata/fileMetadata.js';
+import { createFileMetadata, saveFileMetadata, createTransferRecord } from '../metadata/fileMetadata.js';
 import { resumableTransferManager, TransferState, TransferRole } from '../resumption/ResumableTransferManager.js';
 import logger from '../../utils/logger.js';
 import { progressTracker } from '../shared/ProgressTracker.js';
@@ -307,7 +306,7 @@ export class ChunkingEngine {
     // Calculate SHA-256 checksum
     const checksum = await this._calculateChecksum(chunkData);
     
-    // Store metadata in IndexedDB
+    // Build chunk metadata
     const chunkMetadata = {
       transferId,
       chunkIndex: chunkingState.storageChunkIndex,
@@ -318,9 +317,7 @@ export class ChunkingEngine {
       fileOffset: chunkingState.bytesRead - bufferState.currentSize
     };
 
-    await this._storeChunkMetadata(chunkMetadata);
-
-    // Send chunk metadata and binary data
+    // Send chunk metadata and binary data (bitmap tracking is handled by useTransferTracking)
     if (onChunkReady) {
       await onChunkReady({
         metadata: chunkMetadata,
@@ -347,23 +344,6 @@ export class ChunkingEngine {
     const hashBuffer = await crypto.subtle.digest('SHA-256', data);
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-
-  /**
-   * Store chunk metadata in IndexedDB
-   * @private
-   */
-  async _storeChunkMetadata(metadata) {
-    await saveChunk({
-      transferId: metadata.transferId,
-      chunkIndex: metadata.chunkIndex,
-      size: metadata.size,
-      checksum: metadata.checksum,
-      timestamp: metadata.timestamp,
-      isFinal: metadata.isFinal,
-      fileOffset: metadata.fileOffset,
-      status: 'sent'
-    });
   }
 
   /**
