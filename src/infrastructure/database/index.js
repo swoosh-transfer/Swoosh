@@ -36,6 +36,7 @@ export * from './metadata.repository.js';
 import { deleteTransfer } from './transfers.repository.js';
 import { deleteChunksByTransfer } from './chunks.repository.js';
 import { deleteFileMetadata } from './metadata.repository.js';
+import { getDatabase, STORE_NAMES } from './client.js';
 import logger from '../../utils/logger.js';
 
 export async function cleanupTransferData(transferId) {
@@ -50,9 +51,36 @@ export async function cleanupTransferData(transferId) {
     await deleteTransfer(transferId);
     logger.log(`[Database] Deleted transfer metadata for: ${transferId}`);
     
-    // Delete file metadata (use transferId as fileId)
-    await deleteFileMetadata(transferId);
-    logger.log(`[Database] Deleted file metadata for: ${transferId}`);
+    // Delete file metadata by transferId index
+    const db = await getDatabase();
+    const deletedFiles = await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAMES.FILES, 'readwrite');
+      const store = tx.objectStore(STORE_NAMES.FILES);
+      let count = 0;
+      
+      if (store.indexNames.contains('transferId')) {
+        const index = store.index('transferId');
+        const req = index.openCursor(transferId);
+        req.onsuccess = (event) => {
+          const cursor = event.target.result;
+          if (cursor) {
+            cursor.delete();
+            count++;
+            cursor.continue();
+          } else {
+            resolve(count);
+          }
+        };
+        req.onerror = () => reject(req.error);
+      } else {
+        // Fallback: try deleting by transferId as fileId (legacy)
+        store.delete(transferId);
+        resolve(1);
+      }
+      
+      tx.onerror = () => reject(tx.error);
+    });
+    logger.log(`[Database] Deleted ${deletedFiles} file metadata records for transfer: ${transferId}`);
     
     logger.log(`[Database] Cleanup completed for transfer: ${transferId}`);
     return { success: true };

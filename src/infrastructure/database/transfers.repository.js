@@ -49,14 +49,28 @@ export async function getTransfer(transferId) {
  * @throws {Error} If transfer not found
  */
 export async function updateTransfer(transferId, patch) {
-  const existing = await getTransfer(transferId);
-  if (!existing) {
-    throw new Error(`Transfer ${transferId} not found`);
-  }
-  
-  const updated = { ...existing, ...patch, updatedAt: Date.now() };
-  await saveTransfer(updated);
-  return updated;
+  const db = await getDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAMES.TRANSFERS, 'readwrite');
+    const store = tx.objectStore(STORE_NAMES.TRANSFERS);
+    const getReq = store.get(transferId);
+    
+    getReq.onsuccess = () => {
+      const existing = getReq.result;
+      if (!existing) {
+        reject(new Error(`Transfer ${transferId} not found`));
+        return;
+      }
+      const updated = { ...existing, ...patch, updatedAt: Date.now() };
+      const putReq = store.put(updated);
+      putReq.onsuccess = () => resolve(updated);
+      putReq.onerror = () => reject(putReq.error);
+    };
+    
+    getReq.onerror = () => reject(getReq.error);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(new Error('Transaction aborted'));
+  });
 }
 
 /**

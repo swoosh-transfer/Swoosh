@@ -65,8 +65,19 @@ export async function getChunksByTransfer(transferId) {
  * @returns {Promise<Object[]>} Array of matching chunks
  */
 export async function getChunksByStatus(transferId, status) {
-  const allChunks = await getChunksByTransfer(transferId);
-  return allChunks.filter(c => c.status === status);
+  const db = await getDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAMES.CHUNKS, 'readonly');
+    const store = tx.objectStore(STORE_NAMES.CHUNKS);
+    const index = store.index('status');
+    const req = index.getAll(status);
+    req.onsuccess = () => {
+      // Filter by transferId since the status index spans all transfers
+      const results = req.result.filter(c => c.transferId === transferId);
+      resolve(results);
+    };
+    req.onerror = () => reject(req.error);
+  });
 }
 
 /**

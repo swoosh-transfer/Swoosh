@@ -8,7 +8,7 @@
 import logger from '../../utils/logger.js';
 
 export const DB_NAME = 'P2PFileTransfer';
-export const DB_VERSION = 4;
+export const DB_VERSION = 5;
 
 export const STORE_NAMES = {
   TRANSFERS: 'transfers',
@@ -29,20 +29,37 @@ let dbInitPromise = null;
  * Called during database upgrade or initial creation.
  * 
  * @param {IDBDatabase} db - Database instance
+ * @param {IDBVersionChangeEvent} event - Version change event
  */
-function initializeSchema(db) {
+function initializeSchema(db, event) {
   logger.log('[IndexedDB] Upgrading database to version', DB_VERSION);
   
   // Transfers store: Active and completed transfers
   if (!db.objectStoreNames.contains(STORE_NAMES.TRANSFERS)) {
     logger.log('[IndexedDB] Creating transfers store');
-    db.createObjectStore(STORE_NAMES.TRANSFERS, { keyPath: 'transferId' });
+    const transferStore = db.createObjectStore(STORE_NAMES.TRANSFERS, { keyPath: 'transferId' });
+    transferStore.createIndex('status', 'status', { unique: false });
+  } else {
+    // Add status index if missing (v5 upgrade)
+    const tx = event.currentTarget.transaction;
+    const transferStore = tx.objectStore(STORE_NAMES.TRANSFERS);
+    if (!transferStore.indexNames.contains('status')) {
+      transferStore.createIndex('status', 'status', { unique: false });
+    }
   }
   
   // Files store: File metadata
   if (!db.objectStoreNames.contains(STORE_NAMES.FILES)) {
     logger.log('[IndexedDB] Creating files store');
-    db.createObjectStore(STORE_NAMES.FILES, { keyPath: 'fileId' });
+    const fileStore = db.createObjectStore(STORE_NAMES.FILES, { keyPath: 'fileId' });
+    fileStore.createIndex('transferId', 'transferId', { unique: false });
+  } else {
+    // Add transferId index if missing (v5 upgrade)
+    const tx = event.currentTarget.transaction;
+    const fileStore = tx.objectStore(STORE_NAMES.FILES);
+    if (!fileStore.indexNames.contains('transferId')) {
+      fileStore.createIndex('transferId', 'transferId', { unique: false });
+    }
   }
   
   // Chunks store: Chunk metadata (not chunk data)
@@ -92,7 +109,7 @@ async function initDB() {
 
     req.onupgradeneeded = (event) => {
       const db = event.target.result;
-      initializeSchema(db);
+      initializeSchema(db, event);
     };
 
     req.onsuccess = () => {
