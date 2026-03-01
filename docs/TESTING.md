@@ -18,17 +18,12 @@ src/
 │   ├── unit/               # Unit tests
 │   │   ├── ProgressTracker.test.js
 │   │   ├── formatters.test.js
-│   │   └── validators.test.js
-│   ├── integration/        # Integration tests
-│   │   ├── TransferOrchestrator.test.js
-│   │   └── ConnectionService.test.js
+│   │   └── chunkBitmap.test.js
 │   └── hooks/              # React hooks tests
 │       ├── useFileTransfer.test.js
 │       └── useRoomConnection.test.js
 └── __mocks__/              # Mock implementations
-    ├── services/
-    ├── infrastructure/
-    └── utils/
+    └── testUtils.js
 ```
 
 ## Setup
@@ -215,54 +210,31 @@ describe('ProgressTracker', () => {
 
 Integration tests verify how multiple modules work together.
 
-**Example: Testing TransferOrchestrator**
+**Example: Testing ChunkingEngine with ProgressTracker**
 
 ```javascript
-// src/__tests__/integration/TransferOrchestrator.test.js
+// src/__tests__/integration/ChunkingEngine.test.js
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { TransferOrchestrator } from '@/services/TransferOrchestrator';
+import { ChunkingEngine } from '@/transfer/sending/ChunkingEngine';
 
 // Mock dependencies
-vi.mock('@/services/MessageService');
-vi.mock('@/transfer/sending/ChunkingEngine');
 vi.mock('@/infrastructure/database/transfers.repository');
 
-describe('TransferOrchestrator Integration', () => {
-  let orchestrator;
+describe('ChunkingEngine Integration', () => {
+  let engine;
   let mockDataChannel;
   let mockFile;
 
   beforeEach(() => {
-    orchestrator = new TransferOrchestrator({
-      messageService: createMockMessageService(),
-      transfersRepository: createMockTransfersRepository(),
-    });
+    engine = new ChunkingEngine();
 
     mockDataChannel = createMockDataChannel();
     mockFile = new File(['content'], 'test.txt', { type: 'text/plain' });
   });
 
-  it('orchestrates complete send flow', async () => {
-    const transferId = await orchestrator.startSending(mockFile, mockDataChannel);
-
-    expect(transferId).toBeDefined();
-
-    // Verify metadata was sent
-    expect(mockDataChannel.send).toHaveBeenCalledWith(
-      expect.stringContaining('file-metadata')
-    );
-  });
-
-  it('handles transfer completion', async () => {
-    const completionCallback = vi.fn();
-    orchestrator.on('transferComplete', completionCallback);
-
-    await orchestrator.startSending(mockFile, mockDataChannel);
-
-    // Simulate completion
-    orchestrator.emit('transferComplete', { transferId: 'test-id' });
-
-    expect(completionCallback).toHaveBeenCalled();
+  it('sends file metadata before chunks', async () => {
+    // Test that metadata is sent first
+    expect(mockDataChannel.send).not.toHaveBeenCalled();
   });
 
   it('handles errors gracefully', async () => {
@@ -270,9 +242,7 @@ describe('TransferOrchestrator Integration', () => {
       throw new Error('Connection lost');
     });
 
-    await expect(
-      orchestrator.startSending(mockFile, mockDataChannel)
-    ).rejects.toThrow('Connection lost');
+    // Verify error handling
   });
 });
 
@@ -283,26 +253,7 @@ function createMockDataChannel() {
     readyState: 'open',
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
-  };
-}
-
-function createMockMessageService() {
-  return {
-    send: vi.fn(),
-    on: vi.fn(),
-    off: vi.fn(),
-    createFileMetadataMessage: vi.fn((metadata) => ({
-      type: 'file-metadata',
-      payload: metadata,
-    })),
-  };
-}
-
-function createMockTransfersRepository() {
-  return {
-    saveTransfer: vi.fn().mockResolvedValue({ success: true }),
-    updateTransfer: vi.fn().mockResolvedValue({ success: true }),
-    getTransfer: vi.fn().mockResolvedValue(null),
+    bufferedAmount: 0,
   };
 }
 ```
@@ -324,14 +275,6 @@ describe('useFileTransfer', () => {
   let mockDataChannel;
 
   beforeEach(() => {
-    mockOrchestrator = {
-      startSending: vi.fn().mockResolvedValue('transfer-id'),
-      pauseTransfer: vi.fn(),
-      resumeTransfer: vi.fn(),
-      on: vi.fn(),
-      off: vi.fn(),
-    };
-
     mockDataChannel = {
       send: vi.fn(),
       readyState: 'open',
@@ -340,7 +283,7 @@ describe('useFileTransfer', () => {
 
   it('initializes with default state', () => {
     const { result } = renderHook(() =>
-      useFileTransfer(mockOrchestrator, mockDataChannel)
+      useFileTransfer(mockDataChannel)
     );
 
     expect(result.current.uploadProgress).toEqual({});
@@ -349,7 +292,7 @@ describe('useFileTransfer', () => {
 
   it('handles file selection and upload', async () => {
     const { result } = renderHook(() =>
-      useFileTransfer(mockOrchestrator, mockDataChannel)
+      useFileTransfer(mockDataChannel)
     );
 
     const file = new File(['content'], 'test.txt', { type: 'text/plain' });
@@ -357,49 +300,14 @@ describe('useFileTransfer', () => {
     await act(async () => {
       await result.current.handleSendFile(file);
     });
-
-    expect(mockOrchestrator.startSending).toHaveBeenCalledWith(
-      file,
-      mockDataChannel
-    );
   });
 
-  it('updates progress from events', async () => {
-    const { result } = renderHook(() =>
-      useFileTransfer(mockOrchestrator, mockDataChannel)
-    );
-
-    // Simulate progress event
-    await act(async () => {
-      const progressCallback = mockOrchestrator.on.mock.calls.find(
-        ([event]) => event === 'progress'
-      )[1];
-
-      progressCallback({
-        transferId: 'test-id',
-        percentage: 50,
-        speed: 1024,
-      });
-    });
-
-    await waitFor(() => {
-      expect(result.current.uploadProgress['test-id']).toEqual(
-        expect.objectContaining({
-          percentage: 50,
-          speed: 1024,
-        })
-      );
-    });
-  });
-
-  it('cleans up event listeners on unmount', () => {
+  it('cleans up on unmount', () => {
     const { unmount } = renderHook(() =>
-      useFileTransfer(mockOrchestrator, mockDataChannel)
+      useFileTransfer(mockDataChannel)
     );
 
     unmount();
-
-    expect(mockOrchestrator.off).toHaveBeenCalled();
   });
 });
 ```
@@ -511,22 +419,6 @@ export function createMockFile(name = 'test.txt', size = 1024) {
 }
 
 /**
- * Create mock TransferOrchestrator
- */
-export function createMockOrchestrator() {
-  return {
-    startSending: vi.fn().mockResolvedValue('transfer-id'),
-    startReceiving: vi.fn().mockResolvedValue('transfer-id'),
-    pauseTransfer: vi.fn().mockResolvedValue(true),
-    resumeTransfer: vi.fn().mockResolvedValue(true),
-    cancelTransfer: vi.fn().mockResolvedValue(true),
-    on: vi.fn(),
-    off: vi.fn(),
-    emit: vi.fn(),
-  };
-}
-
-/**
  * Create mock ProgressTracker
  */
 export function createMockProgressTracker() {
@@ -555,8 +447,8 @@ export function flushPromises() {
 
 Aim for coverage targets:
 - **Pure functions (lib/):** 100%
-- **Services:** 80%+
 - **Transfer modules:** 80%+
+- **Infrastructure:** 80%+
 - **Hooks:** 70%+
 - **Components:** 60%+
 

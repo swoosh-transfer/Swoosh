@@ -15,11 +15,11 @@ Web-based peer-to-peer file transfer application capable of handling 50GB+ trans
 ## Core Features & Implementation Tasks
 
 ### 1. WebRTC Connection Management
-- [ ] Implement WebRTC peer connection setup
-- [ ] Handle ICE candidate exchange
-- [ ] Manage connection states (connecting, connected, disconnected, failed)
-- [ ] Auto-reconnection logic for dropped connections
-- [ ] Connection health monitoring
+- [x] Implement WebRTC peer connection setup
+- [x] Handle ICE candidate exchange
+- [x] Manage connection states (connecting, connected, disconnected, failed)
+- [x] Auto-reconnection logic for dropped connections
+- [x] Connection health monitoring
 
 **Implementation Notes:**
 - Use RTCPeerConnection with reliable DataChannel
@@ -27,12 +27,12 @@ Web-based peer-to-peer file transfer application capable of handling 50GB+ trans
 - Implement heartbeat mechanism for connection health
 
 ### 2. File System Integration
-- [ ] File System API integration for file selection
-- [ ] File reading with progress tracking
-- [ ] Large file handling (streaming read)
-- [ ] File writing during reception
+- [x] File System API integration for file selection
+- [x] File reading with progress tracking
+- [x] Large file handling (streaming read)
+- [x] File writing during reception
 - [ ] Directory structure preservation
-- [ ] File metadata extraction (name, size, type, modified date)
+- [x] File metadata extraction (name, size, type, modified date)
 
 **Implementation Notes:**
 - Use FileSystemAccess API for file operations
@@ -40,12 +40,12 @@ Web-based peer-to-peer file transfer application capable of handling 50GB+ trans
 - Handle permission requests gracefully
 
 ### 3. Chunk-Based Transfer System
-- [ ] File chunking algorithm (16KB chunks for WebRTC compatibility)
-- [ ] Chunk ordering and sequencing
-- [ ] Chunk verification using SHA256 checksums
-- [ ] Transfer progress tracking per chunk
-- [ ] Parallel chunk processing optimization
-- [ ] Chunk retry mechanism for failed transfers
+- [x] File chunking algorithm (16KB chunks for WebRTC compatibility)
+- [x] Chunk ordering and sequencing
+- [x] Chunk verification using SHA256 checksums
+- [x] Transfer progress tracking per chunk
+- [x] Parallel chunk processing optimization
+- [x] Chunk retry mechanism for failed transfers
 
 **Implementation Notes:**
 - Split files into 16KB chunks due to WebRTC DataChannel limits
@@ -54,11 +54,11 @@ Web-based peer-to-peer file transfer application capable of handling 50GB+ trans
 - Store chunk metadata in IndexedDB for resume capability
 
 ### 4. File Metadata Management
-- [ ] Metadata packet creation (file info, chunk count, total size)
-- [ ] Metadata transmission before file chunks
-- [ ] Metadata validation and parsing
-- [ ] File reconstruction from metadata
-- [ ] Multiple file transfer metadata handling
+- [x] Metadata packet creation (file info, chunk count, total size)
+- [x] Metadata transmission before file chunks
+- [x] Metadata validation and parsing
+- [x] File reconstruction from metadata
+- [x] Multiple file transfer metadata handling
 
 **Implementation Notes:**
 - Send metadata as first packet in transfer session
@@ -66,12 +66,12 @@ Web-based peer-to-peer file transfer application capable of handling 50GB+ trans
 - Validate metadata before accepting transfer
 
 ### 5. IndexedDB Storage System
-- [ ] Database schema design for file transfer metadata
-- [ ] Chunk metadata storage and retrieval (NO actual chunk data)
-- [ ] Transfer state persistence
-- [ ] Incomplete transfer cleanup
+- [x] Database schema design for file transfer metadata
+- [x] Chunk metadata storage and retrieval (NO actual chunk data)
+- [x] Transfer state persistence
+- [x] Incomplete transfer cleanup
 - [ ] Storage quota management
-- [ ] Database migration handling
+- [x] Database migration handling
 
 **Implementation Notes:**
 - Store only chunk metadata in IndexedDB (transfer ID, index, checksum, status)
@@ -81,53 +81,56 @@ Web-based peer-to-peer file transfer application capable of handling 50GB+ trans
 - Minimal storage usage - only metadata and progress tracking
 
 ### 6. Resume Capability
-- [ ] Transfer state tracking and persistence
-- [ ] Chunk completion status tracking (metadata only)
-- [ ] Resume transfer from last successful chunk
-- [ ] Partial file reconstruction
-- [ ] Resume negotiation between peers
-- [ ] Resume after connection loss
+- [x] Transfer state tracking and persistence
+- [x] Chunk completion status tracking (metadata only)
+- [x] Resume transfer from last successful chunk
+- [x] Partial file reconstruction
+- [x] Resume negotiation between peers
+- [x] Resume after connection loss
 
 **Implementation Notes:**
 - Track completed chunk metadata in IndexedDB (not actual chunks)
-- Resume by requesting missing chunks only
+- Resume by requesting missing chunks only (bitmap-based)
 - Use file system API to verify partial file state
 - Synchronize resume state between sender and receiver
 - Continue writing to existing file handle on resume
+- In-room reconnection auto-resumes from interrupted chunk
 
 ### 7. Security Implementation (TOFU)
-- [ ] Shared secret generation
-- [ ] URL fragment-based secret sharing (server-blind)
-- [ ] Secret verification handshake
-- [ ] String encoding/decoding with shared secret
-- [ ] Peer identity verification
-- [ ] Secure channel establishment
+- [x] Shared secret generation
+- [x] URL fragment-based secret sharing (server-blind)
+- [x] Secret verification handshake
+- [x] String encoding/decoding with shared secret
+- [x] Peer identity verification
+- [x] Secure channel establishment
 
 **Implementation Notes:**
 - Generate shared secret on sender side
 - Share secret via URL fragment (#secret) to avoid server logs
-- Implement challenge-response verification using shared secret
-- Use secret for additional data encryption if needed
+- Derive AES-GCM-256 key from secret via PBKDF2
+- Encrypt all signaling messages end-to-end
+- Exchange and verify peer UUID over encrypted channel
 
 ### 8. UUID-Based Client Verification
-- [ ] UUID generation for each client session
-- [ ] UUID exchange during connection setup
-- [ ] UUID persistence across reconnections
-- [ ] Client identity verification
-- [ ] Session continuity validation
+- [x] UUID generation for each client session
+- [x] UUID exchange during connection setup
+- [x] UUID persistence across reconnections
+- [x] Client identity verification
+- [x] Session continuity validation
 
 **Implementation Notes:**
 - Generate UUID on page load/session start
-- Store UUID in sessionStorage for reconnection scenarios
-- Verify UUID matches on both ends after reconnection
+- Store UUID in sessionStorage; persist peer sessions in IndexedDB
+- Verify UUID matches on reconnection to identify returning peers
+- Selective session cleanup (stale sessions >24h removed, active preserved)
 
 ### 9. User Interface Components
-- [ ] File selection interface
-- [ ] Transfer progress visualization
-- [ ] Connection status indicators
-- [ ] Transfer speed and ETA display
-- [ ] Error handling and user notifications
-- [ ] Multiple concurrent transfer management
+- [x] File selection interface
+- [x] Transfer progress visualization
+- [x] Connection status indicators
+- [x] Transfer speed and ETA display
+- [x] Error handling and user notifications
+- [x] Multiple concurrent transfer management
 
 **Implementation Notes:**
 - Use React components with Tailwind for responsive design
@@ -135,11 +138,11 @@ Web-based peer-to-peer file transfer application capable of handling 50GB+ trans
 - Show connection quality indicators
 
 ### 10. State Management (Zustand)
-- [ ] Global transfer state management
-- [ ] Connection state tracking
-- [ ] File queue management
-- [ ] Progress state updates
-- [ ] Error state handling
+- [x] Global transfer state management
+- [x] Connection state tracking
+- [x] File queue management
+- [x] Progress state updates
+- [x] Error state handling
 - [ ] Settings and preferences
 
 **Implementation Notes:**
@@ -148,12 +151,12 @@ Web-based peer-to-peer file transfer application capable of handling 50GB+ trans
 - Use subscriptions for real-time UI updates
 
 ### 11. Error Handling & Recovery
-- [ ] Connection failure recovery
-- [ ] Chunk transfer error handling
-- [ ] File corruption detection and recovery
-- [ ] Network interruption handling
-- [ ] User-friendly error messages
-- [ ] Automatic retry mechanisms
+- [x] Connection failure recovery
+- [x] Chunk transfer error handling
+- [x] File corruption detection and recovery
+- [x] Network interruption handling
+- [x] User-friendly error messages
+- [x] Automatic retry mechanisms
 
 **Implementation Notes:**
 - Implement exponential backoff for retry logic
@@ -161,9 +164,9 @@ Web-based peer-to-peer file transfer application capable of handling 50GB+ trans
 - Graceful degradation for unsupported features
 
 ### 12. Performance Optimization
-- [ ] Chunk processing optimization
-- [ ] Memory usage optimization for large files
-- [ ] Transfer speed optimization
+- [x] Chunk processing optimization
+- [x] Memory usage optimization for large files
+- [x] Transfer speed optimization
 - [ ] Browser compatibility testing
 - [ ] Mobile device optimization
 - [ ] Background transfer capability
@@ -174,7 +177,7 @@ Web-based peer-to-peer file transfer application capable of handling 50GB+ trans
 - Optimize for low-memory devices
 
 ### 13. Testing & Quality Assurance
-- [ ] Unit tests for core functions
+- [x] Unit tests for core functions
 - [ ] Integration tests for file transfer flow
 - [ ] Cross-browser compatibility testing
 - [ ] Large file transfer testing (50GB+)

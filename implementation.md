@@ -102,7 +102,7 @@ Four main object stores organize the data:
 - **Transfers Store**: Tracks overall transfer operations using unique transfer IDs, with indexes for quick lookups by status, timestamp, and associated file ID
 - **Chunks Store**: Stores ONLY chunk metadata (validation checksums, transfer state, timestamps) using composite keys (transfer ID + chunk index), with indexes for efficient retrieval by transfer ID and processing status
 - **Files Store**: Maintains file metadata and references using unique file IDs, with indexes for searching by name, size, and creation timestamp
-- **Performance Store**: Tracks transfer performance metrics, adaptive chunk sizing history, and connection quality data
+- **Sessions Store**: Tracks peer identity sessions keyed by roomId, containing peer UUID and lastConnected timestamp for returning-peer verification
 
 **Storage Buffer Metadata Models:**
 - **Transfer**: ID, file metadata, storage buffer progress, status, peer info, performance metrics
@@ -128,14 +128,15 @@ The system generates a cryptographically secure 32-byte random secret using the 
 The shared secret and peer identification are transmitted through URL fragments (the part after #), ensuring that web servers cannot log or intercept this sensitive information. The secret data is JSON-encoded and base64-encoded for safe URL transmission.
 
 **Verification Process:**
-Peer authenticity is verified through a challenge-response mechanism using HMAC signatures. One peer generates a random challenge, the other signs it with the shared secret-derived key, and the signature is verified. This ensures both peers possess the same secret without transmitting it again.
+Peer authenticity is verified through encrypted signaling using AES-GCM-256. The shared secret is used to derive an encryption key via PBKDF2. All signaling messages are encrypted end-to-end, so the signaling server cannot read them. Peers exchange UUIDs over the encrypted channel and verify returning peers against the IndexedDB sessions store.
 
 **Security Flow:**
 1. Sender generates shared secret and peer ID
 2. Secret shared via URL fragment (server-blind)
-3. Both peers derive HMAC key from shared secret
-4. Challenge-response verification using derived key
-5. Ongoing verification of peer identity
+3. Both peers derive AES-GCM-256 key from shared secret via PBKDF2
+4. All signaling encrypted end-to-end
+5. UUID exchange and verification over encrypted channel
+6. Returning peers auto-identified for transfer resume
 
 ### 6. UUID-Based Session Management
 
@@ -143,13 +144,13 @@ Peer authenticity is verified through a challenge-response mechanism using HMAC 
 Each browser session generates a unique UUID using the Web Crypto API's randomUUID function. This identifier remains constant throughout the session and helps distinguish between different client instances.
 
 **Session Data Persistence:**
-Session information including the UUID, creation timestamp, connected peer ID, and active transfer list is stored in the browser's sessionStorage. This allows the application to maintain session continuity across page refreshes while automatically clearing data when the browser tab is closed.
+The local UUID is stored in sessionStorage (cleared on tab close). Peer sessions are stored in IndexedDB's sessions store, keyed by roomId, containing the peer's UUID and lastConnected timestamp. Stale sessions older than 24 hours are cleaned up automatically. This allows verification of returning peers on reconnection.
 
 **Session Lifecycle:**
 - Generate UUID on application start
 - Persist in sessionStorage for reconnection
-- Verify UUID matches across connection drops
-- Clean up on session end
+- Store peer sessions in IndexedDB for cross-reconnection verification
+- Selectively clean up stale sessions (>24h) rather than wiping all
 
 ### 7. Zustand Store Structure
 

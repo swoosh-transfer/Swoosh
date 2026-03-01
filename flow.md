@@ -42,14 +42,7 @@ Swoosh uses a **layered architecture** with clear separation of concerns:
 ┌───────────────────────────────────────────────────────────────┐
 │                        UI Layer (React)                        │
 │  pages/Room/ - Modular components & custom hooks (~200 lines) │
-└────────────────────────────┬──────────────────────────────────┘
-                             ↓
-┌───────────────────────────────────────────────────────────────┐
-│                      Service Layer                             │
-│  • TransferOrchestrator - File transfer coordination          │
-│  • ConnectionService - WebRTC lifecycle management            │
-│  • SecurityService - TOFU authentication                      │
-│  • MessageService - Protocol message handling                 │
+│  └── hooks/ - useRoomConnection, useFileTransfer, useSecurity │
 └────────────────────────────┬──────────────────────────────────┘
                              ↓
 ┌───────────────────────────────────────────────────────────────┐
@@ -58,6 +51,8 @@ Swoosh uses a **layered architecture** with clear separation of concerns:
 │  • AssemblyEngine - Chunk validation & assembly               │
 │  • ProgressTracker - Single source of truth for progress      │
 │  • ResumableTransferManager - Pause/resume logic              │
+│  • MultiFileTransferManager - Multi-file orchestration        │
+│  • ChannelPool - Multi-channel bandwidth management           │
 └────────────────────────────┬──────────────────────────────────┘
                              ↓
 ┌───────────────────────────────────────────────────────────────┐
@@ -217,11 +212,11 @@ Home Page
          ├──► Handle answer from peer
          │    └──► Set remote description
          │
-         ├──► TOFU Verification
-         │    ├──► Receive challenge from peer
-         │    ├──► Derive HMAC key from shared secret
-         │    ├──► Sign challenge
-         │    └──► Send signature to peer
+         ├──► Encrypted Signaling Verification
+         │    ├──► Derive AES-GCM key from shared URL-fragment secret
+         │    ├──► Exchange encrypted identity (UUID)
+         │    ├──► Verify peer UUID against IndexedDB sessions
+         │    └──► Save peer session
          │
          ├──► Wait for peer verification
          │    └──► Peer sends "tofu-verified"
@@ -283,13 +278,11 @@ Receive Share Link
          ├──► DataChannel established
          │    └──► Listen for ondatachannel event
          │
-         ├──► TOFU Verification (Challenge)
-         │    ├──► Generate random challenge
-         │    ├──► Send to host
-         │    ├──► Receive signature from host
-         │    ├──► Derive HMAC key from shared secret
-         │    ├──► Verify signature
-         │    ├──► Send "tofu-verified" if valid
+         ├──► Encrypted Signaling Verification
+         │    ├──► Derive AES-GCM key from shared URL-fragment secret
+         │    ├──► Exchange encrypted identity (UUID)
+         │    ├──► verifyPeer(peerUUID, roomId) against IndexedDB
+         │    ├──► If returning peer with interrupted transfer → auto-resume
          │    └──► Save peer session to IndexedDB
          │
          ├──► Receive File Metadata
@@ -515,32 +508,34 @@ Host (Impolite)                 Signaling Server              Guest (Polite)
       │                                │                            │
 ```
 
-### TOFU Security Verification
+### Encrypted Signaling & Identity Verification
+
+Swoosh uses **encrypted signaling** rather than challenge-response. The shared secret
+(passed via URL fragment) is used to derive an AES-GCM-256 key via PBKDF2. All
+signaling messages (offers, answers, ICE candidates) are encrypted end-to-end so the
+signaling server cannot read them. Identity is verified by exchanging UUIDs over the
+encrypted channel; returning peers are recognised by matching their UUID against
+the IndexedDB `sessions` store.
 
 ```
 Host                                                        Guest
   │                                                           │
-  │                 DataChannel Connected                     │
+  │           DataChannel / Encrypted Signaling                │
   │◄══════════════════════════════════════════════════════════│
   │                                                           │
-  │                                                           ├─► generateChallenge()
-  │                                                           ├─► deriveHMACKey(secret)
-  │◄─────────── {"type": "tofu-challenge", challenge} ───────┤
+  │  Derive AES-GCM key from URL-fragment secret (PBKDF2)     │
+  ├─► encryptSignaling(message, aesKey)                      │
   │                                                           │
-  ├─► deriveHMACKey(secret)                                  │
-  ├─► signChallenge(challenge, hmacKey)                      │
+  │  Exchange encrypted identity (UUID)                       │
+  │◄══════════════════════════════════════════════════════════►│
   │                                                           │
-  ├──────── {"type": "tofu-response", signature} ───────────►│
+  │  verifyPeer(peerUUID, roomId) → check IndexedDB sessions │
+  ├─► isReturningPeer = true/false                           │
   │                                                           │
-  │                                                           ├─► verifyChallenge()
-  │                                                           │   (signature, hmacKey)
-  │                                                           │
-  │◄───────── {"type": "tofu-verified"} ──────────────────────┤
-  │                                                           │
-  ├─► setTofuVerified(true)                                  ├─► setTofuVerified(true)
-  ├─► savePeerSession(peerID, roomId)                        ├─► savePeerSession(peerID, roomId)
+  ├─► savePeerSession(peerUUID, roomId)                      ├─► savePeerSession(peerUUID, roomId)
   │                                                           │
   │              Ready for File Transfer                      │
+  │  (if returning peer with interrupted transfer → auto-resume)
   │                                                           │
 ```
 
@@ -787,25 +782,19 @@ deriveHMACKey(secret)
   └──► Return HMAC-SHA256 key
 ```
 
-#### 5. Challenge-Response Protocol
+#### 5. Encrypted Signaling Protocol
 ```javascript
-Guest (Challenger):
-  ├──► Generate random 32-byte challenge
-  ├──► Send to Host
-  └──► Wait for signature
+Both Peers:
+  ├──► Derive AES-GCM-256 key from shared secret via PBKDF2
+  ├──► Encrypt all signaling messages (offers, answers, ICE candidates)
+  ├──► Decrypt incoming signaling messages
+  └──► Server cannot read signaling traffic
 
-Host (Responder):
-  ├──► Receive challenge
-  ├──► Derive HMAC key from secret
-  ├──► Sign challenge with HMAC-SHA256
-  └──► Send signature to Guest
-
-Guest (Verifier):
-  ├──► Receive signature
-  ├──► Derive same HMAC key
-  ├──► Verify signature with HMAC.verify()
-  ├──► If valid: send "tofu-verified"
-  └──► Save peer session to IndexedDB
+Identity Verification:
+  ├──► Exchange UUID over encrypted channel
+  ├──► Compare UUID against IndexedDB sessions store
+  ├──► If match → returning peer (auto-resume eligible)
+  └──► Save/update peer session in IndexedDB
 ```
 
 #### 6. Session Persistence
@@ -833,11 +822,12 @@ calculateChunkHash(chunk)
 ```
 
 #### Security Guarantees
-1. **Man-in-the-Middle Protection**: TOFU challenge-response
+1. **Man-in-the-Middle Protection**: Encrypted signaling via AES-GCM-256 derived from shared secret
 2. **Data Integrity**: SHA-256 per-chunk verification
-3. **Server-Blind**: Security payload in URL fragment
-4. **Session Persistence**: IndexedDB verification
+3. **Server-Blind**: Security payload in URL fragment; signaling encrypted end-to-end
+4. **Session Persistence**: IndexedDB session store with UUID verification
 5. **Secure Context Only**: HTTPS or localhost required
+6. **In-Room Reconnection**: Returning peers auto-identified via UUID; interrupted transfers auto-resume
 
 ---
 
@@ -875,10 +865,9 @@ Message Types (JSON):
    └──► { type: "transfer-error", error }
 
 2. TOFU Security Messages:
-   ├──► { type: "tofu-challenge", challenge }
-   ├──► { type: "tofu-response", signature }
-   ├──► { type: "tofu-verified" }
-   └──► { type: "tofu-failed", reason }
+   ├──► { type: "identity", uuid, roomId }
+   ├──► { type: "identity-ack" }
+   └──► (signaling messages encrypted via AES-GCM-256)
 
 3. Control Messages:
    ├──► { type: "pause", transferId, lastChunk }
@@ -920,7 +909,7 @@ Receiver Handling:
 
 ```javascript
 Database: "P2PFileTransfer"
-Version: 4
+Version: 5
 
 Stores:
   1. transfers
@@ -1295,26 +1284,6 @@ Fallback Mechanisms:
 - `handleAnswer()` - SDP answer processing
 - `handleIceCandidate()` - ICE candidate handling
 - `setPolite()` - Set negotiation politeness
-
-### chunkingSystem.js
-- `ChunkingEngine.startChunking()` - Sender chunking loop
-- `pause()` - Pause transfer
-- `resume()` - Resume transfer
-- `_appendToStorageBuffer()` - Buffer management
-- `_processStorageBuffer()` - Send buffered chunk
-
-### fileReceiver.js
-- `FileReceiver.initializeReceive()` - Initialize receiver
-- `setupFileWriter()` - File System API setup
-- `pause()` - Pause receiving
-- `resume()` - Resume receiving
-- `_processWriteQueue()` - Sequential disk writes
-
-### resumableTransfer.js
-- `registerTransfer()` - Register for pause/resume
-- `pauseTransfer()` - Pause with state save
-- `resumeTransfer()` - Resume from saved state
-- `getRecoverableTransfers()` - Crash recovery list
 
 ### identityManager.js
 - `getLocalUUID()` - Session-scoped UUID
