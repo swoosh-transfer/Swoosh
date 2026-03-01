@@ -111,6 +111,22 @@ export class MultiFileReceiver {
   }
 
   /**
+   * Sanitize a filename for File System Access API.
+   * Removes characters that are invalid on Windows/macOS/Linux.
+   */
+  _sanitizeFileName(name) {
+    if (!name) return 'unnamed_file';
+    // Remove or replace characters invalid in filenames
+    let safe = name
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')  // Windows-illegal chars
+      .replace(/\.+$/, '')                        // Trailing dots
+      .replace(/^\s+|\s+$/g, '')                  // Leading/trailing whitespace
+      .trim();
+    // Ensure non-empty
+    return safe || 'unnamed_file';
+  }
+
+  /**
    * Navigate/create subdirectories and return a file handle.
    * @param {FileSystemDirectoryHandle} rootDir
    * @param {string|null} relativePath — e.g. "/folder/subfolder"
@@ -123,40 +139,53 @@ export class MultiFileReceiver {
     if (relativePath) {
       // Remove leading slash, split into segments
       const parts = relativePath.replace(/^\/+/, '').split('/').filter(Boolean);
-      // The last segment might be the filename itself or a directory
-      // If relativePath includes the filename, use all-but-last as dirs
-      // Convention: relativePath is the directory path, fileName is separate
       for (const dir of parts) {
-        currentDir = await currentDir.getDirectoryHandle(dir, { create: true });
+        const safeDir = this._sanitizeFileName(dir);
+        currentDir = await currentDir.getDirectoryHandle(safeDir, { create: true });
       }
     }
 
-    return currentDir.getFileHandle(fileName, { create: true });
+    const safeName = this._sanitizeFileName(fileName);
+    return currentDir.getFileHandle(safeName, { create: true });
   }
 
   // ─── Chunk handling ───────────────────────────────────────────────
 
   /**
    * Handle an incoming chunk-metadata message.
-   * Prepares to receive the next binary on the same channel.
+   * Stores metadata keyed by fileIndex. In parallel mode, multiple files
+   * can have pending metadata simultaneously.
    * @param {Object} metadata — includes fileIndex, chunkIndex, size, checksum, etc.
    */
   handleChunkMetadata(metadata) {
     const { fileIndex } = metadata;
+
+    // Use a per-file queue of pending metadata to handle interleaving
+    if (!this._pendingMetaQueues) this._pendingMetaQueues = new Map();
+    if (!this._pendingMetaQueues.has(fileIndex)) {
+      this._pendingMetaQueues.set(fileIndex, []);
+    }
+    this._pendingMetaQueues.get(fileIndex).push(metadata);
+
+    // Also store in the flat map for FIFO fallback (backward compat)
     this._pendingMeta.set(fileIndex, metadata);
+    // Track the order of metadata arrivals for binary matching
+    if (!this._metaOrder) this._metaOrder = [];
+    this._metaOrder.push(fileIndex);
   }
 
   /**
    * Handle incoming binary data.
-   * Pairs with the most recent pending metadata by fileIndex (or uses channel heuristic).
+   * Matches with pending metadata using the arrival order.
    * @param {ArrayBuffer} data
    * @param {number} [fileIndex] — if known from the channel/context
    */
   async handleBinaryChunk(data, fileIndex) {
-    // If fileIndex not provided, try to match with pending metadata
+    // If fileIndex not provided, match with the oldest pending metadata
     if (fileIndex === undefined) {
-      // Take the first pending metadata (FIFO)
-      if (this._pendingMeta.size > 0) {
+      if (this._metaOrder && this._metaOrder.length > 0) {
+        fileIndex = this._metaOrder.shift();
+      } else if (this._pendingMeta.size > 0) {
         const [fIdx] = this._pendingMeta.keys();
         fileIndex = fIdx;
       } else {
@@ -165,8 +194,28 @@ export class MultiFileReceiver {
       }
     }
 
-    const meta = this._pendingMeta.get(fileIndex);
-    this._pendingMeta.delete(fileIndex);
+    // Get metadata from per-file queue
+    let meta = null;
+    if (this._pendingMetaQueues?.has(fileIndex)) {
+      const queue = this._pendingMetaQueues.get(fileIndex);
+      if (queue.length > 0) {
+        meta = queue.shift();
+      }
+      if (queue.length === 0) {
+        this._pendingMetaQueues.delete(fileIndex);
+      }
+    }
+
+    // Fallback to flat map
+    if (!meta) {
+      meta = this._pendingMeta.get(fileIndex);
+      this._pendingMeta.delete(fileIndex);
+    } else {
+      // Clean up flat map too
+      if (!this._pendingMetaQueues?.has(fileIndex)) {
+        this._pendingMeta.delete(fileIndex);
+      }
+    }
 
     const fileState = this._files.get(fileIndex);
     if (!fileState) {
@@ -217,16 +266,21 @@ export class MultiFileReceiver {
 
     state.completed = true;
 
-    // Close writable stream
+    // Close writable stream if using File System API
     if (state.writable) {
       try {
         await state.writable.close();
+        state.writable = null; // Prevent double-close
       } catch (err) {
         logger.warn(`[MultiFileReceiver] Error closing writable for file ${fileIndex}:`, err);
+        // If writable close fails but we have blob data, fall back to download
+        if (state.blobParts.length > 0) {
+          this._downloadAsBlob(state);
+        }
       }
     } else if (state.blobParts.length > 0) {
-      // Fallback: trigger download as blob
-      this._downloadAsBlob(state);
+      // No File System handle — try showSaveFilePicker if available, else blob download
+      await this._saveFallback(state);
     }
 
     logger.log(`[MultiFileReceiver] File ${fileIndex} complete: ${state.name}`);
@@ -241,21 +295,54 @@ export class MultiFileReceiver {
 
   // ─── Blob fallback ────────────────────────────────────────────────
 
-  _downloadAsBlob(fileState) {
+  /**
+   * Try showSaveFilePicker for a single file, then fall back to blob download.
+   * showSaveFilePicker may fail without user gesture — that's OK, we fall back.
+   */
+  async _saveFallback(fileState) {
+    const blob = new Blob(fileState.blobParts, { type: fileState.mimeType });
+
+    // Try File System API's showSaveFilePicker (may work in some contexts)
+    if (typeof window !== 'undefined' && typeof window.showSaveFilePicker === 'function') {
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: fileState.name,
+          types: [{
+            description: 'File',
+            accept: { [fileState.mimeType || 'application/octet-stream']: [] },
+          }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        logger.log(`[MultiFileReceiver] Saved via showSaveFilePicker: ${fileState.name}`);
+        return;
+      } catch (err) {
+        // Expected: user gesture required or user cancelled
+        logger.log(`[MultiFileReceiver] showSaveFilePicker fallback failed, using blob download:`, err.message);
+      }
+    }
+
+    // Final fallback: browser download
+    this._downloadAsBlob(fileState, blob);
+  }
+
+  _downloadAsBlob(fileState, existingBlob) {
     try {
-      const blob = new Blob(fileState.blobParts, { type: fileState.mimeType });
+      const blob = existingBlob || new Blob(fileState.blobParts, { type: fileState.mimeType });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      // Encode relativePath into filename for fallback
+      // Use clean filename, preserve relative path info
       const safeName = fileState.relativePath
         ? fileState.relativePath.replace(/^\/+/, '').replace(/\//g, '_') + '_' + fileState.name
         : fileState.name;
-      a.download = safeName;
+      a.download = this._sanitizeFileName(safeName);
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      // Revoke after a delay to ensure download starts
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
     } catch (err) {
       logger.error('[MultiFileReceiver] Blob download failed:', err);
     }
@@ -332,6 +419,8 @@ export class MultiFileReceiver {
     }
     this._files.clear();
     this._pendingMeta.clear();
+    if (this._pendingMetaQueues) this._pendingMetaQueues.clear();
+    if (this._metaOrder) this._metaOrder.length = 0;
     this._manifest = null;
     this._dirHandle = null;
   }

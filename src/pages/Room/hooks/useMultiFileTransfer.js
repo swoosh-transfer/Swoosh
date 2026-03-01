@@ -171,19 +171,22 @@ export function useMultiFileTransfer({
     const receiver = receiverRef.current;
     if (!receiver) return;
 
+    let directorySelected = false;
+
     try {
       if (receiver.supportsDirectoryPicker) {
         const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
         await receiver.setDirectoryHandle(dirHandle);
-        addLog('Save directory selected', 'success');
+        addLog('Save directory selected — files will be saved via File System API', 'success');
+        directorySelected = true;
       } else {
-        addLog('Directory picker not supported — files will be downloaded individually', 'info');
+        addLog('Directory picker not supported — files will be downloaded individually via browser', 'info');
       }
     } catch (err) {
       if (err.name === 'AbortError') {
-        addLog('Directory selection cancelled — files will be downloaded individually', 'info');
+        addLog('Directory selection cancelled — files will be downloaded individually via browser', 'info');
       } else {
-        addLog(`Directory picker error: ${err.message}`, 'error');
+        addLog(`Directory picker error: ${err.message} — files will be downloaded individually`, 'error');
       }
     }
 
@@ -192,6 +195,9 @@ export function useMultiFileTransfer({
 
     // Tell sender we're ready
     sendJSON({ type: MESSAGE_TYPE.RECEIVER_READY });
+    addLog(directorySelected
+      ? 'Ready to receive — saving to chosen directory'
+      : 'Ready to receive — will prompt to save each file individually', 'info');
   }, [sendJSON, addLog]);
 
   // ─── Receiver: chunk routing ─────────────────────────────────────
@@ -267,6 +273,24 @@ export function useMultiFileTransfer({
     addLog('Peer cancelled transfer', 'warning');
   }, [addLog]);
 
+  // ─── Reset (allow re-transfer) ────────────────────────────────
+
+  const resetTransfer = useCallback(() => {
+    managerRef.current?.destroy();
+    receiverRef.current?.destroy();
+    managerRef.current = null;
+    receiverRef.current = null;
+    setMultiTransferState('idle');
+    setOverallProgress(0);
+    setPerFileProgress([]);
+    setSpeed(0);
+    setEta(null);
+    setChannelCount(1);
+    setIsPaused(false);
+    setIncomingManifest(null);
+    setAwaitingDirectory(false);
+  }, []);
+
   // ─── Cleanup ────────────────────────────────────────────────────
 
   const cleanup = useCallback(() => {
@@ -307,6 +331,9 @@ export function useMultiFileTransfer({
     pauseAll,
     resumeAll,
     cancelAll,
+
+    // Reset for re-transfer
+    resetTransfer,
 
     // Remote signal handlers
     handleRemotePause,

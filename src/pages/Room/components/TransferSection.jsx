@@ -54,9 +54,12 @@ export function TransferSection({
   onAddFiles,
   onRemoveFile,
   onClearFiles,
+  onReset,
 }) {
   const isTransferring = transferState === 'sending' || transferState === 'receiving' || transferState === 'preparing';
   const isIdle = transferState === 'idle';
+  const isCompleted = transferState === 'completed';
+  const isError = transferState === 'error';
 
   const transferInfo = {
     fileName: pendingFile?.name || selectedFile?.name,
@@ -118,6 +121,16 @@ export function TransferSection({
         </div>
       )}
 
+      {/* Large file tip — shown when large files are selected */}
+      {isHost && isIdle && selectedFiles.length > 0 && selectedFiles.some(f => f.file.size > 100 * 1024 * 1024) && (
+        <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-3">
+          <p className="text-xs text-zinc-500">
+            💡 <strong className="text-zinc-400">Tip:</strong> For large files, consider compressing them into a ZIP/RAR archive before sending.
+            This can significantly reduce transfer time and improve reliability.
+          </p>
+        </div>
+      )}
+
       {/* Host: Single-file info (legacy, shown when just one file) */}
       {isHost && !isMultiFile && selectedFile && isIdle && !onAddFiles && (
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
@@ -126,7 +139,7 @@ export function TransferSection({
       )}
 
       {/* Receiver: Waiting for file loading state */}
-      {!isHost && !pendingFile && !incomingManifest && dataChannelReady && (
+      {!isHost && !pendingFile && !incomingManifest && dataChannelReady && !isTransferring && !isCompleted && !isError && (
         <div className="bg-zinc-900 border border-emerald-800 rounded-xl p-8">
           <div className="flex flex-col items-center justify-center">
             <div className="mb-6">
@@ -207,22 +220,31 @@ export function TransferSection({
           />
 
           {/* Per-file progress list */}
-          {perFileProgress.length > 1 && (
+          {perFileProgress.length >= 1 && (
             <div className="mt-3 space-y-1 max-h-40 overflow-y-auto">
-              {perFileProgress.map((f) => (
-                <div key={f.index} className="flex items-center gap-2 text-xs">
-                  <span className={`w-2 h-2 rounded-full shrink-0 ${f.completed ? 'bg-emerald-500' : f.progress > 0 ? 'bg-blue-500' : 'bg-zinc-600'}`} />
-                  <span className="text-zinc-400 truncate flex-1">{f.name}</span>
-                  <span className="text-zinc-500 shrink-0">{f.progress}%</span>
-                </div>
-              ))}
+              {perFileProgress.map((f) => {
+                const done = f.completed || f.state === 'completed';
+                const active = f.progress > 0 || f.state === 'sending';
+                const failed = f.state === 'failed';
+                return (
+                  <div key={f.index} className="flex items-center gap-2 text-xs">
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${
+                      failed ? 'bg-red-500' : done ? 'bg-emerald-500' : active ? 'bg-blue-500 animate-pulse' : 'bg-zinc-600'
+                    }`} />
+                    <span className="text-zinc-400 truncate flex-1">{f.name}</span>
+                    <span className="text-zinc-500 shrink-0">
+                      {failed ? 'Failed' : `${f.progress}%`}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
       )}
 
       {/* Transfer Complete */}
-      {transferState === 'completed' && (
+      {isCompleted && (
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
           <TransferComplete
             isHost={isHost}
@@ -230,6 +252,33 @@ export function TransferSection({
             fileName={pendingFile?.name}
             fileCount={isMultiFile ? (incomingManifest?.totalFiles || selectedFiles.length || 1) : 1}
           />
+          {/* Reset button to allow re-transfer */}
+          {dataChannelReady && onReset && (
+            <button
+              onClick={onReset}
+              className="w-full mt-3 py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-medium transition-colors"
+            >
+              {isHost ? 'Send More Files' : 'Receive More Files'}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Transfer Error — with reset */}
+      {isError && (
+        <div className="bg-zinc-900 border border-red-800 rounded-xl p-4">
+          <div className="text-center">
+            <p className="text-red-400 font-medium mb-2">Transfer Failed</p>
+            <p className="text-sm text-zinc-500 mb-3">Something went wrong during the transfer.</p>
+            {dataChannelReady && onReset && (
+              <button
+                onClick={onReset}
+                className="w-full py-3 bg-zinc-700 hover:bg-zinc-600 text-white rounded-xl font-medium transition-colors"
+              >
+                Try Again
+              </button>
+            )}
+          </div>
         </div>
       )}
 

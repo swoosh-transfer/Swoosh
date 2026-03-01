@@ -147,8 +147,10 @@ export class MultiFileTransferManager {
   // ─── Parallel mode ────────────────────────────────────────────────
 
   async _runParallel() {
-    // Determine how many parallel slots we have (data channels ≥1, or just channel-0)
-    const maxParallel = Math.max(this._pool.openDataCount, 1);
+    // Use at least 3 concurrent file workers regardless of channel count.
+    // Even on a single channel, interleaving chunks from multiple files
+    // gives the user visible parallel progress and overlaps I/O.
+    const maxParallel = Math.max(this._pool.openDataCount, 3);
     const tasks = [];
     let nextFileIdx = 0;
 
@@ -228,6 +230,9 @@ export class MultiFileTransferManager {
           // Track bandwidth
           this._bandwidthMonitor.recordBytes(buffer.byteLength);
           this._totalBytesSent += buffer.byteLength;
+
+          // Emit progress immediately per-chunk for responsive UI
+          this._emitProgress();
         },
         (bytesRead, totalSize) => {
           this._queue.updateProgress(fileIndex, bytesRead);

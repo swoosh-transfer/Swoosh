@@ -102,12 +102,14 @@ export default function Room() {
   });
 
   // Determine if we're in multi-file mode
-  // Sender: more than one file selected
-  // Receiver: has incoming manifest or actively receiving multi-file
+  // Sender: more than one file selected OR actively sending multi-file
+  // Receiver: has incoming manifest or actively receiving/completed multi-file
   const isMultiFile = selectedFiles.length > 1 || 
     multiTransfer.incomingManifest != null || 
+    multiTransfer.multiTransferState === 'sending' ||
     multiTransfer.multiTransferState === 'receiving' || 
-    multiTransfer.multiTransferState === 'completed';
+    multiTransfer.multiTransferState === 'completed' ||
+    multiTransfer.multiTransferState === 'error';
 
   // Message Protocol (routes messages to appropriate handlers)
   const { setMultiFileMode } = useMessages(
@@ -132,6 +134,15 @@ export default function Room() {
       setMultiFileMode(false);
       startTransfer();
     }
+  };
+
+  const handleReset = () => {
+    // Reset multi-file transfer state
+    multiTransfer.resetTransfer();
+    // Reset message handler mode
+    setMultiFileMode(false);
+    // Clear file selections so user can pick new files
+    clearFiles();
   };
 
   const handleSelectSaveLocation = async () => {
@@ -265,6 +276,7 @@ export default function Room() {
               onAddFiles={(files) => addFiles(files)}
               onRemoveFile={(idx) => removeFile(idx)}
               onClearFiles={() => clearFiles()}
+              onReset={handleReset}
             />
 
             {/* Error Display */}
