@@ -67,6 +67,13 @@ export default function Room() {
   const security = useSecurity(roomId, sendJSON, addLog);
   const { verificationStatus, identityVerified, tofuVerified } = security;
 
+  // Transfer Tracking (IndexedDB persistence for cross-session resume)
+  const tracking = useTransferTracking({
+    roomId,
+    peerDisconnected,
+    addLog,
+  });
+
   // File Transfer (send/receive with pause/resume/cancel)
   const transfer = useFileTransfer(
     roomId,
@@ -77,7 +84,8 @@ export default function Room() {
     sendJSON,
     sendBinary,
     waitForDrain,
-    addLog
+    addLog,
+    tracking.trackChunkProgress
   );
   const {
     transferState,
@@ -133,22 +141,15 @@ export default function Room() {
   );
 
   // Resume Transfer (handles resume handshake when entering with resume context)
-  const resumeTransfer = useResumeTransfer({
+  const resumeFlow = useResumeTransfer({
     dataChannelReady,
     sendResumeRequest,
     addLog,
   });
 
   // Wire resume callbacks after both hooks are initialized
-  resumeCallbacksRef.current.onResumeAccepted = resumeTransfer.onResumeAccepted;
-  resumeCallbacksRef.current.onResumeRejected = resumeTransfer.onResumeRejected;
-
-  // Transfer Tracking (IndexedDB persistence for cross-session resume)
-  const tracking = useTransferTracking({
-    roomId,
-    peerDisconnected,
-    addLog,
-  });
+  resumeCallbacksRef.current.onResumeAccepted = resumeFlow.onResumeAccepted;
+  resumeCallbacksRef.current.onResumeRejected = resumeFlow.onResumeRejected;
 
   // ============ AUTO-PAUSE ON DISCONNECT ============
   const autoPausedRef = useRef(false);

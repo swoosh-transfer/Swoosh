@@ -31,6 +31,7 @@ import logger from '../../../utils/logger.js';
  * @param {Function} sendBinary - Function to send binary data
  * @param {Function} waitForDrain - Function to wait for buffer drain
  * @param {Function} addLog - Logging function
+ * @param {Function} trackChunkProgress - Callback to track chunk completion in bitmap
  * @returns {Object} Transfer state and methods
  */
 export function useFileTransfer(
@@ -42,7 +43,8 @@ export function useFileTransfer(
   sendJSON,
   sendBinary,
   waitForDrain,
-  addLog
+  addLog,
+  trackChunkProgress
 ) {
   const {
     initiateUpload, initiateDownload,
@@ -171,6 +173,11 @@ export function useFileTransfer(
             binaryData.byteOffset + binaryData.byteLength
           );
           sendBinary(buffer);
+
+          // Track chunk completion in bitmap (for resume)
+          if (trackChunkProgress) {
+            trackChunkProgress(transferIdRef.current, metadata.chunkIndex);
+          }
         }
       );
 
@@ -357,11 +364,16 @@ export function useFileTransfer(
 
       if (!result.success) {
         addLog(`Chunk ${metadata.chunkIndex}: ${result.error}`, 'error');
+      } else {
+        // Track chunk completion in bitmap (for resume)
+        if (trackChunkProgress) {
+          trackChunkProgress(transferIdRef.current, metadata.chunkIndex);
+        }
       }
     } catch (err) {
       addLog(`Chunk ${metadata.chunkIndex} error: ${err.message}`, 'error');
     }
-  }, [addLog]);
+  }, [addLog, trackChunkProgress]);
 
   /**
    * Complete transfer (finalize file)
