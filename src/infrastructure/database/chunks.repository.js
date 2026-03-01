@@ -190,20 +190,17 @@ export async function getChunkStats(transferId, totalChunks) {
 }
 
 /**
- * Namespace adapter for object-style access.
- * Maps method names expected by consumers to actual functions.
+ * Namespace adapter object for consumers that import { chunksRepository }
+ * Maps method names used in transfer layer to repository functions.
  */
 export const chunksRepository = {
   save: saveChunk,
-  saveChunk,
-  getChunk,
+  get: getChunk,
   findByTransferId: getChunksByTransfer,
-  getChunksByTransfer,
-  getChunksByStatus,
-  getMissingChunks,
-  updateChunkStatus,
-  saveChunksBatch,
+  getByStatus: getChunksByStatus,
+  getMissing: getMissingChunks,
+  updateStatus: updateChunkStatus,
+  saveBatch: saveChunksBatch,
   deleteByTransferId: deleteChunksByTransfer,
-  deleteChunksByTransfer,
-  getChunkStats,
+  getStats: getChunkStats,
 };

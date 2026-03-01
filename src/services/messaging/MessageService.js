@@ -49,6 +49,9 @@ export class MessageService {
     this.messageHandlers = new Map();
     this._registerHandlers();
     
+    // Buffer for pairing chunk-metadata with subsequent binary data
+    this._pendingChunkMetadata = null;
+    
     // Listen to connection data channel messages
     this.unsubscribeConnection = this.connectionService.on('dataChannelMessage', 
       this._handleMessage.bind(this)
@@ -225,11 +228,25 @@ export class MessageService {
   }
 
   /**
-   * Handle incoming message
+   * Handle incoming message (JSON or binary)
    * @private
    */
   async _handleMessage(message) {
     try {
+      // Handle binary data (ArrayBuffer) — pair with pending chunk metadata
+      if (message instanceof ArrayBuffer || message instanceof Uint8Array) {
+        return await this._handleBinaryChunk(message);
+      }
+
+      // Parse string messages as JSON
+      if (typeof message === 'string') {
+        try {
+          message = JSON.parse(message);
+        } catch {
+          throw new ValidationError('Invalid JSON message');
+        }
+      }
+
       // Validate message structure
       if (!message || typeof message !== 'object') {
         throw new ValidationError('Invalid message format');
@@ -254,6 +271,34 @@ export class MessageService {
       logger.error('[MessageService] Message handling error:', err);
       this._emit('messageError', err);
     }
+  }
+
+  /**
+   * Handle incoming binary chunk data, paired with buffered metadata
+   * @private
+   */
+  async _handleBinaryChunk(binaryData) {
+    const metadata = this._pendingChunkMetadata;
+    this._pendingChunkMetadata = null;
+
+    if (!metadata) {
+      logger.warn('[MessageService] Received binary data without preceding chunk-metadata');
+      return;
+    }
+
+    const chunkData = binaryData instanceof ArrayBuffer ? binaryData : binaryData.buffer;
+
+    // Route to transfer orchestrator with real binary data
+    await this.transferOrchestrator.handleReceivedChunk(
+      metadata.transferId,
+      metadata.metadata,
+      chunkData
+    );
+
+    this._emit('chunkReceived', {
+      transferId: metadata.transferId,
+      chunkIndex: metadata.metadata.chunkIndex
+    });
   }
 
   /**
@@ -298,25 +343,30 @@ export class MessageService {
   }
 
   /**
-   * Handle chunk metadata
+   * Handle chunk metadata — buffer for pairing with subsequent binary data
    * @private
    */
   async _handleChunkMetadata(message) {
-    // Store metadata for when chunk data arrives
-    logger.log(`[MessageService] Received chunk metadata: ${message.metadata.chunkIndex}`);
+    // Buffer this metadata; the next binary message will be paired with it
+    this._pendingChunkMetadata = {
+      transferId: message.transferId,
+      metadata: message.metadata
+    };
+    logger.log(`[MessageService] Buffered chunk metadata: ${message.metadata.chunkIndex}`);
   }
 
   /**
-   * Handle chunk data
+   * Handle chunk data (legacy JSON-based fallback)
    * @private
+   * @deprecated Binary data now arrives via _handleBinaryChunk
    */
   async _handleChunkData(message) {
-    logger.log(`[MessageService] Received chunk data: ${message.chunkIndex}`);
+    logger.warn(`[MessageService] Received legacy JSON chunk data: ${message.chunkIndex}`);
     
-    // Route to transfer orchestrator
+    // Fallback: if chunk data somehow arrives as JSON, handle it
     await this.transferOrchestrator.handleReceivedChunk(
       message.transferId,
-      { chunkIndex: message.chunkIndex, size: message.data.length },
+      { chunkIndex: message.chunkIndex, size: message.data?.length || 0 },
       message.data
     );
     

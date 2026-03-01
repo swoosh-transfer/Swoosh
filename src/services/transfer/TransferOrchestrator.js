@@ -197,21 +197,15 @@ export class TransferOrchestrator {
         try {
           const { metadata, binaryData } = chunkPacket;
           
-          // Send metadata first
+          // Send metadata as JSON first
           await this.connectionService.send({
             type: 'chunk-metadata',
             transferId,
             metadata
           });
           
-          // Send binary data (convert to base64 for JSON)
-          const base64Data = this._arrayBufferToBase64(binaryData);
-          await this.connectionService.send({
-            type: 'chunk-data',
-            transferId,
-            chunkIndex: metadata.chunkIndex,
-            data: base64Data
-          });
+          // Send binary data directly (no base64 encoding)
+          await this.connectionService.sendBinary(binaryData);
           
           this._emit('chunkSent', {
             transferId,
@@ -357,14 +351,11 @@ export class TransferOrchestrator {
    * 
    * @param {string} transferId - Transfer ID
    * @param {Object} chunkMetadata - Chunk metadata
-   * @param {string} base64Data - Chunk data (base64 encoded)
+   * @param {ArrayBuffer} chunkData - Chunk binary data
    */
-  async handleReceivedChunk(transferId, chunkMetadata, base64Data) {
+  async handleReceivedChunk(transferId, chunkMetadata, chunkData) {
     try {
-      // Convert base64 to ArrayBuffer
-      const chunkData = this._base64ToArrayBuffer(base64Data);
-      
-      // Process the chunk
+      // Process the chunk directly (no base64 conversion needed)
       const result = await processReceivedChunk(transferId, chunkData, chunkMetadata);
       
       this._emit('chunkReceived', {
@@ -569,8 +560,9 @@ export class TransferOrchestrator {
   }
 
   /**
-   * Convert ArrayBuffer to base64
+   * Convert ArrayBuffer to base64 (kept for compatibility if needed)
    * @private
+   * @deprecated Use binary DataChannel transfer instead
    */
   _arrayBufferToBase64(buffer) {
     const bytes = new Uint8Array(buffer);

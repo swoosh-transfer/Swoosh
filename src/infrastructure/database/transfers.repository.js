@@ -124,20 +124,15 @@ export async function cleanupOldTransfers(maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
 }
 
 /**
- * Namespace adapter for object-style access.
- * Maps method names expected by consumers to actual functions.
+ * Namespace adapter object for consumers that import { transfersRepository }
+ * Maps method names used in transfer layer to repository functions.
  */
 export const transfersRepository = {
   save: saveTransfer,
-  saveTransfer,
   findById: getTransfer,
-  getTransfer,
   update: updateTransfer,
-  updateTransfer,
   delete: deleteTransfer,
-  deleteTransfer,
   findAll: listTransfers,
-  listTransfers,
-  getTransfersByStatus,
-  cleanupOldTransfers,
+  getByStatus: getTransfersByStatus,
+  cleanup: cleanupOldTransfers,
 };

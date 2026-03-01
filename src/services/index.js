@@ -24,6 +24,7 @@ import { ConnectionService } from './connection/ConnectionService.js';
 import { SecurityService } from './security/SecurityService.js';
 import { TransferOrchestrator } from './transfer/TransferOrchestrator.js';
 import { MessageService } from './messaging/MessageService.js';
+import { setEncryptionKey } from '../utils/signaling.js';
 import logger from '../utils/logger.js';
 
 /**
@@ -81,6 +82,11 @@ export class AppService {
     // Create security credentials
     const credentials = await this.security.createCredentials();
     
+    // Bridge encryption key to signaling layer
+    if (this.security.encryptionKey) {
+      setEncryptionKey(this.security.encryptionKey);
+    }
+    
     // Create connection room
     const { roomId, peerId } = await this.connection.createRoom();
     
@@ -114,6 +120,13 @@ export class AppService {
     
     if (!extracted || !extracted.roomId) {
       throw new Error('Invalid room URL');
+    }
+    
+    // Derive encryption key from extracted secret and bridge to signaling
+    if (extracted.secret) {
+      const { deriveEncryptionKey } = await import('../utils/tofuSecurity.js');
+      this.security.encryptionKey = await deriveEncryptionKey(extracted.secret);
+      setEncryptionKey(this.security.encryptionKey);
     }
     
     // Join connection room

@@ -173,6 +173,12 @@ export class SecurityService {
   getTrustLevel() { return this._getTrustLevel(); }
   isVerified() { return this._isValid(); }
 
+  /**
+   * Get the derived encryption key (for bridging to signaling layer)
+   * @returns {CryptoKey|null}
+   */
+  getEncryptionKey() { return this.encryptionKey; }
+
   invalidate() {
     this.verificationState = VerificationState.UNVERIFIED;
     this.lastVerification = null;
