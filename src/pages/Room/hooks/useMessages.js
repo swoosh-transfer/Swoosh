@@ -252,6 +252,24 @@ export function useMessages(
           }
           break;
 
+        // ─── Resume protocol ─────────────────────────────────
+        case MESSAGE_TYPE.RESUME_TRANSFER:
+          addLog(`Peer requests resume: ${msg.fileName || msg.transferId}`, 'info');
+          // TODO Phase 4: Verify file match, accept/reject resume
+          logger.log('[Room] Resume request received:', msg);
+          break;
+
+        case MESSAGE_TYPE.RESUME_ACCEPTED:
+          addLog(`Resume accepted, starting from chunk ${msg.startFromChunk}`, 'success');
+          // TODO Phase 4: Start sending from msg.startFromChunk
+          logger.log('[Room] Resume accepted:', msg);
+          break;
+
+        case MESSAGE_TYPE.RESUME_REJECTED:
+          addLog(`Resume rejected: ${msg.reason || 'file mismatch'}`, 'warning');
+          logger.log('[Room] Resume rejected:', msg);
+          break;
+
         default:
           logger.log('[Room] Unknown message:', msg.type);
       }

@@ -40,6 +40,11 @@ export const MESSAGE_TYPE = {
   // Multi-Channel
   CHANNEL_READY: 'channel-ready',
 
+  // Resume Protocol
+  RESUME_TRANSFER: 'resume-transfer',       // Propose resuming a previous transfer
+  RESUME_ACCEPTED: 'resume-accepted',       // Accept resume, includes startFromChunk
+  RESUME_REJECTED: 'resume-rejected',       // Reject resume (file changed, etc.)
+
   // Keep-alive
   PING: 'ping',
   PONG: 'pong'

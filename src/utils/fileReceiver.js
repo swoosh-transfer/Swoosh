@@ -623,9 +623,24 @@ export class FileReceiver {
   }
 
   /**
-   * Force cleanup of transfer state (for explicit cleanup after retransmission)
+   * Force cleanup of transfer state (for explicit cleanup after retransmission).
+   * Flushes and closes the writable stream to persist partial data to disk.
    */
-  forceCleanup(transferId) {
+  async forceCleanup(transferId) {
+    const state = this.activeTransfers.get(transferId);
+    // Close (not abort) the writable stream so partial data is preserved on disk
+    // This is critical for cross-session resume via File System Access API
+    if (state?.writable) {
+      try {
+        await state.writable.close();
+        state.writable = null;
+        logger.log(`[FileReceiver] Writable stream closed for cleanup: ${transferId}`);
+      } catch (err) {
+        // Stream may already be closed or in error state
+        logger.warn(`[FileReceiver] Could not close writable on cleanup:`, err.message);
+        state.writable = null;
+      }
+    }
     this.activeTransfers.delete(transferId);
     this.pendingChunks.delete(transferId);
     this.pauseControllers.delete(transferId);

@@ -4,7 +4,7 @@
  * 
  * Down from 1,401 lines to ~200 lines ✨
  */
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useRoomStore } from '../../stores/roomStore.js';
 import { ErrorDisplay, CrashRecoveryPrompt } from '../../components/RoomUI.jsx';
@@ -133,6 +133,58 @@ export default function Room() {
     addRecoverableTransfer: uiState.addRecoverableTransfer,
   });
 
+  // ============ AUTO-PAUSE ON DISCONNECT ============
+  const autoPausedRef = useRef(false);
+
+  useEffect(() => {
+    if (!peerDisconnected) {
+      autoPausedRef.current = false;
+      return;
+    }
+
+    // Peer disconnected — auto-pause any active transfer
+    const activeState = isMultiFile ? multiTransfer.multiTransferState : transferState;
+    const isActive = activeState === 'sending' || activeState === 'receiving';
+
+    if (isActive && !isPaused && !autoPausedRef.current) {
+      autoPausedRef.current = true;
+      addLog('Peer disconnected — auto-pausing transfer', 'warning');
+
+      if (isMultiFile) {
+        multiTransfer.pauseAll?.();
+      } else {
+        pauseTransfer?.();
+      }
+
+      // Save progress to IndexedDB
+      if (transfer.transferId) {
+        tracking.trackTransferPause(transfer.transferId);
+      }
+    }
+  }, [peerDisconnected, transferState, multiTransfer.multiTransferState, isMultiFile, isPaused]);
+
+  // ============ PROGRESS PERSISTENCE ============
+  // Periodically save transfer progress to IndexedDB during active transfers
+  useEffect(() => {
+    const currentTransferId = transfer.transferId;
+    if (!currentTransferId) return;
+
+    const currentState = isMultiFile ? multiTransfer.multiTransferState : transferState;
+    const currentProgress = isMultiFile ? multiTransfer.overallProgress : transferProgress;
+
+    if (currentState === 'sending' || currentState === 'receiving') {
+      tracking.trackTransferProgress({
+        transferId: currentTransferId,
+        progress: currentProgress,
+      });
+    }
+
+    // Track completion
+    if (currentState === 'completed') {
+      tracking.trackTransferComplete(currentTransferId);
+    }
+  }, [transferProgress, multiTransfer.overallProgress, transferState, multiTransfer.multiTransferState]);
+
   // ============ UI HANDLERS ============
 
   const handleStartTransfer = () => {
@@ -232,7 +284,7 @@ export default function Room() {
               ⚠️ Peer has disconnected
               {(isMultiFile ? multiTransfer.multiTransferState : transferState) === 'sending' || 
                (isMultiFile ? multiTransfer.multiTransferState : transferState) === 'receiving'
-                ? ' — transfer interrupted'
+                ? ` — transfer paused at ${Math.round(isMultiFile ? multiTransfer.overallProgress : transferProgress)}%`
                 : ''}
             </span>
             <button

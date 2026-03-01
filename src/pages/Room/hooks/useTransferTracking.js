@@ -262,6 +262,31 @@ export function useTransferTracking({
   }, []);
 
   /**
+   * Track transfer progress (lightweight — just updates the transfer record).
+   * Called periodically from Room component when transferProgress changes.
+   * Throttled to avoid excessive IDB writes.
+   */
+  const trackTransferProgress = useCallback(
+    async ({ transferId, progress, bytesTransferred }) => {
+      // Throttle: only write if progress moved by at least 5%
+      if (Math.abs(progress - lastSavedProgressRef.current) < 5) return;
+      lastSavedProgressRef.current = progress;
+
+      try {
+        await updateTransfer(transferId, {
+          lastProgress: progress,
+          bytesTransferred: bytesTransferred || 0,
+          status: TRACKED_STATUS.ACTIVE,
+        });
+      } catch (err) {
+        // Non-fatal
+        logger.warn('[TransferTracking] Failed to track progress:', err.message);
+      }
+    },
+    []
+  );
+
+  /**
    * Discard a recoverable transfer — cleans up its records
    */
   const discardRecoverableTransfer = useCallback(async (transferId) => {
@@ -302,6 +327,7 @@ export function useTransferTracking({
   return {
     trackTransferStart,
     trackChunk,
+    trackTransferProgress,
     trackTransferComplete,
     trackTransferCancel,
     trackTransferPause,
