@@ -191,7 +191,7 @@ export function IncomingFilePrompt({ file, onAccept }) {
 }
 
 // Transfer complete success message
-export function TransferComplete({ isHost, savedToFileSystem, fileName, onDownload }) {
+export function TransferComplete({ isHost, savedToFileSystem, fileName, onDownload, fileCount = 1 }) {
   return (
     <div className="p-4 bg-emerald-950/30 border border-emerald-900/50 rounded-xl text-center">
       <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-emerald-900/50 flex items-center justify-center">
@@ -200,8 +200,11 @@ export function TransferComplete({ isHost, savedToFileSystem, fileName, onDownlo
         </svg>
       </div>
       <p className="text-emerald-400 font-medium">Transfer Complete!</p>
+      {fileCount > 1 && (
+        <p className="text-zinc-400 text-sm mt-1">{fileCount} files transferred</p>
+      )}
       {savedToFileSystem && (
-        <p className="text-zinc-500 text-sm mt-1">File saved to disk</p>
+        <p className="text-zinc-500 text-sm mt-1">File{fileCount > 1 ? 's' : ''} saved to disk</p>
       )}
       {!isHost && !savedToFileSystem && onDownload && (
         <button
@@ -216,32 +219,48 @@ export function TransferComplete({ isHost, savedToFileSystem, fileName, onDownlo
 }
 
 // Pause/Resume button for transfers - minimal icon-only design
-export function PauseResumeButton({ isPaused, onPause, onResume, disabled = false }) {
+export function PauseResumeButton({ isPaused, pausedBy, onPause, onResume, disabled = false }) {
+  // Disable resume if the OTHER peer paused (only the pauser can resume)
+  const cannotResume = isPaused && pausedBy === 'remote';
+
+  const handleClick = () => {
+    if (cannotResume) return;
+    isPaused ? onResume() : onPause();
+  };
+
   return (
-    <button
-      onClick={isPaused ? onResume : onPause}
-      disabled={disabled}
-      title={isPaused ? 'Resume' : 'Pause'}
-      className={`
-        w-9 h-9 flex items-center justify-center rounded-lg transition-all
-        ${disabled 
-          ? 'bg-zinc-800 text-zinc-600 cursor-not-allowed' 
-          : isPaused 
-            ? 'bg-zinc-800 hover:bg-zinc-700 text-emerald-400' 
-            : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
-        }
-      `}
-    >
-      {isPaused ? (
-        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-          <path d="M8 5v14l11-7z"/>
-        </svg>
-      ) : (
-        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-          <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
-        </svg>
+    <div className="relative group">
+      <button
+        onClick={handleClick}
+        disabled={disabled || cannotResume}
+        title={cannotResume ? 'Only the person who paused can resume' : isPaused ? 'Resume' : 'Pause'}
+        className={`
+          w-9 h-9 flex items-center justify-center rounded-lg transition-all
+          ${(disabled || cannotResume)
+            ? 'bg-zinc-800 text-zinc-600 cursor-not-allowed' 
+            : isPaused 
+              ? 'bg-zinc-800 hover:bg-zinc-700 text-emerald-400' 
+              : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
+          }
+        `}
+      >
+        {isPaused ? (
+          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M8 5v14l11-7z"/>
+          </svg>
+        ) : (
+          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>
+          </svg>
+        )}
+      </button>
+      {/* Tooltip when peer paused */}
+      {cannotResume && (
+        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-zinc-700 text-zinc-200 text-xs rounded whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+          Only the peer who paused can resume
+        </div>
       )}
-    </button>
+    </div>
   );
 }
 
@@ -252,6 +271,7 @@ export function TransferProgressWithControls({
   speed, 
   eta, 
   isPaused,
+  pausedBy,
   onPause,
   onResume,
   onCancel
@@ -260,7 +280,9 @@ export function TransferProgressWithControls({
     <div className="space-y-3">
       <div className="flex justify-between items-center">
         <span className="text-zinc-400 text-sm">
-          {isPaused ? 'Paused' :
+          {isPaused 
+            ? (pausedBy === 'remote' ? 'Paused by peer' : 'Paused') 
+            :
            state === 'sending' ? 'Sending...' :
            state === 'receiving' ? 'Receiving...' : 
            state === 'preparing' ? 'Preparing...' :
@@ -278,13 +300,16 @@ export function TransferProgressWithControls({
       
       <div className="flex items-center justify-between">
         <span className="text-xs text-zinc-500">
-          {isPaused ? 'Paused' : speed ? `${formatBytes(speed)}/s` : 'Starting...'}
+          {isPaused 
+            ? (pausedBy === 'remote' ? 'Waiting for peer to resume...' : 'Paused') 
+            : speed ? `${formatBytes(speed)}/s` : 'Starting...'}
           {!isPaused && eta ? ` • ${Math.round(eta)}s left` : ''}
         </span>
         
         <div className="flex gap-1.5">
           <PauseResumeButton 
-            isPaused={isPaused} 
+            isPaused={isPaused}
+            pausedBy={pausedBy}
             onPause={onPause} 
             onResume={onResume}
             disabled={state === 'completed'}

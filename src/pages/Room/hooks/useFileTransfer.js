@@ -52,6 +52,8 @@ export function useFileTransfer(
   const [transferSpeed, setTransferSpeed] = useState(0);
   const [transferEta, setTransferEta] = useState(null);
   const [isPaused, setIsPaused] = useState(false);
+  // Track who initiated the pause: 'local' | 'remote' | null
+  const [pausedBy, setPausedBy] = useState(null);
 
   // Refs
   const chunkingEngineRef = useRef(new ChunkingEngine());
@@ -495,12 +497,15 @@ export function useFileTransfer(
       addLog(`Receiving paused at chunk ${result.lastChunk}`, 'warning');
     }
     setIsPaused(true);
+    setPausedBy('local');
   }, [isHost, sendJSON, addLog]);
 
   /**
    * Resume transfer
    */
   const resumeTransfer = useCallback(async () => {
+    // Only the person who paused can resume
+    if (pausedBy === 'remote') return;
     const transferId = transferIdRef.current;
     if (!transferId) return;
 
@@ -538,7 +543,8 @@ export function useFileTransfer(
       addLog(`Receiving resumed, requesting sender to resume from chunk ${resumeFromChunk}`, 'success');
     }
     setIsPaused(false);
-  }, [isHost, selectedFile, sendJSON, addLog, handleRetransmitRequest]);
+    setPausedBy(null);
+  }, [isHost, selectedFile, sendJSON, addLog, handleRetransmitRequest, pausedBy]);
 
   /**
    * Cancel transfer
@@ -557,6 +563,7 @@ export function useFileTransfer(
     setTransferState('idle');
     setTransferProgress(0);
     setIsPaused(false);
+    setPausedBy(null);
     addLog('Transfer cancelled', 'warning');
   }, [isHost, sendJSON, addLog]);
 
@@ -579,6 +586,7 @@ export function useFileTransfer(
       addLog('Sender paused transfer', 'warning');
     }
     setIsPaused(true);
+    setPausedBy('remote');
   }, [isHost, addLog]);
 
   /**
@@ -619,6 +627,7 @@ export function useFileTransfer(
       addLog('Sender resumed transfer', 'success');
     }
     setIsPaused(false);
+    setPausedBy(null);
   }, [isHost, selectedFile, addLog, handleRetransmitRequest]);
 
   /**
@@ -634,8 +643,21 @@ export function useFileTransfer(
     setTransferState('idle');
     setTransferProgress(0);
     setIsPaused(false);
+    setPausedBy(null);
     addLog('Peer cancelled transfer', 'warning');
   }, [isHost, addLog]);
+
+  /**
+   * Reset transfer state to idle (used when switching to a new transfer)
+   */
+  const resetTransferState = useCallback(() => {
+    setTransferState('idle');
+    setTransferProgress(0);
+    setTransferSpeed(0);
+    setTransferEta(null);
+    setIsPaused(false);
+    setPausedBy(null);
+  }, []);
 
   return {
     // State
@@ -644,6 +666,7 @@ export function useFileTransfer(
     transferSpeed,
     transferEta,
     isPaused,
+    pausedBy,
     transferId: transferIdRef.current,
     
     // Sending
@@ -661,6 +684,7 @@ export function useFileTransfer(
     pauseTransfer,
     resumeTransfer,
     cancelTransfer,
+    resetTransferState,
     
     // Remote signals
     handleRemotePause,

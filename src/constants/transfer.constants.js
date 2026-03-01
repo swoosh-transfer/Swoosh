@@ -58,6 +58,47 @@ export const BUFFER_SIZE = 100; // ~6.4MB with 64KB chunks
 /**
  * Transfer State Constants
  */
+// ============ MULTI-CHANNEL CONSTANTS ============
+
+/**
+ * Dynamic channel scaling — auto-detect optimal channel count based on bandwidth.
+ * Starts with 1 channel, scales up to MAX_CHANNELS when throughput is high.
+ */
+export const MIN_CHANNELS = 1;
+export const MAX_CHANNELS = 8;
+export const INITIAL_CHANNELS = 1;
+
+/**
+ * Channel scaling thresholds.
+ * CHANNEL_SCALE_UP_THRESHOLD: sustained throughput above this triggers adding a channel (~1.5 MB/s)
+ * CHANNEL_SCALE_DOWN_THRESHOLD: sustained throughput below this triggers removing a channel (~500 KB/s)
+ * CHANNEL_SCALE_INTERVAL: how often (ms) to evaluate scaling decisions
+ * CHANNEL_SCALE_SUSTAIN_COUNT: how many consecutive intervals the threshold must be sustained
+ */
+export const CHANNEL_SCALE_UP_THRESHOLD = 1.5 * 1024 * 1024;   // 1.5 MB/s
+export const CHANNEL_SCALE_DOWN_THRESHOLD = 500 * 1024;         // 500 KB/s
+export const CHANNEL_SCALE_INTERVAL = 3000;                     // 3 seconds
+export const CHANNEL_SCALE_SUSTAIN_COUNT = 1;                   // consecutive intervals
+
+/** Prefix for data channel labels: file-transfer-0, file-transfer-1, etc. */
+export const CHANNEL_LABEL_PREFIX = 'file-transfer-';
+
+/** Low watermark for per-channel bufferedAmount before sending more data */
+export const CHANNEL_BUFFER_LOW_WATERMARK = 64 * 1024;  // 64KB
+
+/** High watermark — pause sending on a channel when bufferedAmount exceeds this */
+export const CHANNEL_BUFFER_HIGH_WATERMARK = 256 * 1024; // 256KB
+
+// ============ TRANSFER MODE ============
+
+export const TRANSFER_MODE = {
+  SEQUENTIAL: 'sequential',
+  PARALLEL: 'parallel',
+};
+
+/**
+ * Transfer State Constants
+ */
 export const TRANSFER_STATE = {
   IDLE: 'idle',
   PREPARING: 'preparing',

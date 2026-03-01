@@ -1,19 +1,18 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useRoomStore } from '../stores/roomStore';
 import { initSocket, waitForConnection, createRoom } from '../utils/signaling';
 import { createTOFUSetup } from '../utils/tofuSecurity';
+import FileDropZone from '../components/FileDropZone';
 import logger from '../utils/logger.js';
 
 export default function Home() {
   const navigate = useNavigate();
-  const fileInputRef = useRef(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [stats, setStats] = useState(null);
-  const [isDragging, setIsDragging] = useState(false);
   
-  const { setSelectedFile, setIsHost, setSecurityPayload, setRoomId } = useRoomStore();
+  const { selectedFiles, addFiles, removeFile, clearFiles, setSelectedFiles, setIsHost, setSecurityPayload, setRoomId } = useRoomStore();
 
   useEffect(() => {
     // Fetch analytics data
@@ -38,55 +37,14 @@ export default function Home() {
     fetchAnalytics();
   }, []);
 
-  const handleFileSelect = (e) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      setSelectedFile(file);
-      setError(null);
-    }
-  };
-
-  const handleDragEnter = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(true);
-  };
-
-  const handleDragLeave = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-  };
-
-  const handleDragOver = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-  };
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDragging(false);
-
-    const files = e.dataTransfer?.files;
-    if (files && files.length > 0) {
-      const file = files[0];
-      setSelectedFile(file);
-      setError(null);
-      // Update the file input
-      if (fileInputRef.current) {
-        const dataTransfer = new DataTransfer();
-        dataTransfer.items.add(file);
-        fileInputRef.current.files = dataTransfer.files;
-      }
-    }
+  const handleFilesAdded = (newFiles) => {
+    addFiles(newFiles);
+    setError(null);
   };
 
   const handleStartTransfer = async () => {
-    const file = fileInputRef.current?.files?.[0];
-    
-    if (!file) {
-      setError('Please select a file first');
+    if (!selectedFiles || selectedFiles.length === 0) {
+      setError('Please select at least one file');
       return;
     }
 
@@ -106,7 +64,7 @@ export default function Home() {
       const roomId = typeof roomData === 'object' ? roomData.roomId : roomData;
       
       // Store state
-      setSelectedFile(file);
+      setSelectedFiles(selectedFiles);
       setIsHost(true);
       setRoomId(roomId);
       setSecurityPayload({
@@ -132,7 +90,9 @@ export default function Home() {
     }
   };
 
-  const selectedFile = fileInputRef.current?.files?.[0];
+  const selectedFile = selectedFiles.length > 0 ? selectedFiles[0].file : null;
+  const hasFiles = selectedFiles.length > 0;
+  const totalSize = selectedFiles.reduce((s, f) => s + f.file.size, 0);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex items-center justify-center p-4 lg:p-8">
@@ -243,66 +203,28 @@ export default function Home() {
           </div>
 
           {/* Main Transfer Card - Right on Large, Top on Small */}
-          <div className="order-1 lg:order-2 w-full lg:flex-1">
-            <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-8">
+          <div className="order-1 lg:order-2 w-full lg:flex-1 lg:max-w-2xl">
+            <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 overflow-hidden">
           {/* File Input */}
           <div className="mb-6">
-            <label 
-              htmlFor="file-input"
-              className="block w-full cursor-pointer"
-              onDragEnter={handleDragEnter}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onDrop={handleDrop}
-            >
-              <div className={`
-                border-2 border-dashed rounded-xl p-8 text-center transition-all
-                ${selectedFile 
-                  ? 'border-emerald-600 bg-emerald-950/20' 
-                  : isDragging
-                    ? 'border-emerald-500 bg-emerald-950/30 scale-[1.02]'
-                    : 'border-zinc-700 hover:border-zinc-600'
-                }
-              `}>
-                {selectedFile ? (
-                  <div>
-                    <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-emerald-900/50 flex items-center justify-center">
-                      <svg className="w-6 h-6 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                    </div>
-                    <p className="text-zinc-100 font-medium mb-1 px-4 break-words">
-                      {selectedFile.name}
-                    </p>
-                    <p className="text-zinc-500 text-sm">
-                      {formatFileSize(selectedFile.size)}
-                    </p>
-                  </div>
-                ) : (
-                  <div>
-                    <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-zinc-800 flex items-center justify-center">
-                      <svg className="w-6 h-6 text-zinc-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                      </svg>
-                    </div>
-                    <p className="text-zinc-400 mb-1">
-                      Click to select a file
-                    </p>
-                    <p className="text-zinc-600 text-sm">
-                      or drag and drop
-                    </p>
-                  </div>
-                )}
-              </div>
-              <input
-                ref={fileInputRef}
-                id="file-input"
-                type="file"
-                className="hidden"
-                onChange={handleFileSelect}
-              />
-            </label>
+            <FileDropZone
+              files={selectedFiles}
+              onFilesAdded={handleFilesAdded}
+              onFileRemoved={(idx) => removeFile(idx)}
+              onFilesCleared={() => clearFiles()}
+              disabled={isLoading}
+            />
           </div>
+
+          {/* Large file / folder warning */}
+          {hasFiles && (selectedFiles.some(f => f.file.size > 100 * 1024 * 1024) || selectedFiles.length > 5) && (
+            <div className="mb-4 p-3 bg-amber-950/40 border border-amber-700/50 rounded-lg">
+              <p className="text-sm text-amber-300">
+                ⚠️ <strong>Recommendation:</strong> For {selectedFiles.length > 5 ? 'many files or folders' : 'large files'}, compress them into a ZIP/RAR archive before sending.
+                This significantly reduces transfer time, improves reliability, and keeps folder structure intact.
+              </p>
+            </div>
+          )}
 
           {/* Error Message */}
           {error && (
@@ -314,10 +236,10 @@ export default function Home() {
           {/* Start Button */}
           <button
             onClick={handleStartTransfer}
-            disabled={isLoading || !selectedFile}
+            disabled={isLoading || !hasFiles}
             className={`
               w-full py-4 rounded-xl font-medium transition-all
-              ${isLoading || !selectedFile
+              ${isLoading || !hasFiles
                 ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed'
                 : 'bg-zinc-100 text-zinc-900 hover:bg-white active:scale-[0.98]'
               }
@@ -332,7 +254,7 @@ export default function Home() {
                 Creating Room...
               </span>
             ) : (
-              'Start Transfer'
+              `Start Transfer${selectedFiles.length > 1 ? ` (${selectedFiles.length} files)` : ''}`
             )}
           </button>
 

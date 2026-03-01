@@ -68,6 +68,15 @@ export function useRoomState() {
   }, []);
 
   /**
+   * Reset all UI transfer state for re-transfer
+   */
+  const resetUiTransferState = useCallback(() => {
+    setPendingFile(null);
+    setAwaitingSaveLocation(false);
+    setDownloadResult(null);
+  }, []);
+
+  /**
    * Set download result after transfer complete
    * @param {Object} result - Download result
    */
@@ -105,6 +114,7 @@ export function useRoomState() {
     awaitingSaveLocation,
     setPendingFileData,
     clearPendingFile,
+    resetUiTransferState,
     
     // Download results
     downloadResult,

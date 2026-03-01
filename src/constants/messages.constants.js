@@ -31,6 +31,15 @@ export const MESSAGE_TYPE = {
   // Error Handling
   TRANSFER_ERROR: 'transfer-error',
   
+  // Multi-File Transfer
+  MULTI_FILE_MANIFEST: 'multi-file-manifest',
+  FILE_START: 'file-start',
+  FILE_COMPLETE: 'file-complete',
+  TRANSFER_MODE: 'transfer-mode',
+
+  // Multi-Channel
+  CHANNEL_READY: 'channel-ready',
+
   // Keep-alive
   PING: 'ping',
   PONG: 'pong'
