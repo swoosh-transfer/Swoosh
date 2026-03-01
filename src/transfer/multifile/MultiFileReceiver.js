@@ -546,4 +546,85 @@ export class MultiFileReceiver {
     this._manifest = null;
     this._dirHandle = null;
   }
+
+  // ─── Resume manifest handling ─────────────────────────────────────
+
+  /**
+   * Handle a resume manifest — a manifest with isResume: true.
+   * Skips completed files, re-opens writable streams for partial files
+   * at the correct byte offset, and initializes pending files normally.
+   * 
+   * @param {Object} manifest - Manifest with isResume flag and perFileStartChunks
+   */
+  async handleResumeManifest(manifest) {
+    this._manifest = manifest;
+    this._startTime = Date.now();
+    this._totalBytesReceived = 0;
+
+    const perFileStartChunks = manifest.perFileStartChunks || {};
+
+    logger.log('[MultiFileReceiver] Received resume manifest:', manifest.totalFiles, 'files');
+
+    for (const f of manifest.files) {
+      const startChunk = perFileStartChunks[f.index] || 0;
+      const alreadyReceivedBytes = startChunk * STORAGE_CHUNK_SIZE;
+
+      // Pre-populate receivedChunks set for chunks already received
+      const receivedChunks = new Set();
+      for (let i = 0; i < startChunk; i++) {
+        receivedChunks.add(i);
+      }
+
+      this._files.set(f.index, {
+        name: f.name,
+        size: f.size,
+        mimeType: f.mimeType,
+        relativePath: f.relativePath,
+        totalChunks: f.totalChunks,
+        receivedChunks,
+        bytesReceived: alreadyReceivedBytes,
+        completed: startChunk >= f.totalChunks, // Already fully received
+        writable: null,
+        handle: null,
+        blobParts: [],
+        resumeOffset: alreadyReceivedBytes,
+      });
+
+      this._totalBytesReceived += alreadyReceivedBytes;
+    }
+
+    if (this._onManifest) this._onManifest(manifest);
+  }
+
+  /**
+   * Set directory handle for resume — opens writable streams at correct offsets
+   * for partially received files using seek().
+   * 
+   * @param {FileSystemDirectoryHandle} dirHandle
+   */
+  async setDirectoryHandleForResume(dirHandle) {
+    this._dirHandle = dirHandle;
+
+    for (const [idx, state] of this._files) {
+      if (state.completed) continue; // Skip fully completed files
+
+      try {
+        const fileHandle = await this._getOrCreateFileHandle(
+          dirHandle,
+          state.relativePath,
+          state.name
+        );
+        state.handle = fileHandle;
+        state.writable = await fileHandle.createWritable({ keepExistingData: true });
+
+        // Seek to the resume offset so we write after existing data
+        if (state.resumeOffset > 0) {
+          await state.writable.seek(state.resumeOffset);
+          logger.log(`[MultiFileReceiver] File ${idx} resumed at byte offset ${state.resumeOffset}`);
+        }
+      } catch (err) {
+        logger.error(`[MultiFileReceiver] Failed to open writable for resume file ${idx}:`, err);
+      }
+    }
+  }
 }

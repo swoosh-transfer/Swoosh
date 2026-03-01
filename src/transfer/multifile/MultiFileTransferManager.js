@@ -19,6 +19,10 @@ import {
   MIN_CHANNELS,
 } from '../../constants/transfer.constants.js';
 import { MESSAGE_TYPE } from '../../constants/messages.constants.js';
+import {
+  deserializeBitmap,
+  getFirstMissingChunk,
+} from '../../infrastructure/database/chunkBitmap.js';
 import logger from '../../utils/logger.js';
 
 export class MultiFileTransferManager {
@@ -50,6 +54,7 @@ export class MultiFileTransferManager {
 
     this._isPaused = false;
     this._isCancelled = false;
+    this._isChannelDead = false;
     this._startTime = 0;
     this._totalBytesSent = 0;
 
@@ -121,10 +126,31 @@ export class MultiFileTransferManager {
       }
 
       if (!this._isCancelled) {
-        // Send overall transfer-complete
-        this._sendJSON({ type: MESSAGE_TYPE.TRANSFER_COMPLETE });
-        this._addLog('All files sent!', 'success');
-        if (this._onAllComplete) this._onAllComplete();
+        // Check if any files actually succeeded
+        const progress = this._queue.getProgress();
+        const succeeded = progress.perFile.filter(f => f.state === 'completed').length;
+        const failed = progress.perFile.filter(f => f.state === 'failed').length;
+
+        // Only send transfer-complete if channels are still alive
+        if (!this._isChannelDead && this._pool.openCount > 0) {
+          this._sendJSON({ type: MESSAGE_TYPE.TRANSFER_COMPLETE });
+        }
+
+        if (failed === 0) {
+          this._addLog('All files sent!', 'success');
+        } else if (this._isChannelDead) {
+          this._addLog(`Transfer interrupted — peer disconnected (${succeeded} sent, ${failed} failed)`, 'warning');
+        } else if (succeeded > 0) {
+          this._addLog(`${succeeded} file(s) sent, ${failed} failed`, 'warning');
+        } else {
+          this._addLog(`All ${failed} file(s) failed to send`, 'error');
+        }
+
+        if (this._isChannelDead) {
+          if (this._onError) this._onError(new Error('Peer disconnected during transfer'));
+        } else {
+          if (this._onAllComplete) this._onAllComplete();
+        }
       }
     } catch (err) {
       logger.error('[MultiFileTransferManager] Transfer error:', err);
@@ -140,7 +166,7 @@ export class MultiFileTransferManager {
 
   async _runSequential() {
     for (let i = 0; i < this._queue.length; i++) {
-      if (this._isCancelled) break;
+      if (this._isCancelled || this._isChannelDead) break;
       await this._sendFile(i);
     }
   }
@@ -156,7 +182,7 @@ export class MultiFileTransferManager {
     let nextFileIdx = 0;
 
     const runNext = async () => {
-      while (nextFileIdx < this._queue.length && !this._isCancelled) {
+      while (nextFileIdx < this._queue.length && !this._isCancelled && !this._isChannelDead) {
         const idx = nextFileIdx++;
         await this._sendFile(idx);
       }
@@ -183,6 +209,14 @@ export class MultiFileTransferManager {
     this._queue.markSending(fileIndex);
     if (this._onFileStart) this._onFileStart(fileIndex);
 
+    // Check channels are alive before starting
+    if (this._pool.openCount === 0) {
+      this._isChannelDead = true;
+      this._queue.markFailed(fileIndex, 'Channels closed');
+      this._addLog(`✗ ${item.file.name}: peer disconnected`, 'error');
+      return;
+    }
+
     // Notify receiver which file is starting
     this._sendJSON({
       type: MESSAGE_TYPE.FILE_START,
@@ -205,6 +239,9 @@ export class MultiFileTransferManager {
         null, // peerId — not used for multi-file path
         async ({ metadata, binaryData }) => {
           if (this._isCancelled) throw new Error('Transfer cancelled');
+          if (this._isChannelDead || this._pool.openCount === 0) {
+            throw new Error('Channels closed — peer disconnected');
+          }
           await this._waitIfPaused();
 
           // Pick best channel
@@ -235,7 +272,8 @@ export class MultiFileTransferManager {
           // Emit progress immediately per-chunk for responsive UI
           this._emitProgress();
         },
-        (bytesRead, totalSize) => {
+        // onProgress — update FileQueue per-file progress
+        (bytesRead, _totalSize) => {
           this._queue.updateProgress(fileIndex, bytesRead);
         }
       );
@@ -253,6 +291,13 @@ export class MultiFileTransferManager {
       this._queue.markFailed(fileIndex, err.message);
       logger.error(`[MultiFileTransferManager] File ${fileIndex} failed:`, err);
       this._addLog(`✗ ${item.file.name}: ${err.message}`, 'error');
+
+      // If the error is a channel/connection failure, stop sending more files
+      if (err.message?.includes('not open') || err.message?.includes('Channel') ||
+          this._pool.openCount === 0) {
+        this._isChannelDead = true;
+        logger.log('[MultiFileTransferManager] Channels dead — stopping queue');
+      }
     }
   }
 
@@ -400,5 +445,149 @@ export class MultiFileTransferManager {
     }
     this._engines.clear();
     this._queue = null;
+  }
+
+  // ─── Resume from saved manifest ──────────────────────────────────
+
+  /**
+   * Resume a multi-file transfer from a saved manifest.
+   * Validates each file against the saved manifest and skips completed files.
+   * For partially-sent files, creates ChunkingEngine with startFromChunk offset.
+   * 
+   * @param {Array<{file: File, relativePath: string|null}>} files - Re-selected files
+   * @param {Array<Object>} savedManifest - Saved per-file manifest entries
+   *   Each entry: { fileName, fileSize, totalChunks, status, chunkBitmap }
+   * @returns {{ valid: boolean, errors: string[], resumePlan: Object[] }}
+   */
+  validateAndPlanResume(files, savedManifest) {
+    const errors = [];
+    const resumePlan = [];
+
+    for (let i = 0; i < savedManifest.length; i++) {
+      const saved = savedManifest[i];
+
+      if (saved.status === 'completed') {
+        resumePlan.push({ fileIndex: i, action: 'skip', reason: 'already completed' });
+        continue;
+      }
+
+      // Find matching file in re-selected files
+      const match = files.find(f => 
+        f.file.name === saved.fileName && f.file.size === saved.fileSize
+      );
+
+      if (!match) {
+        errors.push(`File "${saved.fileName}" (${saved.fileSize} bytes) not found in selection`);
+        continue;
+      }
+
+      if (saved.status === 'sending' && saved.chunkBitmap) {
+        // Partially sent — find first missing chunk
+        const bitmap = deserializeBitmap(saved.chunkBitmap);
+        const startFromChunk = getFirstMissingChunk(bitmap, saved.totalChunks);
+        if (startFromChunk === -1) {
+          resumePlan.push({ fileIndex: i, action: 'skip', reason: 'all chunks present' });
+        } else {
+          resumePlan.push({
+            fileIndex: i,
+            action: 'resume',
+            file: match,
+            startFromChunk,
+            totalChunks: saved.totalChunks,
+          });
+        }
+      } else {
+        // Pending — send from beginning
+        resumePlan.push({ fileIndex: i, action: 'send', file: match });
+      }
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+      resumePlan,
+    };
+  }
+
+  /**
+   * Start a resume transfer using a validated resume plan.
+   * 
+   * @param {Array<{file: File, relativePath: string|null}>} files - All files
+   * @param {Object[]} resumePlan - From validateAndPlanResume
+   */
+  async startResume(files, resumePlan) {
+    // Build a filtered file list excluding completed files
+    const filesToSend = [];
+    const startFromChunks = new Map();
+
+    for (const plan of resumePlan) {
+      if (plan.action === 'skip') continue;
+      
+      const fileEntry = plan.file || files[plan.fileIndex];
+      if (!fileEntry) continue;
+      
+      filesToSend.push(fileEntry);
+      if (plan.action === 'resume' && plan.startFromChunk > 0) {
+        startFromChunks.set(filesToSend.length - 1, plan.startFromChunk);
+      }
+    }
+
+    if (filesToSend.length === 0) {
+      this._addLog('All files already transferred', 'success');
+      if (this._onAllComplete) this._onAllComplete();
+      return;
+    }
+
+    this._queue = new FileQueue(filesToSend);
+    this._isPaused = false;
+    this._isCancelled = false;
+    this._startTime = Date.now();
+    this._totalBytesSent = 0;
+    this._startFromChunks = startFromChunks;
+
+    this._queue.on('file-progress', () => {
+      this._emitProgress();
+    });
+
+    // Send manifest with resume flag
+    const manifest = this._queue.getManifest();
+    this._sendJSON({
+      type: MESSAGE_TYPE.MULTI_FILE_MANIFEST,
+      ...manifest,
+      mode: this._mode,
+      isResume: true,
+      perFileStartChunks: Object.fromEntries(startFromChunks),
+    });
+
+    this._addLog(`Resuming ${filesToSend.length} file(s)`, 'info');
+
+    await this._waitForReceiverReady();
+    if (this._isCancelled) return;
+
+    this._bandwidthMonitor.start();
+    this._startAutoScaling();
+
+    try {
+      if (this._mode === TRANSFER_MODE.SEQUENTIAL) {
+        await this._runSequential();
+      } else {
+        await this._runParallel();
+      }
+
+      if (!this._isCancelled) {
+        if (!this._isChannelDead && this._pool.openCount > 0) {
+          this._sendJSON({ type: MESSAGE_TYPE.TRANSFER_COMPLETE });
+        }
+        this._addLog('Resume complete!', 'success');
+        if (this._onAllComplete) this._onAllComplete();
+      }
+    } catch (err) {
+      logger.error('[MultiFileTransferManager] Resume error:', err);
+      this._addLog(`Resume failed: ${err.message}`, 'error');
+      if (this._onError) this._onError(err);
+    } finally {
+      this._bandwidthMonitor.stop();
+      this._stopAutoScaling();
+    }
   }
 }
