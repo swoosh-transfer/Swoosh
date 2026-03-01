@@ -42,6 +42,7 @@ export async function getTransfer(transferId) {
  * Update transfer metadata
  * 
  * Merges provided patch with existing transfer data.
+ * Uses atomic transaction to prevent race conditions.
  * 
  * @param {string} transferId - Transfer ID
  * @param {Object} patch - Properties to update
@@ -54,6 +55,7 @@ export async function updateTransfer(transferId, patch) {
     const tx = db.transaction(STORE_NAMES.TRANSFERS, 'readwrite');
     const store = tx.objectStore(STORE_NAMES.TRANSFERS);
     const getReq = store.get(transferId);
+    let updated;
     
     getReq.onsuccess = () => {
       const existing = getReq.result;
@@ -61,13 +63,13 @@ export async function updateTransfer(transferId, patch) {
         reject(new Error(`Transfer ${transferId} not found`));
         return;
       }
-      const updated = { ...existing, ...patch, updatedAt: Date.now() };
+      updated = { ...existing, ...patch, updatedAt: Date.now() };
       const putReq = store.put(updated);
-      putReq.onsuccess = () => resolve(updated);
       putReq.onerror = () => reject(putReq.error);
     };
     
     getReq.onerror = () => reject(getReq.error);
+    tx.oncomplete = () => resolve(updated);
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(new Error('Transaction aborted'));
   });

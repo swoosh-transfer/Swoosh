@@ -25,20 +25,23 @@ export * from './transfers.repository.js';
 export * from './chunks.repository.js';
 export * from './metadata.repository.js';
 
-// Bitmap utilities
+// Bitmap utilities (NOTE: getMissingChunks exported from here for bitmap operations)
+// chunks.repository also exports getMissingChunks for DB queries - this is intentional
 export * from './chunkBitmap.js';
+
+
 
 /**
  * Clean up all data for a completed transfer
  * 
  * Removes transfer metadata, file metadata, and all chunk metadata.
+ * Uses transferId index on files store for efficient batch deletion.
  * 
  * @param {string} transferId - Transfer ID
  * @returns {Promise<{ success: boolean, error?: string }>}
  */
 import { deleteTransfer } from './transfers.repository.js';
 import { deleteChunksByTransfer } from './chunks.repository.js';
-import { deleteFileMetadata } from './metadata.repository.js';
 import { getDatabase, STORE_NAMES } from './client.js';
 import logger from '../../utils/logger.js';
 
@@ -54,7 +57,7 @@ export async function cleanupTransferData(transferId) {
     await deleteTransfer(transferId);
     logger.log(`[Database] Deleted transfer metadata for: ${transferId}`);
     
-    // Delete file metadata by transferId index
+    // Delete file metadata by transferId index using cursor
     const db = await getDatabase();
     const deletedFiles = await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAMES.FILES, 'readwrite');
@@ -63,7 +66,7 @@ export async function cleanupTransferData(transferId) {
       
       if (store.indexNames.contains('transferId')) {
         const index = store.index('transferId');
-        const req = index.openCursor(transferId);
+        const req = index.openCursor(IDBKeyRange.only(transferId));
         req.onsuccess = (event) => {
           const cursor = event.target.result;
           if (cursor) {

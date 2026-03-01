@@ -111,6 +111,7 @@ export default function Room() {
     sendBinary,
     waitForDrain,
     addLog,
+    trackChunkProgress: tracking.trackChunkProgress,
   });
 
   // Determine if we're in multi-file mode

@@ -13,7 +13,14 @@ import { STORAGE_CHUNK_SIZE } from '../../constants/transfer.constants.js';
 import logger from '../../utils/logger.js';
 
 export class MultiFileReceiver {
-  constructor() {
+  /**
+   * @param {Object} options
+   * @param {Function} [options.trackChunkProgress] — track chunk completion in bitmap
+   */
+  constructor(options = {}) {
+    this._trackChunkProgress = options.trackChunkProgress || (() => {});
+    this._transferIdsByFileIndex = new Map(); // fileIndex → transferId for tracking
+
     /** @type {Object|null} parsed manifest */
     this._manifest = null;
 
@@ -63,8 +70,11 @@ export class MultiFileReceiver {
 
     logger.log('[MultiFileReceiver] Received manifest:', manifest.totalFiles, 'files,', manifest.totalSize, 'bytes');
 
-    // Initialize per-file state
+    // Initialize per-file state and generate transfer IDs for tracking
     for (const f of manifest.files) {
+      const transferId = `multi-recv-${Date.now()}-${f.index}`;
+      this._transferIdsByFileIndex.set(f.index, transferId);
+      
       this._files.set(f.index, {
         name: f.name,
         size: f.size,
@@ -316,6 +326,12 @@ export class MultiFileReceiver {
     fileState.receivedChunks.add(chunkIndex);
     fileState.bytesReceived += data.byteLength;
     this._totalBytesReceived += data.byteLength;
+
+    // Track chunk completion in bitmap (if tracking callback provided)
+    const transferId = this._transferIdsByFileIndex.get(fileIndex);
+    if (transferId && this._trackChunkProgress) {
+      this._trackChunkProgress(transferId, chunkIndex);
+    }
 
     // Write to disk or accumulate in memory
     if (fileState.writable) {

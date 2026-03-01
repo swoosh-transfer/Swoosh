@@ -32,6 +32,7 @@ import logger from '../../../utils/logger.js';
  * @param {Function} params.sendBinary — send binary on channel-0 (backward-compat)
  * @param {Function} params.waitForDrain — wait for channel-0 drain
  * @param {Function} params.addLog
+ * @param {Function} [params.trackChunkProgress] — track chunk completion in bitmap
  */
 export function useMultiFileTransfer({
   roomId,
@@ -42,6 +43,7 @@ export function useMultiFileTransfer({
   sendBinary,
   waitForDrain,
   addLog,
+  trackChunkProgress,
 }) {
   // ─── State ──────────────────────────────────────────────────────
 
@@ -93,6 +95,7 @@ export function useMultiFileTransfer({
       sendBinary,
       waitForDrain,
       addLog,
+      trackChunkProgress,
       mode: transferMode,
     });
 
@@ -124,7 +127,7 @@ export function useMultiFileTransfer({
     setMultiTransferState('sending');
 
     await manager.start(selectedFiles);
-  }, [selectedFiles, tofuVerified, roomId, transferMode, sendJSON, sendBinary, waitForDrain, addLog]);
+  }, [selectedFiles, tofuVerified, roomId, transferMode, sendJSON, sendBinary, waitForDrain, addLog, trackChunkProgress]);
 
   // ─── Receiver: handle manifest ──────────────────────────────────
 
@@ -151,7 +154,9 @@ export function useMultiFileTransfer({
       setTransferMode(manifest.mode);
     }
 
-    const receiver = new MultiFileReceiver();
+    const receiver = new MultiFileReceiver({
+      trackChunkProgress,
+    });
 
     receiver.onManifest = (m) => {
       setIncomingManifest(m);
@@ -187,7 +192,7 @@ export function useMultiFileTransfer({
 
     receiverRef.current = receiver;
     await receiver.handleManifest(manifest);
-  }, [addLog]);
+  }, [addLog, trackChunkProgress]);
 
   // ─── Receiver: accept and pick directory ─────────────────────────
 

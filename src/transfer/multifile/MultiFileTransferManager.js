@@ -29,11 +29,12 @@ export class MultiFileTransferManager {
   /**
    * @param {import('../multichannel/ChannelPool.js').ChannelPool} channelPool
    * @param {Object} options
-   * @param {Function} options.sendJSON      — send JSON on control channel
-   * @param {Function} options.sendBinary    — send binary on a specific channel
-   * @param {Function} options.waitForDrain  — wait for backpressure on a channel
-   * @param {Function} options.addLog        — UI log helper
-   * @param {string}   [options.mode]        — 'sequential' | 'parallel'
+   * @param {Function} options.sendJSON          — send JSON on control channel
+   * @param {Function} options.sendBinary        — send binary on a specific channel
+   * @param {Function} options.waitForDrain      — wait for backpressure on a channel
+   * @param {Function} options.addLog            — UI log helper
+   * @param {Function} [options.trackChunkProgress] — track chunk completion in bitmap
+   * @param {string}   [options.mode]            — 'sequential' | 'parallel'
    */
   constructor(channelPool, options = {}) {
     this._pool = channelPool;
@@ -41,6 +42,7 @@ export class MultiFileTransferManager {
     this._sendBinary = options.sendBinary;
     this._waitForDrain = options.waitForDrain;
     this._addLog = options.addLog || (() => {});
+    this._trackChunkProgress = options.trackChunkProgress || (() => {});
     this._mode = options.mode || TRANSFER_MODE.SEQUENTIAL;
 
     /** @type {FileQueue|null} */
@@ -265,9 +267,14 @@ export class MultiFileTransferManager {
           );
           this._pool.send(chIdx, buffer);
 
-          // Track bandwidth
+          // Track bandwidth and progress
           this._bandwidthMonitor.recordBytes(buffer.byteLength);
           this._totalBytesSent += buffer.byteLength;
+
+          // Track chunk completion in bitmap
+          if (this._trackChunkProgress) {
+            this._trackChunkProgress(transferId, metadata.chunkIndex);
+          }
 
           // Emit progress immediately per-chunk for responsive UI
           this._emitProgress();
