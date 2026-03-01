@@ -1,31 +1,32 @@
 /**
  * useTransferTracking Hook
  * 
- * Persists transfer progress to IndexedDB and detects recoverable transfers.
+ * Persists transfer progress to IndexedDB.
  * This is the bridge between the UI transfer state and the infrastructure/database layer.
  * 
  * Responsibilities:
  * - Track active transfer progress in IndexedDB (metadata only, no binary)
- * - Detect and expose recoverable transfers on mount (cross-session resume)
  * - Auto-save transfer state on disconnection
  * - Clean up completed/cancelled transfer records
  * 
+ * Recovery detection is handled on the Home page (rooms are disposable).
  * Uses the infrastructure/database layer (NOT the old utils/indexedDB.js).
  */
 import { useEffect, useRef, useCallback } from 'react';
 import {
   saveTransfer,
-  getTransfer,
   updateTransfer,
   deleteTransfer,
-  listTransfers,
-  getTransfersByStatus,
 } from '../../../infrastructure/database/transfers.repository.js';
 import {
-  saveChunk,
-  getChunksByTransfer,
   deleteChunksByTransfer,
 } from '../../../infrastructure/database/chunks.repository.js';
+import {
+  createBitmap,
+  markChunk,
+  serializeBitmap,
+  getCompletedCount,
+} from '../../../infrastructure/database/chunkBitmap.js';
 import logger from '../../../utils/logger.js';
 
 /**
@@ -53,64 +54,37 @@ export function useTransferTracking({
   roomId,
   peerDisconnected,
   addLog,
-  addRecoverableTransfer,
 }) {
   const activeTransferIdRef = useRef(null);
   const lastSavedProgressRef = useRef(0);
+  const bitmapRef = useRef(null);
+  const bitmapTotalChunksRef = useRef(0);
+  const bitmapDirtyRef = useRef(false);
+  const bitmapFlushTimerRef = useRef(null);
+  const chunksSinceFlushRef = useRef(0);
 
-  // ── Check for recoverable transfers on mount ──────────────────────────────
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function checkRecoverable() {
-      try {
-        const transfers = await listTransfers();
-        const recoverable = transfers.filter(
-          (t) =>
-            t.status === TRACKED_STATUS.ACTIVE ||
-            t.status === TRACKED_STATUS.PAUSED ||
-            t.status === TRACKED_STATUS.INTERRUPTED
-        );
-
-        if (cancelled) return;
-
-        for (const transfer of recoverable) {
-          // Only surface transfers that have meaningful progress
-          if (transfer.lastChunkIndex > 0) {
-            const chunks = await getChunksByTransfer(transfer.transferId);
-            const progress = transfer.totalChunks
-              ? Math.round((chunks.length / transfer.totalChunks) * 100)
-              : 0;
-
-            if (cancelled) return;
-
-            addRecoverableTransfer?.({
-              transferId: transfer.transferId,
-              fileName: transfer.fileName,
-              fileSize: transfer.fileSize,
-              direction: transfer.direction,
-              progress,
-              receivedChunks: chunks.length,
-              totalChunks: transfer.totalChunks,
-              createdAt: transfer.createdAt,
-              roomId: transfer.roomId,
-              usedFSAPI: transfer.usedFSAPI ?? false,
-            });
-
-            logger.log(
-              `[TransferTracking] Found recoverable: ${transfer.fileName} (${progress}%)`
-            );
-          }
-        }
-      } catch (err) {
-        logger.error('[TransferTracking] Failed to check recoverable transfers:', err);
-      }
+  /** Flush the current in-memory bitmap to IndexedDB */
+  const flushBitmap = useCallback(async () => {
+    if (!bitmapDirtyRef.current || !activeTransferIdRef.current || !bitmapRef.current) return;
+    
+    const transferId = activeTransferIdRef.current;
+    const bitmap = bitmapRef.current;
+    
+    try {
+      await updateTransfer(transferId, {
+        chunkBitmap: serializeBitmap(bitmap),
+        completedChunks: getCompletedCount(bitmap),
+      });
+      bitmapDirtyRef.current = false;
+      chunksSinceFlushRef.current = 0;
+      logger.log(`[TransferTracking] Bitmap flushed for ${transferId}`);
+    } catch (err) {
+      logger.warn('[TransferTracking] Failed to flush bitmap:', err.message);
     }
+  }, []);
 
-    checkRecoverable();
-    return () => { cancelled = true; };
-  }, []); // Only on mount
+  // NOTE: Recovery detection moved to Home page.
+  // Room is disposable — incomplete transfers surface on Home screen.
 
   // ── Auto-mark interrupted on peer disconnect ──────────────────────────────
 
@@ -120,13 +94,16 @@ export function useTransferTracking({
     const transferId = activeTransferIdRef.current;
     logger.log(`[TransferTracking] Peer disconnected, marking ${transferId} as interrupted`);
 
-    updateTransfer(transferId, {
-      status: TRACKED_STATUS.INTERRUPTED,
-      interruptedAt: Date.now(),
+    // Flush bitmap immediately on disconnect then mark interrupted
+    flushBitmap().then(() => {
+      updateTransfer(transferId, {
+        status: TRACKED_STATUS.INTERRUPTED,
+        interruptedAt: Date.now(),
+      });
     }).catch((err) => {
       logger.error('[TransferTracking] Failed to mark interrupted:', err);
     });
-  }, [peerDisconnected]);
+  }, [peerDisconnected, flushBitmap]);
 
   // ── Tracking methods ──────────────────────────────────────────────────────
 
@@ -134,9 +111,16 @@ export function useTransferTracking({
    * Start tracking a new transfer
    */
   const trackTransferStart = useCallback(
-    async ({ transferId, fileName, fileSize, totalChunks, direction }) => {
+    async ({ transferId, fileName, fileSize, totalChunks, direction, fileHash, fileLastModified, fileManifest }) => {
       activeTransferIdRef.current = transferId;
       lastSavedProgressRef.current = 0;
+
+      // Initialize chunk bitmap
+      const chunks = totalChunks || 0;
+      bitmapRef.current = createBitmap(chunks);
+      bitmapTotalChunksRef.current = chunks;
+      bitmapDirtyRef.current = false;
+      chunksSinceFlushRef.current = 0;
 
       // Check if File System Access API is available
       const usedFSAPI = typeof window.showSaveFilePicker === 'function';
@@ -147,11 +131,18 @@ export function useTransferTracking({
           roomId,
           fileName,
           fileSize,
-          totalChunks: totalChunks || 0,
+          totalChunks: chunks,
           direction, // 'sending' or 'receiving'
           status: TRACKED_STATUS.ACTIVE,
           lastChunkIndex: 0,
           usedFSAPI,
+          chunkBitmap: serializeBitmap(bitmapRef.current),
+          completedChunks: 0,
+          fileHash: fileHash || null,
+          fileLastModified: fileLastModified || null,
+          originalFileName: fileName,
+          originalFileSize: fileSize,
+          fileManifest: fileManifest || null,
           createdAt: Date.now(),
           updatedAt: Date.now(),
         });
@@ -166,55 +157,48 @@ export function useTransferTracking({
 
   /**
    * Track a chunk being sent or received (metadata only — no binary in IDB).
-   * Throttled: only writes to IDB every 50 chunks to reduce overhead.
+   * Updates in-memory bitmap and queues throttled flush to IndexedDB.
+   * Flushes every 50 chunks or every 2 seconds, whichever comes first.
    */
-  const trackChunk = useCallback(
-    async ({ transferId, chunkIndex, size, checksum }) => {
-      try {
-        // Save individual chunk metadata
-        await saveChunk({
-          transferId,
-          chunkIndex,
-          size,
-          checksum: checksum || null,
-          status: 'received',
-          receivedAt: Date.now(),
-        });
+  const trackChunkProgress = useCallback((transferId, chunkIndex) => {
+    if (!bitmapRef.current) return;
+    
+    markChunk(bitmapRef.current, chunkIndex);
+    bitmapDirtyRef.current = true;
+    chunksSinceFlushRef.current++;
 
-        // Throttle transfer record updates (every 50 chunks)
-        if (chunkIndex - lastSavedProgressRef.current >= 50 || chunkIndex === 0) {
-          lastSavedProgressRef.current = chunkIndex;
-          await updateTransfer(transferId, {
-            lastChunkIndex: chunkIndex,
-            status: TRACKED_STATUS.ACTIVE,
-          });
-        }
-      } catch (err) {
-        // Non-fatal: chunk tracking failure shouldn't break transfer
-        logger.warn('[TransferTracking] Failed to track chunk:', chunkIndex, err.message);
-      }
-    },
-    []
-  );
+    // Flush every 50 chunks
+    if (chunksSinceFlushRef.current >= 50) {
+      flushBitmap();
+    } else if (!bitmapFlushTimerRef.current) {
+      // Or schedule a flush in 2 seconds
+      bitmapFlushTimerRef.current = setTimeout(() => {
+        bitmapFlushTimerRef.current = null;
+        flushBitmap();
+      }, 2000);
+    }
+  }, [flushBitmap]);
 
   /**
    * Track transfer completion — marks as completed and cleans up chunk records
    */
   const trackTransferComplete = useCallback(async (transferId) => {
     activeTransferIdRef.current = null;
+    bitmapRef.current = null;
+    bitmapDirtyRef.current = false;
+    if (bitmapFlushTimerRef.current) {
+      clearTimeout(bitmapFlushTimerRef.current);
+      bitmapFlushTimerRef.current = null;
+    }
 
     try {
-      await updateTransfer(transferId, {
-        status: TRACKED_STATUS.COMPLETED,
-        completedAt: Date.now(),
-      });
-
-      // Clean up chunk metadata (no need to keep once complete)
+      // Fully purge completed transfer — delete chunks AND transfer record
       await deleteChunksByTransfer(transferId);
+      await deleteTransfer(transferId);
 
-      logger.log(`[TransferTracking] Transfer completed: ${transferId}`);
+      logger.log(`[TransferTracking] Transfer completed & cleaned: ${transferId}`);
     } catch (err) {
-      logger.error('[TransferTracking] Failed to mark complete:', err);
+      logger.error('[TransferTracking] Failed to clean completed transfer:', err);
     }
   }, []);
 
@@ -238,6 +222,8 @@ export function useTransferTracking({
    */
   const trackTransferPause = useCallback(async (transferId) => {
     try {
+      // Flush bitmap immediately on pause
+      await flushBitmap();
       await updateTransfer(transferId, {
         status: TRACKED_STATUS.PAUSED,
         pausedAt: Date.now(),
@@ -245,7 +231,7 @@ export function useTransferTracking({
     } catch (err) {
       logger.error('[TransferTracking] Failed to mark paused:', err);
     }
-  }, []);
+  }, [flushBitmap]);
 
   /**
    * Track resume — restores active status
@@ -299,40 +285,15 @@ export function useTransferTracking({
     }
   }, []);
 
-  /**
-   * Get detailed info about a recoverable transfer (for resume)
-   */
-  const getRecoverableTransferInfo = useCallback(async (transferId) => {
-    try {
-      const transfer = await getTransfer(transferId);
-      if (!transfer) return null;
-
-      const chunks = await getChunksByTransfer(transferId);
-      const receivedIndices = chunks.map((c) => c.chunkIndex).sort((a, b) => a - b);
-
-      return {
-        ...transfer,
-        receivedChunks: receivedIndices,
-        receivedCount: receivedIndices.length,
-        progress: transfer.totalChunks
-          ? Math.round((receivedIndices.length / transfer.totalChunks) * 100)
-          : 0,
-      };
-    } catch (err) {
-      logger.error('[TransferTracking] Failed to get recoverable info:', err);
-      return null;
-    }
-  }, []);
-
   return {
     trackTransferStart,
-    trackChunk,
+    trackChunkProgress,
     trackTransferProgress,
     trackTransferComplete,
     trackTransferCancel,
     trackTransferPause,
     trackTransferResume,
+    flushBitmap,
     discardRecoverableTransfer,
-    getRecoverableTransferInfo,
   };
 }

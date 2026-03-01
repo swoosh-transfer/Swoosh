@@ -25,6 +25,9 @@ export * from './transfers.repository.js';
 export * from './chunks.repository.js';
 export * from './metadata.repository.js';
 
+// Bitmap utilities
+export * from './chunkBitmap.js';
+
 /**
  * Clean up all data for a completed transfer
  * 
