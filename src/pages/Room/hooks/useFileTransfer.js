@@ -8,11 +8,12 @@
  * - Retransmission handling
  */
 import { useState, useRef, useCallback } from 'react';
-import { ChunkingEngine } from '../../../utils/chunkingSystem.js';
+import { ChunkingEngine } from '../../../transfer/sending/ChunkingEngine.js';
+// TODO: Migrate to AssemblyEngine once it supports pause/resume and two-step init flow
 import { fileReceiver } from '../../../utils/fileReceiver.js';
 import { getSocket } from '../../../utils/signaling.js';
-import { cleanupTransferData } from '../../../utils/indexedDB.js';
-import { resumableTransferManager } from '../../../utils/resumableTransfer.js';
+import { cleanupTransferData } from '../../../infrastructure/database/index.js';
+import { resumableTransferManager } from '../../../transfer/resumption/ResumableTransferManager.js';
 import { useTransferStore } from '../../../stores/transferStore.js';
 import { formatBytes } from '../../../lib/formatters.js';
 import { STORAGE_CHUNK_SIZE } from '../../../constants/transfer.constants.js';

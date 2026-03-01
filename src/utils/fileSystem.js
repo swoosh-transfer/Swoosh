@@ -1,5 +1,7 @@
 // File System API helper: Direct file writing with security and error handling
 // Using sequential append writes to avoid "state cached in an interface object" errors
+// @deprecated Use infrastructure/storage/FileWriter.js instead. This file will be removed in a future release.
+console.warn('[DEPRECATED] utils/fileSystem.js is deprecated. Use infrastructure/storage/FileWriter.js instead.');
 import logger from './logger.js';
 
 const CHUNK_SIZE = 64 * 1024; // 64KB - matches ChunkingEngine

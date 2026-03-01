@@ -1,7 +1,9 @@
 /**
  * Resumable Transfer Manager
  * Handles pause/resume functionality and crash recovery for file transfers
+ * @deprecated Use transfer/resumption/ResumableTransferManager.js instead. This file will be removed in a future release.
  */
+console.warn('[DEPRECATED] utils/resumableTransfer.js is deprecated. Use transfer/resumption/ResumableTransferManager.js instead.');
 
 import { 
   saveTransferMeta, 

@@ -1,6 +1,8 @@
 // File Chunking and Assembly System
 // Implements dual-loop architecture: chunking loop for sending, receiving loop for assembly
 // Supports pause/resume and crash recovery
+// @deprecated Use transfer/sending/ChunkingEngine.js instead. This file will be removed in a future release.
+console.warn('[DEPRECATED] utils/chunkingSystem.js is deprecated. Use transfer/sending/ChunkingEngine.js instead.');
 
 import { saveChunkMeta, getChunkMeta, getChunksByTransfer, deleteChunksByTransfer } from './indexedDB.js';
 import { createFileMetadata, saveFileMetadata, createTransferRecord, updateTransferProgress } from './fileMetadata.js';

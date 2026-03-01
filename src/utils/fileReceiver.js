@@ -3,7 +3,9 @@
  * Supports chunk validation, missing chunk tracking, and resume capability
  * Writes chunks directly to disk in order for memory efficiency with large files
  * Supports pause/resume with progress synchronization
+ * @deprecated Use transfer/receiving/AssemblyEngine.js instead. This file will be removed in a future release.
  */
+console.warn('[DEPRECATED] utils/fileReceiver.js is deprecated. Use transfer/receiving/AssemblyEngine.js instead.');
 
 import { saveChunkMeta, getChunksByTransfer } from './indexedDB.js';
 import { 

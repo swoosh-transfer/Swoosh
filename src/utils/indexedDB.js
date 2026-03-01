@@ -1,4 +1,6 @@
 // Minimal IndexedDB helper for transfer metadata (no chunk storage)
+// @deprecated Use infrastructure/database/ instead. This file will be removed in a future release.
+console.warn('[DEPRECATED] utils/indexedDB.js is deprecated. Use infrastructure/database/ instead.');
 import logger from './logger.js';
 
 const DB_NAME = 'P2PFileTransfer';
