@@ -68,6 +68,7 @@ export function useFileTransfer(
   const startTimeRef = useRef(null);
   const receiverLastChunkRef = useRef(-1); // Track receiver's last chunk when paused (sender side)
   const progressUnsubRef = useRef(null); // ProgressTracker subscription cleanup
+  const resumeFromChunkRef = useRef(0); // Resume chunk offset when resuming from IndexedDB
 
   // Cleanup progress subscription on unmount
   useEffect(() => {
@@ -81,18 +82,20 @@ export function useFileTransfer(
 
   /**
    * Start transfer process (send file metadata)
+   * @param {string} [resumeTransferId] - Optional: reuse existing transferId when resuming
    */
-  const startTransfer = useCallback(() => {
+  const startTransfer = useCallback((resumeTransferId) => {
     if (!selectedFile || !tofuVerified) return;
 
-    const transferId = crypto.randomUUID();
+    // Use existing transferId when resuming, otherwise generate new UUID
+    const transferId = resumeTransferId || crypto.randomUUID();
     const sessionId = 'session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
     transferIdRef.current = transferId;
     sessionIdRef.current = sessionId;
 
-    // Emit analytics event
+    // Emit analytics event (skip if resuming to avoid duplicate analytics)
     const socket = getSocket();
-    if (socket?.connected) {
+    if (socket?.connected && !resumeTransferId) {
       socket.emit('transfer-start', {
         roomId,
         sessionId,
@@ -129,8 +132,9 @@ export function useFileTransfer(
 
   /**
    * Send file chunks to receiver
+   * @param {number} [startFromChunk] - Optional: chunk index to resume from
    */
-  const sendFileChunks = useCallback(async () => {
+  const sendFileChunks = useCallback(async (startFromChunk) => {
     if (!selectedFile || !tofuVerified) {
       addLog('Cannot send: TOFU not verified', 'error');
       return;
@@ -138,6 +142,13 @@ export function useFileTransfer(
 
     setTransferState('sending');
     startTimeRef.current = Date.now();
+
+    // Determine resume chunk: use parameter, or ref, or default to 0
+    const resumeFromChunk = startFromChunk ?? resumeFromChunkRef.current ?? 0;
+    if (resumeFromChunk > 0) {
+      addLog(`Resuming from chunk ${resumeFromChunk}...`, 'info');
+    }
+    resumeFromChunkRef.current = 0; // Clear after use
 
     // Subscribe to ProgressTracker for canonical progress updates
     if (progressUnsubRef.current) progressUnsubRef.current();
@@ -178,7 +189,9 @@ export function useFileTransfer(
           if (trackChunkProgress) {
             trackChunkProgress(transferIdRef.current, metadata.chunkIndex);
           }
-        }
+        },
+        null, // onProgress callback
+        resumeFromChunk // resume from this chunk
       );
 
       // Unsubscribe from progress tracker
@@ -668,6 +681,14 @@ export function useFileTransfer(
   }, [isHost, addLog]);
 
   /**
+   * Set the resume chunk offset (called from Room when resume is accepted)
+   */
+  const setResumeFromChunk = useCallback((chunkIndex) => {
+    resumeFromChunkRef.current = chunkIndex;
+    logger.log(`[FileTransfer] Resume offset set to chunk ${chunkIndex}`);
+  }, []);
+
+  /**
    * Reset transfer state to idle (used when switching to a new transfer)
    */
   const resetTransferState = useCallback(() => {
@@ -705,6 +726,9 @@ export function useFileTransfer(
     resumeTransfer,
     cancelTransfer,
     resetTransferState,
+    
+    // Resume
+    setResumeFromChunk,
     
     // Remote signals
     handleRemotePause,

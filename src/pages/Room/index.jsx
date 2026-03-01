@@ -151,6 +151,17 @@ export default function Room() {
   resumeCallbacksRef.current.onResumeAccepted = resumeFlow.onResumeAccepted;
   resumeCallbacksRef.current.onResumeRejected = resumeFlow.onResumeRejected;
 
+  // When resume is accepted, store the startFromChunk for sendFileChunks
+  useEffect(() => {
+    if (resumeFlow.resumeState === 'accepted' && resumeFlow.resumeInfo?.startFromChunk !== undefined) {
+      // Store in the transfer hook so it knows where to resume from
+      // This will be picked up by sendFileChunks when receiver-ready is received
+      if (transfer.setResumeFromChunk) {
+        transfer.setResumeFromChunk(resumeFlow.resumeInfo.startFromChunk);
+      }
+    }
+  }, [resumeFlow.resumeState, resumeFlow.resumeInfo, transfer]);
+
   // ============ AUTO-PAUSE ON DISCONNECT ============
   const autoPausedRef = useRef(false);
   const wasDisconnectedRef = useRef(false);
@@ -224,8 +235,10 @@ export default function Room() {
 
   // ============ RECEIVER-SIDE TRANSFER TRACKING ============
   // Track incoming transfers in IndexedDB so receiver can also recover on reconnect
+  // Skip if resuming — transfer record already exists from previous session
   useEffect(() => {
     if (isHost || !pendingFile || !transfer.transferId) return;
+    if (resumeFlow.resumeContext) return; // Skip if resuming
 
     // Single-file receive: track when we receive file-metadata
     tracking.trackTransferStart({
@@ -235,10 +248,11 @@ export default function Room() {
       totalChunks: pendingFile.totalChunks || 0,
       direction: 'receiving',
     });
-  }, [pendingFile]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [pendingFile, resumeFlow.resumeContext]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (isHost || !multiTransfer.incomingManifest) return;
+    if (resumeFlow.resumeContext) return; // Skip if resuming
 
     // Multi-file receive: track the overall manifest as a single recoverable transfer
     const manifest = multiTransfer.incomingManifest;
@@ -250,40 +264,46 @@ export default function Room() {
       totalChunks: manifest.totalFiles || 0,
       direction: 'receiving',
     });
-  }, [multiTransfer.incomingManifest]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [multiTransfer.incomingManifest, resumeFlow.resumeContext]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ============ UI HANDLERS ============
 
   const handleStartTransfer = () => {
+    // Check if resuming — use existing transferId from resume context
+    const resumeTransferId = resumeFlow.resumeContext?.transferId;
+
     if (isMultiFile) {
       // Tell message handler we're in multi-file mode (sender-side)
       setMultiFileMode(true);
       multiTransfer.startMultiTransfer();
     } else {
       setMultiFileMode(false);
-      startTransfer();
+      startTransfer(resumeTransferId); // Pass resumeTransferId if resuming
     }
 
     // Track transfer start in IndexedDB for crash recovery
-    if (isHost && selectedFile) {
-      tracking.trackTransferStart({
-        transferId: transfer.transferId || `${roomId}-${Date.now()}`,
-        fileName: selectedFile.name,
-        fileSize: selectedFile.size,
-        totalChunks: Math.ceil(selectedFile.size / STORAGE_CHUNK_SIZE),
-        direction: 'sending',
-      });
-    }
-    // Track multi-file send start
-    if (isHost && isMultiFile && selectedFiles.length > 0) {
-      const totalSize = selectedFiles.reduce((sum, f) => sum + f.size, 0);
-      tracking.trackTransferStart({
-        transferId: `multi-${roomId}-${Date.now()}`,
-        fileName: `${selectedFiles.length} files`,
-        fileSize: totalSize,
-        totalChunks: selectedFiles.length,
-        direction: 'sending',
-      });
+    // Skip if resuming — transfer record already exists
+    if (isHost && !resumeFlow.resumeContext) {
+      if (isMultiFile && selectedFiles.length > 0) {
+        // Multi-file send
+        const totalSize = selectedFiles.reduce((sum, f) => sum + f.size, 0);
+        tracking.trackTransferStart({
+          transferId: `multi-${roomId}-${Date.now()}`,
+          fileName: `${selectedFiles.length} files`,
+          fileSize: totalSize,
+          totalChunks: selectedFiles.length,
+          direction: 'sending',
+        });
+      } else if (selectedFile) {
+        // Single-file send (only if NOT multi-file to prevent duplicates)
+        tracking.trackTransferStart({
+          transferId: transfer.transferId || `${roomId}-${Date.now()}`,
+          fileName: selectedFile.name,
+          fileSize: selectedFile.size,
+          totalChunks: Math.ceil(selectedFile.size / STORAGE_CHUNK_SIZE),
+          direction: 'sending',
+        });
+      }
     }
   };
 
