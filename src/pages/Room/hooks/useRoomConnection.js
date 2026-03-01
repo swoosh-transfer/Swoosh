@@ -72,6 +72,9 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     packetLoss: 0,
   });
 
+  // Peer disconnection state for UI notification
+  const [peerDisconnected, setPeerDisconnected] = useState(false);
+
   const dataChannelRef = useRef(null);
   const handshakeSentRef = useRef(false); // Prevent double handshake
   const webrtcSetupRef = useRef(false); // Track if guest set up WebRTC early (before join)
@@ -246,6 +249,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
             logger.log(`[Room] Peer left: ${data?.userId}`);
             addLog('Peer disconnected', 'warning');
             setDataChannelReady(false);
+            setPeerDisconnected(true);
             setConnInfo(prev => ({ ...prev, dataChannelState: 'closed' }));
             handshakeSentRef.current = false;
           },
@@ -256,6 +260,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
           onRoomDismissed: (data) => {
             logger.log(`[Room] Room dismissed: ${data?.reason}`);
             addLog(`Room closed: ${data?.reason || 'host left'}`, 'warning');
+            setPeerDisconnected(true);
           },
           onOffer: async (offer) => {
             logger.log('[Room] Received offer');
@@ -367,6 +372,26 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
       pc.oniceconnectionstatechange = () => {
         setConnInfo(prev => ({ ...prev, iceState: pc.iceConnectionState }));
         
+        // When ICE connects, gather candidate pair details for Connection Details
+        if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+          pc.getStats().then(stats => {
+            stats.forEach(report => {
+              if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+                const localCandidate = stats.get(report.localCandidateId);
+                const remoteCandidate = stats.get(report.remoteCandidateId);
+                setConnInfo(prev => ({
+                  ...prev,
+                  candidateType: localCandidate?.candidateType || null,
+                  remoteCandidateType: remoteCandidate?.candidateType || null,
+                  protocol: localCandidate?.protocol || null,
+                  networkType: localCandidate?.networkType || null,
+                  availableOutgoingBitrate: report.availableOutgoingBitrate || null,
+                }));
+              }
+            });
+          }).catch(() => { /* stats unavailable */ });
+        }
+        
         if (pc.iceConnectionState === 'failed') {
           logger.log('[Room] ICE connection failed, attempting restart...');
         }
@@ -408,6 +433,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
         logger.log(`[Room] Peer left: ${userId}`);
         addLog('Peer disconnected', 'warning');
         setDataChannelReady(false);
+        setPeerDisconnected(true);
         setConnInfo(prev => ({ ...prev, dataChannelState: 'closed' }));
         handshakeSentRef.current = false;
       },
@@ -418,6 +444,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
       onRoomDismissed: (data) => {
         logger.log(`[Room] Room dismissed: ${data?.reason}`);
         addLog(`Room closed: ${data?.reason || 'host left'}`, 'warning');
+        setPeerDisconnected(true);
       },
       onOffer: async (offer) => {
         logger.log('[Room] Received offer');
@@ -446,6 +473,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     dataChannelReady,
     shareUrl,
     connInfo,
+    peerDisconnected,
     
     // Data channel
     dataChannelRef,

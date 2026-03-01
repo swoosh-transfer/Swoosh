@@ -127,6 +127,23 @@ export function useMultiFileTransfer({
   // ─── Receiver: handle manifest ──────────────────────────────────
 
   const handleMultiFileManifest = useCallback(async (manifest) => {
+    // If we were in a completed/error state, sender is re-sending — notify receiver
+    const wasCompleted = receiverRef.current != null;
+    if (wasCompleted) {
+      // Destroy old receiver before creating new one
+      receiverRef.current?.destroy();
+      receiverRef.current = null;
+      addLog('📦 Sender wants to send more files!', 'info');
+    }
+
+    // Reset state for the new incoming transfer
+    setMultiTransferState('idle');
+    setOverallProgress(0);
+    setPerFileProgress([]);
+    setSpeed(0);
+    setEta(null);
+    setIsPaused(false);
+
     const receiver = new MultiFileReceiver();
 
     receiver.onManifest = (m) => {

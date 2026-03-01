@@ -58,7 +58,7 @@ export default function Room() {
     },
     addLog
   );
-  const { socketConnected, dataChannelReady, shareUrl, connInfo, sendJSON, sendBinary, waitForDrain, dataChannelRef } = connection;
+  const { socketConnected, dataChannelReady, shareUrl, connInfo, peerDisconnected, sendJSON, sendBinary, waitForDrain, dataChannelRef } = connection;
 
   // Security (encrypted signaling verification)
   const security = useSecurity(roomId, sendJSON, addLog);
@@ -87,6 +87,7 @@ export default function Room() {
     pauseTransfer,
     resumeTransfer,
     cancelTransfer,
+    resetTransferState,
   } = transfer;
 
   // Multi-file transfer (wraps MultiFileTransferManager / MultiFileReceiver)
@@ -139,6 +140,8 @@ export default function Room() {
   const handleReset = () => {
     // Reset multi-file transfer state
     multiTransfer.resetTransfer();
+    // Reset single-file transfer state so UI doesn't show stale 'completed'
+    resetTransferState();
     // Reset message handler mode
     setMultiFileMode(false);
     // Clear file selections so user can pick new files
@@ -187,6 +190,27 @@ export default function Room() {
         onDiscard={handleDiscardRecovery}
         onSelectFile={handleSelectFileForRecovery}
       />
+
+      {/* Peer Disconnected Banner */}
+      {peerDisconnected && (
+        <div className="fixed top-0 left-0 right-0 z-50 bg-red-900/95 border-b border-red-700 px-4 py-3 text-center animate-in slide-in-from-top">
+          <div className="flex items-center justify-center gap-3">
+            <span className="text-red-200 text-sm font-medium">
+              ⚠️ Peer has disconnected
+              {(isMultiFile ? multiTransfer.multiTransferState : transferState) === 'sending' || 
+               (isMultiFile ? multiTransfer.multiTransferState : transferState) === 'receiving'
+                ? ' — transfer interrupted'
+                : ''}
+            </span>
+            <button
+              onClick={handleLeave}
+              className="px-3 py-1 bg-red-800 hover:bg-red-700 text-red-100 text-xs rounded-lg transition-colors"
+            >
+              Leave Room
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="max-w-4xl mx-auto">
         {/* Header */}
@@ -321,13 +345,13 @@ export default function Room() {
                   {connInfo.socketId && (
                     <div className="flex justify-between">
                       <span className="text-zinc-500">Socket ID</span>
-                      <span className="text-emerald-500 font-mono">{connInfo.socketId}</span>
+                      <span className="text-emerald-500 font-mono text-xs">{connInfo.socketId}</span>
                     </div>
                   )}
                   {connInfo.iceState && (
                     <div className="flex justify-between">
                       <span className="text-zinc-500">ICE State</span>
-                      <span className={connInfo.iceState === 'connected' ? 'text-emerald-500' : 'text-zinc-400'}>
+                      <span className={connInfo.iceState === 'connected' || connInfo.iceState === 'completed' ? 'text-emerald-500' : 'text-zinc-400'}>
                         {connInfo.iceState}
                       </span>
                     </div>
@@ -346,6 +370,55 @@ export default function Room() {
                       <span className={connInfo.dataChannelState === 'open' ? 'text-emerald-500' : 'text-zinc-400'}>
                         {connInfo.dataChannelState}
                       </span>
+                    </div>
+                  )}
+                  {/* Multi-channel info */}
+                  {multiTransfer.channelCount > 1 && (
+                    <div className="flex justify-between">
+                      <span className="text-zinc-500">Active Channels</span>
+                      <span className="text-blue-400">{multiTransfer.channelCount}</span>
+                    </div>
+                  )}
+                  {/* Transfer mode */}
+                  {isMultiFile && (multiTransfer.multiTransferState === 'sending' || multiTransfer.multiTransferState === 'receiving') && (
+                    <div className="flex justify-between">
+                      <span className="text-zinc-500">Transfer Mode</span>
+                      <span className="text-zinc-300">
+                        {multiTransfer.transferMode === TRANSFER_MODE.PARALLEL ? 'Parallel' : 'Sequential'}
+                      </span>
+                    </div>
+                  )}
+                  {/* Candidate type & protocol from WebRTC stats */}
+                  {connInfo.candidateType && (
+                    <div className="flex justify-between">
+                      <span className="text-zinc-500">Connection Type</span>
+                      <span className={connInfo.candidateType === 'host' ? 'text-emerald-400' : 'text-yellow-400'}>
+                        {connInfo.candidateType === 'host' ? 'Direct (LAN)' :
+                         connInfo.candidateType === 'srflx' ? 'STUN (NAT)' :
+                         connInfo.candidateType === 'relay' ? 'TURN (Relay)' :
+                         connInfo.candidateType === 'prflx' ? 'Peer Reflexive' :
+                         connInfo.candidateType}
+                      </span>
+                    </div>
+                  )}
+                  {connInfo.protocol && (
+                    <div className="flex justify-between">
+                      <span className="text-zinc-500">Protocol</span>
+                      <span className="text-zinc-300 uppercase">{connInfo.protocol}</span>
+                    </div>
+                  )}
+                  {connInfo.availableOutgoingBitrate != null && connInfo.availableOutgoingBitrate > 0 && (
+                    <div className="flex justify-between">
+                      <span className="text-zinc-500">Est. Bandwidth</span>
+                      <span className="text-zinc-300">
+                        {(connInfo.availableOutgoingBitrate / 1000000).toFixed(1)} Mbps
+                      </span>
+                    </div>
+                  )}
+                  {connInfo.rtt > 0 && (
+                    <div className="flex justify-between">
+                      <span className="text-zinc-500">RTT</span>
+                      <span className="text-zinc-300">{connInfo.rtt.toFixed(0)} ms</span>
                     </div>
                   )}
                 </div>

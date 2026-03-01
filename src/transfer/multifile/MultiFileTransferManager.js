@@ -109,8 +109,9 @@ export class MultiFileTransferManager {
 
     if (this._isCancelled) return;
 
-    // Start bandwidth monitor (auto-scaling disabled for stability)
+    // Start bandwidth monitor and auto-scaling for multi-channel support
     this._bandwidthMonitor.start();
+    this._startAutoScaling();
 
     try {
       if (this._mode === TRANSFER_MODE.SEQUENTIAL) {

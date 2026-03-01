@@ -637,6 +637,17 @@ export function useFileTransfer(
     addLog('Peer cancelled transfer', 'warning');
   }, [isHost, addLog]);
 
+  /**
+   * Reset transfer state to idle (used when switching to a new transfer)
+   */
+  const resetTransferState = useCallback(() => {
+    setTransferState('idle');
+    setTransferProgress(0);
+    setTransferSpeed(0);
+    setTransferEta(null);
+    setIsPaused(false);
+  }, []);
+
   return {
     // State
     transferState,
@@ -661,6 +672,7 @@ export function useFileTransfer(
     pauseTransfer,
     resumeTransfer,
     cancelTransfer,
+    resetTransferState,
     
     // Remote signals
     handleRemotePause,

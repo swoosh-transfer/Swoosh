@@ -275,12 +275,32 @@ export class MultiFileReceiver {
         logger.warn(`[MultiFileReceiver] Error closing writable for file ${fileIndex}:`, err);
         // If writable close fails but we have blob data, fall back to download
         if (state.blobParts.length > 0) {
-          this._downloadAsBlob(state);
+          await this._saveFallback(state);
         }
       }
     } else if (state.blobParts.length > 0) {
-      // No File System handle — try showSaveFilePicker if available, else blob download
-      await this._saveFallback(state);
+      // No writable stream — but if we have a directory handle, write there
+      // This handles cases where writable creation failed during setDirectoryHandle
+      if (this._dirHandle) {
+        try {
+          const fileHandle = await this._getOrCreateFileHandle(
+            this._dirHandle,
+            state.relativePath,
+            state.name
+          );
+          const writable = await fileHandle.createWritable();
+          const blob = new Blob(state.blobParts, { type: state.mimeType });
+          await writable.write(blob);
+          await writable.close();
+          logger.log(`[MultiFileReceiver] Saved to directory: ${state.name}`);
+        } catch (err) {
+          logger.warn(`[MultiFileReceiver] Directory write fallback failed for ${state.name}:`, err);
+          await this._saveFallback(state);
+        }
+      } else {
+        // No directory handle at all — try per-file save picker or blob download
+        await this._saveFallback(state);
+      }
     }
 
     logger.log(`[MultiFileReceiver] File ${fileIndex} complete: ${state.name}`);
