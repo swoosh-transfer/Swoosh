@@ -8,8 +8,10 @@ import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useRoomStore } from '../../stores/roomStore.js';
 import { ErrorDisplay, CrashRecoveryPrompt } from '../../components/RoomUI.jsx';
+import FileDropZone from '../../components/FileDropZone.jsx';
 import { disconnectSocket, leaveRoom } from '../../utils/signaling.js';
 import { getQRCodeUrl } from '../../utils/qrCode.js';
+import { TRANSFER_MODE } from '../../constants/transfer.constants.js';
 
 // Custom hooks
 import {
@@ -17,6 +19,7 @@ import {
   useRoomConnection,
   useSecurity,
   useFileTransfer,
+  useMultiFileTransfer,
   useMessages,
 } from './hooks/index.js';
 
@@ -31,8 +34,11 @@ import {
 export default function Room() {
   const { roomId } = useParams();
   const navigate = useNavigate();
-  const { isHost, securityPayload, selectedFile, resetRoom, error: roomError } = useRoomStore();
+  const { isHost, securityPayload, selectedFile, selectedFiles, addFiles, removeFile, clearFiles, resetRoom, error: roomError } = useRoomStore();
   const [showQRCode, setShowQRCode] = useState(false);
+
+  // Determine if we're in multi-file mode
+  const isMultiFile = selectedFiles.length > 1;
 
   // ============ HOOKS ============
   
@@ -83,6 +89,18 @@ export default function Room() {
     cancelTransfer,
   } = transfer;
 
+  // Multi-file transfer (wraps MultiFileTransferManager / MultiFileReceiver)
+  const multiTransfer = useMultiFileTransfer({
+    roomId,
+    isHost,
+    selectedFiles,
+    tofuVerified,
+    sendJSON,
+    sendBinary,
+    waitForDrain,
+    addLog,
+  });
+
   // Message Protocol (routes messages to appropriate handlers)
   useMessages(
     dataChannelRef,
@@ -90,6 +108,7 @@ export default function Room() {
     isHost,
     security,
     transfer,
+    multiTransfer,
     uiState,
     addLog
   );
@@ -97,7 +116,11 @@ export default function Room() {
   // ============ UI HANDLERS ============
 
   const handleStartTransfer = () => {
-    startTransfer();
+    if (isMultiFile) {
+      multiTransfer.startMultiTransfer();
+    } else {
+      startTransfer();
+    }
   };
 
   const handleSelectSaveLocation = async () => {
@@ -203,22 +226,34 @@ export default function Room() {
             <TransferSection
               isHost={isHost}
               selectedFile={selectedFile}
+              selectedFiles={selectedFiles}
+              isMultiFile={isMultiFile}
               pendingFile={pendingFile}
               awaitingSaveLocation={awaitingSaveLocation}
               onAcceptFile={handleSelectSaveLocation}
-              transferState={transferState}
-              transferProgress={transferProgress}
-              transferSpeed={transferSpeed}
-              transferEta={transferEta}
-              isPaused={isPaused}
-              onPause={pauseTransfer}
-              onResume={resumeTransfer}
-              onCancel={cancelTransfer}
+              transferState={isMultiFile ? multiTransfer.multiTransferState : transferState}
+              transferProgress={isMultiFile ? multiTransfer.overallProgress : transferProgress}
+              transferSpeed={isMultiFile ? multiTransfer.speed : transferSpeed}
+              transferEta={isMultiFile ? multiTransfer.eta : transferEta}
+              isPaused={isMultiFile ? multiTransfer.isPaused : isPaused}
+              onPause={isMultiFile ? multiTransfer.pauseAll : pauseTransfer}
+              onResume={isMultiFile ? multiTransfer.resumeAll : resumeTransfer}
+              onCancel={isMultiFile ? multiTransfer.cancelAll : cancelTransfer}
               downloadResult={downloadResult}
               tofuVerified={tofuVerified}
               dataChannelReady={dataChannelReady}
               onStartTransfer={handleStartTransfer}
               roomError={roomError}
+              perFileProgress={multiTransfer.perFileProgress}
+              channelCount={multiTransfer.channelCount}
+              transferMode={multiTransfer.transferMode}
+              onTransferModeChange={multiTransfer.setTransferMode}
+              incomingManifest={multiTransfer.incomingManifest}
+              awaitingDirectory={multiTransfer.awaitingDirectory}
+              onAcceptMultiFile={multiTransfer.acceptMultiFileTransfer}
+              onAddFiles={(files) => addFiles(files)}
+              onRemoveFile={(idx) => removeFile(idx)}
+              onClearFiles={() => clearFiles()}
             />
 
             {/* Error Display */}

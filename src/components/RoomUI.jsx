@@ -191,7 +191,7 @@ export function IncomingFilePrompt({ file, onAccept }) {
 }
 
 // Transfer complete success message
-export function TransferComplete({ isHost, savedToFileSystem, fileName, onDownload }) {
+export function TransferComplete({ isHost, savedToFileSystem, fileName, onDownload, fileCount = 1 }) {
   return (
     <div className="p-4 bg-emerald-950/30 border border-emerald-900/50 rounded-xl text-center">
       <div className="w-12 h-12 mx-auto mb-3 rounded-full bg-emerald-900/50 flex items-center justify-center">
@@ -200,8 +200,11 @@ export function TransferComplete({ isHost, savedToFileSystem, fileName, onDownlo
         </svg>
       </div>
       <p className="text-emerald-400 font-medium">Transfer Complete!</p>
+      {fileCount > 1 && (
+        <p className="text-zinc-400 text-sm mt-1">{fileCount} files transferred</p>
+      )}
       {savedToFileSystem && (
-        <p className="text-zinc-500 text-sm mt-1">File saved to disk</p>
+        <p className="text-zinc-500 text-sm mt-1">File{fileCount > 1 ? 's' : ''} saved to disk</p>
       )}
       {!isHost && !savedToFileSystem && onDownload && (
         <button
