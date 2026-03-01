@@ -8,6 +8,7 @@ import logger from '../utils/logger.js';
 import {
   listTransfers,
   deleteTransfer,
+  cleanupOldTransfers,
 } from '../infrastructure/database/transfers.repository.js';
 import {
   deleteChunksByTransfer,
@@ -50,6 +51,9 @@ export default function Home() {
     let cancelled = false;
     async function loadIncomplete() {
       try {
+        // Auto-discard stale transfers older than 7 days
+        await cleanupOldTransfers();
+
         const transfers = await listTransfers();
         const incomplete = transfers.filter(
           (t) => t.status === 'active' || t.status === 'paused' || t.status === 'interrupted'

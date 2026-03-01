@@ -78,7 +78,7 @@ export const INITIAL_CHANNELS = 1;
 export const CHANNEL_SCALE_UP_THRESHOLD = 1.5 * 1024 * 1024;   // 1.5 MB/s
 export const CHANNEL_SCALE_DOWN_THRESHOLD = 500 * 1024;         // 500 KB/s
 export const CHANNEL_SCALE_INTERVAL = 3000;                     // 3 seconds
-export const CHANNEL_SCALE_SUSTAIN_COUNT = 1;                   // consecutive intervals
+export const CHANNEL_SCALE_SUSTAIN_COUNT = 3;                   // consecutive intervals
 
 /** Prefix for data channel labels: file-transfer-0, file-transfer-1, etc. */
 export const CHANNEL_LABEL_PREFIX = 'file-transfer-';

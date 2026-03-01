@@ -7,13 +7,14 @@
  * - Crash recovery
  * - Retransmission handling
  */
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { ChunkingEngine } from '../../../transfer/sending/ChunkingEngine.js';
 // TODO: Migrate to AssemblyEngine once it supports pause/resume and two-step init flow
 import { fileReceiver } from '../../../utils/fileReceiver.js';
 import { getSocket } from '../../../utils/signaling.js';
 import { cleanupTransferData } from '../../../infrastructure/database/index.js';
 import { resumableTransferManager } from '../../../transfer/resumption/ResumableTransferManager.js';
+import { progressTracker } from '../../../transfer/shared/ProgressTracker.js';
 import { useTransferStore } from '../../../stores/transferStore.js';
 import { formatBytes } from '../../../lib/formatters.js';
 import { STORAGE_CHUNK_SIZE } from '../../../constants/transfer.constants.js';
@@ -64,6 +65,17 @@ export function useFileTransfer(
   const receivedBytesRef = useRef(0);
   const startTimeRef = useRef(null);
   const receiverLastChunkRef = useRef(-1); // Track receiver's last chunk when paused (sender side)
+  const progressUnsubRef = useRef(null); // ProgressTracker subscription cleanup
+
+  // Cleanup progress subscription on unmount
+  useEffect(() => {
+    return () => {
+      if (progressUnsubRef.current) {
+        progressUnsubRef.current();
+        progressUnsubRef.current = null;
+      }
+    };
+  }, []);
 
   /**
    * Start transfer process (send file metadata)
@@ -125,6 +137,19 @@ export function useFileTransfer(
     setTransferState('sending');
     startTimeRef.current = Date.now();
 
+    // Subscribe to ProgressTracker for canonical progress updates
+    if (progressUnsubRef.current) progressUnsubRef.current();
+    progressUnsubRef.current = progressTracker.subscribe(
+      transferIdRef.current,
+      (progress) => {
+        setTransferProgress(Math.round(progress.percentage));
+        setTransferSpeed(progress.transferSpeed);
+        if (progress.estimatedTimeRemaining != null) {
+          setTransferEta(progress.estimatedTimeRemaining / 1000);
+        }
+      }
+    );
+
     try {
       await chunkingEngineRef.current.startChunking(
         transferIdRef.current,
@@ -146,20 +171,14 @@ export function useFileTransfer(
             binaryData.byteOffset + binaryData.byteLength
           );
           sendBinary(buffer);
-        },
-        (bytesRead, totalSize) => {
-          const progress = Math.round((bytesRead / totalSize) * 100);
-          setTransferProgress(progress);
-
-          // Calculate speed
-          const elapsed = (Date.now() - startTimeRef.current) / 1000;
-          if (elapsed > 0) {
-            const speed = bytesRead / elapsed;
-            setTransferSpeed(speed);
-            setTransferEta((totalSize - bytesRead) / speed);
-          }
         }
       );
+
+      // Unsubscribe from progress tracker
+      if (progressUnsubRef.current) {
+        progressUnsubRef.current();
+        progressUnsubRef.current = null;
+      }
 
       sendJSON({ type: 'transfer-complete' });
       setTransferState('completed');

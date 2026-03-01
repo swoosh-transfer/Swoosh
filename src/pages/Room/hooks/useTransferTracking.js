@@ -86,6 +86,28 @@ export function useTransferTracking({
   // NOTE: Recovery detection moved to Home page.
   // Room is disposable — incomplete transfers surface on Home screen.
 
+  // ── Flush bitmap on visibility change / beforeunload ──────────────────────
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushBitmap();
+      }
+    };
+
+    const handleBeforeUnload = () => {
+      flushBitmap();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [flushBitmap]);
+
   // ── Auto-mark interrupted on peer disconnect ──────────────────────────────
 
   useEffect(() => {

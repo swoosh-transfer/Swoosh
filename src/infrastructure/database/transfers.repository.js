@@ -114,27 +114,40 @@ export async function getTransfersByStatus(status) {
 }
 
 /**
- * Clean up old completed transfers
+ * Clean up old transfers (batch delete)
  * 
  * Removes transfer records older than specified age.
+ * Deletes both completed transfers (by completedAt) and stale incomplete
+ * transfers (by createdAt) in a single transaction.
  * 
- * @param {number} maxAgeMs - Maximum age in milliseconds
+ * @param {number} maxAgeMs - Maximum age in milliseconds (default: 7 days)
  * @returns {Promise<number>} Number of transfers deleted
  */
 export async function cleanupOldTransfers(maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
   const transfers = await listTransfers();
   const cutoffTime = Date.now() - maxAgeMs;
-  let deletedCount = 0;
   
-  for (const transfer of transfers) {
-    if (transfer.completedAt && transfer.completedAt < cutoffTime) {
-      await deleteTransfer(transfer.transferId);
-      deletedCount++;
-      logger.info(`[TransfersRepo] Deleted old transfer: ${transfer.transferId}`);
+  const idsToDelete = transfers
+    .filter((t) => {
+      // Completed transfers older than cutoff
+      if (t.completedAt && t.completedAt < cutoffTime) return true;
+      // Stale incomplete transfers older than cutoff
+      if (t.createdAt && t.createdAt < cutoffTime) return true;
+      return false;
+    })
+    .map((t) => t.transferId);
+
+  if (idsToDelete.length === 0) return 0;
+
+  // Batch delete in a single transaction
+  await withTransaction(STORE_NAMES.TRANSFERS, 'readwrite', (store) => {
+    for (const id of idsToDelete) {
+      store.delete(id);
     }
-  }
-  
-  return deletedCount;
+  });
+
+  logger.info(`[TransfersRepo] Batch-deleted ${idsToDelete.length} old transfers`);
+  return idsToDelete.length;
 }
 
 /**
