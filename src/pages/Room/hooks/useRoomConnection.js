@@ -52,7 +52,7 @@ import logger from '../../../utils/logger.js';
  * @returns {Object} Connection state and methods
  */
 export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
-  const { securityPayload, setSecurityPayload, setRoomId, setConnectionState } = useRoomStore();
+  const { securityPayload, setSecurityPayload, setRoomId } = useRoomStore();
   
   const [socketConnected, setSocketConnected] = useState(false);
   const [socketId, setSocketId] = useState(null);
@@ -233,7 +233,6 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
             handshakeSentRef.current = false;
           };
         }, (state) => {
-          setConnectionState(state);
           setConnInfo(prev => ({ ...prev, rtcState: state }));
           logger.log(`[Room] Connection: ${state}`);
         }, (stats) => {
@@ -311,7 +310,6 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
         // --- end early setup ---
 
         await joinRoom(roomId);
-        setConnectionState('connecting');
         setRoomJoined(true);
         addLog(`Joined room: ${roomId}`, 'success');
 
@@ -325,7 +323,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
 
     init();
     return () => { cancelled = true; };
-  }, [roomId, isHost, setSecurityPayload, setRoomId, setConnectionState, addLog]);
+  }, [roomId, isHost, setSecurityPayload, setRoomId, addLog]);
 
   // WebRTC setup - wait until room is joined
   useEffect(() => {
@@ -386,7 +384,6 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
 
     // Connection state callback
     const onStateChange = (state) => {
-      setConnectionState(state);
       setConnInfo(prev => ({ ...prev, rtcState: state }));
       logger.log(`[Room] Connection: ${state}`);
     };
@@ -493,7 +490,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     return () => {
       offReconnect(handleReconnection);
     };
-    // Functions (onDataChannelReady, setConnectionState) are captured in closure and shouldn't be dependencies
+    // Functions (onDataChannelReady) are captured in closure and shouldn't be dependencies
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, isHost, roomJoined, socketConnected]);
 

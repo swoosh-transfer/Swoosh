@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 
 /**
- * Room Store - Simplified (Phase 6 Refactoring)
+ * Room Store
  * 
  * WHAT THIS STORE MANAGES:
  * - Room metadata (roomId, isHost)
@@ -9,7 +9,7 @@ import { create } from 'zustand';
  * - Selected files from Home.jsx (persists to Room.jsx) — supports multi-file & folder drops
  * - Global room errors
  * 
- * WHAT THIS STORE NO LONGER MANAGES (delegated to hooks):
+ * WHAT IS MANAGED ELSEWHERE:
  * - Connection state → useRoomConnection hook
  * - Security verification → useSecurity hook
  * - Transfer progress → useFileTransfer hook
@@ -105,57 +105,4 @@ export const useRoomStore = create((set, get) => ({
     error: null,
   }),
   
-  // ============ DEPRECATED METHODS (kept for backward compatibility) ============
-  // These are no-ops now, state managed by hooks instead
-  
-  /** @deprecated Use useSecurity hook instead */
-  setTofuVerified: () => {},
-  
-  /** @deprecated Use useSecurity hook instead */
-  setVerificationStatus: () => {},
-  
-  /** @deprecated Use useRoomConnection hook instead */
-  setConnectionState: () => {},
-  
-  /** @deprecated Use useRoomConnection hook instead */
-  setPeerConnected: () => {},
-  
-  /** @deprecated Use useRoomConnection hook instead */
-  setDataChannelReady: () => {},
-  
-  /** @deprecated Use useFileTransfer hook instead */
-  setTransferState: () => {},
-  
-  /** @deprecated Use useFileTransfer hook instead */
-  setTransferProgress: () => {},
-  
-  /** @deprecated Use useFileTransfer hook instead */
-  setTransferSpeed: () => {},
-  
-  // ============ DEPRECATED PROPERTIES ============
-  // Kept for read compatibility, but hooks are source of truth
-  
-  /** @deprecated Read from useSecurity hook instead */
-  tofuVerified: false,
-  
-  /** @deprecated Read from useSecurity hook instead */
-  verificationStatus: 'pending',
-  
-  /** @deprecated Read from useRoomConnection hook instead */
-  connectionState: 'disconnected',
-  
-  /** @deprecated Read from useRoomConnection hook instead */
-  peerConnected: false,
-  
-  /** @deprecated Read from useRoomConnection hook instead */
-  dataChannelReady: false,
-  
-  /** @deprecated Read from useFileTransfer hook instead */
-  transferState: 'idle',
-  
-  /** @deprecated Read from useFileTransfer hook instead */
-  transferProgress: 0,
-  
-  /** @deprecated Read from useFileTransfer hook instead */
-  transferSpeed: 0,
 }));

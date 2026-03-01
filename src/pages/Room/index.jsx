@@ -11,7 +11,7 @@ import { ErrorDisplay, CrashRecoveryPrompt } from '../../components/RoomUI.jsx';
 import FileDropZone from '../../components/FileDropZone.jsx';
 import { disconnectSocket, leaveRoom } from '../../utils/signaling.js';
 import { getQRCodeUrl } from '../../utils/qrCode.js';
-import { TRANSFER_MODE } from '../../constants/transfer.constants.js';
+import { TRANSFER_MODE, STORAGE_CHUNK_SIZE } from '../../constants/transfer.constants.js';
 
 // Custom hooks
 import {
@@ -203,7 +203,7 @@ export default function Room() {
         transferId: transfer.transferId || `${roomId}-${Date.now()}`,
         fileName: selectedFile.name,
         fileSize: selectedFile.size,
-        totalChunks: Math.ceil(selectedFile.size / (64 * 1024)),
+        totalChunks: Math.ceil(selectedFile.size / STORAGE_CHUNK_SIZE),
         direction: 'sending',
       });
     }

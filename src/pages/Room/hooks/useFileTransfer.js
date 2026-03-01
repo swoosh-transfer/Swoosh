@@ -14,6 +14,8 @@ import { getSocket } from '../../../utils/signaling.js';
 import { cleanupTransferData } from '../../../utils/indexedDB.js';
 import { resumableTransferManager } from '../../../utils/resumableTransfer.js';
 import { useTransferStore } from '../../../stores/transferStore.js';
+import { formatBytes } from '../../../lib/formatters.js';
+import { STORAGE_CHUNK_SIZE } from '../../../constants/transfer.constants.js';
 import logger from '../../../utils/logger.js';
 
 /**
@@ -42,7 +44,6 @@ export function useFileTransfer(
 ) {
   const {
     initiateUpload, initiateDownload,
-    updateUploadProgress, updateDownloadProgress,
     completeTransfer: completeStoreTransfer,
   } = useTransferStore();
 
@@ -62,19 +63,6 @@ export function useFileTransfer(
   const receivedBytesRef = useRef(0);
   const startTimeRef = useRef(null);
   const receiverLastChunkRef = useRef(-1); // Track receiver's last chunk when paused (sender side)
-
-  /**
-   * Format bytes to human-readable string
-   * @param {number} bytes - Number of bytes
-   * @returns {string} Formatted string
-   */
-  const formatBytes = (bytes) => {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
-  };
 
   /**
    * Start transfer process (send file metadata)
@@ -105,7 +93,7 @@ export function useFileTransfer(
       fileName: selectedFile.name,
       fileSize: selectedFile.size,
       fileType: selectedFile.type,
-      totalChunks: Math.ceil(selectedFile.size / (64 * 1024)),
+      totalChunks: Math.ceil(selectedFile.size / STORAGE_CHUNK_SIZE),
     });
 
     setTransferState('preparing');
@@ -118,7 +106,7 @@ export function useFileTransfer(
       name: selectedFile.name,
       size: selectedFile.size,
       mimeType: selectedFile.type,
-      totalChunks: Math.ceil(selectedFile.size / (64 * 1024)),
+      totalChunks: Math.ceil(selectedFile.size / STORAGE_CHUNK_SIZE),
     });
 
     addLog('Waiting for receiver...', 'info');
