@@ -11,6 +11,7 @@
 import { FileQueue, FILE_STATE } from './FileQueue.js';
 import { ChunkingEngine } from '../sending/ChunkingEngine.js';
 import { BandwidthMonitor } from '../multichannel/BandwidthMonitor.js';
+import { formatBytes } from '../../lib/formatters.js';
 import {
   TRANSFER_MODE,
   STORAGE_CHUNK_SIZE,
@@ -436,11 +437,7 @@ export class MultiFileTransferManager {
   }
 
   _formatBytes(bytes) {
-    if (bytes === 0) return '0 B';
-    const k = 1024;
-    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(k));
-    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+    return formatBytes(bytes);
   }
 
   /** Cleanup all state. */

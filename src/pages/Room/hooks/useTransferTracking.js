@@ -21,6 +21,7 @@ import {
 import {
   deleteChunksByTransfer,
 } from '../../../infrastructure/database/chunks.repository.js';
+import { cleanupTransferData } from '../../../infrastructure/database/index.js';
 import {
   createBitmap,
   markChunk,
@@ -213,7 +214,8 @@ export function useTransferTracking({
   }, [flushBitmap]);
 
   /**
-   * Track transfer completion — marks as completed and cleans up chunk records
+   * Track transfer completion — marks as completed and cleans up ALL records
+   * (chunks, file metadata, and transfer record)
    */
   const trackTransferComplete = useCallback(async (transferId) => {
     activeTransferIdRef.current = null;
@@ -225,10 +227,8 @@ export function useTransferTracking({
     }
 
     try {
-      // Fully purge completed transfer — delete chunks AND transfer record
-      await deleteChunksByTransfer(transferId);
-      await deleteTransfer(transferId);
-
+      // Full cleanup: chunks + file metadata + transfer record
+      await cleanupTransferData(transferId);
       logger.log(`[TransferTracking] Transfer completed & cleaned: ${transferId}`);
     } catch (err) {
       logger.error('[TransferTracking] Failed to clean completed transfer:', err);
@@ -236,14 +236,13 @@ export function useTransferTracking({
   }, []);
 
   /**
-   * Track transfer cancellation — cleans up all records
+   * Track transfer cancellation — cleans up ALL records
    */
   const trackTransferCancel = useCallback(async (transferId) => {
     activeTransferIdRef.current = null;
 
     try {
-      await deleteChunksByTransfer(transferId);
-      await deleteTransfer(transferId);
+      await cleanupTransferData(transferId);
       logger.log(`[TransferTracking] Transfer cancelled and cleaned: ${transferId}`);
     } catch (err) {
       logger.error('[TransferTracking] Failed to clean cancelled transfer:', err);
@@ -306,12 +305,11 @@ export function useTransferTracking({
   );
 
   /**
-   * Discard a recoverable transfer — cleans up its records
+   * Discard a recoverable transfer — cleans up ALL its records
    */
   const discardRecoverableTransfer = useCallback(async (transferId) => {
     try {
-      await deleteChunksByTransfer(transferId);
-      await deleteTransfer(transferId);
+      await cleanupTransferData(transferId);
       logger.log(`[TransferTracking] Discarded recoverable: ${transferId}`);
     } catch (err) {
       logger.error('[TransferTracking] Failed to discard:', err);

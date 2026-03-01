@@ -119,8 +119,7 @@ export async function getTransfersByStatus(status) {
  * Clean up old transfers (batch delete)
  * 
  * Removes transfer records older than specified age.
- * Deletes both completed transfers (by completedAt) and stale incomplete
- * transfers (by createdAt) in a single transaction.
+ * Also deletes associated chunks and file metadata to prevent orphaned data.
  * 
  * @param {number} maxAgeMs - Maximum age in milliseconds (default: 7 days)
  * @returns {Promise<number>} Number of transfers deleted
@@ -129,19 +128,51 @@ export async function cleanupOldTransfers(maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
   const transfers = await listTransfers();
   const cutoffTime = Date.now() - maxAgeMs;
   
-  const idsToDelete = transfers
+  const toDelete = transfers
     .filter((t) => {
       // Completed transfers older than cutoff
       if (t.completedAt && t.completedAt < cutoffTime) return true;
       // Stale incomplete transfers older than cutoff
       if (t.createdAt && t.createdAt < cutoffTime) return true;
       return false;
-    })
-    .map((t) => t.transferId);
+    });
 
-  if (idsToDelete.length === 0) return 0;
+  if (toDelete.length === 0) return 0;
 
-  // Batch delete in a single transaction
+  // For each old transfer, also delete associated chunks and file metadata
+  const { deleteChunksByTransfer } = await import('./chunks.repository.js');
+  const db = await getDatabase();
+
+  for (const t of toDelete) {
+    try {
+      // Delete chunks for this transfer
+      await deleteChunksByTransfer(t.transferId);
+
+      // Delete file metadata by transferId index
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAMES.FILES, 'readwrite');
+        const store = tx.objectStore(STORE_NAMES.FILES);
+        if (store.indexNames.contains('transferId')) {
+          const index = store.index('transferId');
+          const req = index.openCursor(IDBKeyRange.only(t.transferId));
+          req.onsuccess = (event) => {
+            const cursor = event.target.result;
+            if (cursor) { cursor.delete(); cursor.continue(); }
+            else resolve();
+          };
+          req.onerror = () => reject(req.error);
+        } else {
+          resolve();
+        }
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch (e) {
+      logger.warn(`[TransfersRepo] Failed to clean associated data for ${t.transferId}:`, e);
+    }
+  }
+
+  // Batch delete transfer records
+  const idsToDelete = toDelete.map((t) => t.transferId);
   await withTransaction(STORE_NAMES.TRANSFERS, 'readwrite', (store) => {
     for (const id of idsToDelete) {
       store.delete(id);

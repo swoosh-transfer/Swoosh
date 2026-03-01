@@ -1,14 +1,19 @@
 /**
  * useResumeTransfer Hook
  * 
- * Encapsulates the resume handshake coordination when entering a room
- * with resume context from the Home page.
+ * Encapsulates the resume handshake coordination.
+ * 
+ * Supports two entry points:
+ *   1. Cross-session resume: user clicks "Resume" on Home → new room created
+ *      with resumeContext → this hook sends RESUME_TRANSFER when data channel opens.
+ *   2. In-room resume: peer reconnects in the same room → Room component sets
+ *      resumeContext with `inRoom: true` after identity verification → this hook
+ *      sends RESUME_TRANSFER over the new data channel.
  * 
  * Responsibilities:
- * - Load resume context from roomStore on mount
+ * - Load resume context from roomStore on mount / when set
  * - Initiate resume handshake when peer connects
- *   - Sender: send RESUME_TRANSFER proposal with saved bitmap
- *   - Receiver: wait for RESUME_TRANSFER from sender, validate, respond
+ *   - Send RESUME_TRANSFER proposal with saved bitmap
  * - Handle RESUME_ACCEPTED / RESUME_REJECTED callbacks
  * - Fall back to fresh transfer if resume fails
  * - Clear resume context after handshake completes
@@ -35,7 +40,18 @@ export function useResumeTransfer({
   const [resumeInfo, setResumeInfo] = useState(null); // { startFromChunk, ... }
 
   /**
+   * Reset initiation guard when resumeContext changes
+   * (allows re-firing for in-room reconnection where context is set after mount)
+   */
+  useEffect(() => {
+    if (resumeContext) {
+      hasInitiatedRef.current = false;
+    }
+  }, [resumeContext]);
+
+  /**
    * Initiate resume handshake when data channel opens and we have resume context.
+   * Works for both cross-session (Home→Room) and in-room reconnection.
    */
   useEffect(() => {
     if (!dataChannelReady || !resumeContext || hasInitiatedRef.current) return;
@@ -43,10 +59,12 @@ export function useResumeTransfer({
 
     hasInitiatedRef.current = true;
 
+    const label = resumeContext.inRoom ? 'In-room' : 'Cross-session';
+
     if (resumeContext.direction === 'sending') {
       // Sender side: propose resume with saved bitmap
       setResumeState('proposing');
-      addLog('Proposing transfer resume to peer...', 'info');
+      addLog(`${label} resume: proposing to peer...`, 'info');
       sendResumeRequest({
         transferId: resumeContext.transferId,
         fileName: resumeContext.fileName,
@@ -54,11 +72,12 @@ export function useResumeTransfer({
         fileHash: resumeContext.fileHash,
         totalChunks: resumeContext.totalChunks,
         chunkBitmap: resumeContext.chunkBitmap,
+        inRoom: !!resumeContext.inRoom,
       });
     } else if (resumeContext.direction === 'receiving') {
       // Receiver side: propose resume (receiver proposes, sender validates)
       setResumeState('proposing');
-      addLog('Requesting transfer resume from peer...', 'info');
+      addLog(`${label} resume: requesting from peer...`, 'info');
       sendResumeRequest({
         transferId: resumeContext.transferId,
         fileName: resumeContext.fileName,
@@ -66,6 +85,7 @@ export function useResumeTransfer({
         fileHash: resumeContext.fileHash,
         totalChunks: resumeContext.totalChunks,
         chunkBitmap: resumeContext.chunkBitmap,
+        inRoom: !!resumeContext.inRoom,
       });
     }
   }, [dataChannelReady, resumeContext, sendResumeRequest, addLog]);

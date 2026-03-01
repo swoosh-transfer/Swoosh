@@ -13,6 +13,7 @@ import { disconnectSocket, leaveRoom } from '../../utils/signaling.js';
 import { closePeerConnection } from '../../utils/p2pManager.js';
 import { getQRCodeUrl } from '../../utils/qrCode.js';
 import { TRANSFER_MODE, STORAGE_CHUNK_SIZE } from '../../constants/transfer.constants.js';
+import { updateTransfer } from '../../infrastructure/database/transfers.repository.js';
 
 // Custom hooks
 import {
@@ -28,8 +29,6 @@ import {
 
 // UI Components
 import {
-  ConnectionSection,
-  SecuritySection,
   TransferSection,
   ActivityLogSection,
 } from './components/index.js';
@@ -65,7 +64,7 @@ export default function Room() {
 
   // Security (encrypted signaling verification)
   const security = useSecurity(roomId, sendJSON, addLog);
-  const { verificationStatus, identityVerified, tofuVerified } = security;
+  const { verificationStatus, identityVerified, tofuVerified, isReturningPeer, interruptedTransfer } = security;
 
   // Transfer Tracking (IndexedDB persistence for cross-session resume)
   const tracking = useTransferTracking({
@@ -166,23 +165,21 @@ export default function Room() {
   // ============ AUTO-PAUSE ON DISCONNECT ============
   const autoPausedRef = useRef(false);
   const wasDisconnectedRef = useRef(false);
+  const awaitingIdentityRef = useRef(false); // true while waiting for identity check
 
   useEffect(() => {
     if (!peerDisconnected) {
-      // Peer reconnected — reset transfer machinery but KEEP files so sender can re-send
+      // Peer reconnected
       if (wasDisconnectedRef.current) {
         const wasActive = autoPausedRef.current;
         const currentState = isMultiFile ? multiTransfer.multiTransferState : transferState;
         const isErrored = currentState === 'error';
 
         if (wasActive || isErrored) {
-          addLog('Peer reconnected — ready to re-send', 'info');
-          multiTransfer.resetTransfer();
-          resetTransferState();
-          resetUiTransferState();
-          setMultiFileMode(false);
-          // Do NOT call clearFiles() — sender's file selection survives reconnect
-          // so the Send button reappears once data channel opens.
+          // Don't reset yet — wait for identity handshake to determine
+          // if this is the same peer (resume) or a new peer (reset).
+          awaitingIdentityRef.current = true;
+          addLog('Peer reconnected — verifying identity...', 'info');
         }
       }
       autoPausedRef.current = false;
@@ -211,6 +208,46 @@ export default function Room() {
       }
     }
   }, [peerDisconnected, transferState, multiTransfer.multiTransferState, isMultiFile, isPaused]);
+
+  // ============ IN-ROOM RECONNECTION RESUME ============
+  // After identity handshake completes, decide: resume (same peer) or reset (new peer).
+  // This effect fires when `identityVerified` transitions to true following a reconnection.
+  useEffect(() => {
+    if (!awaitingIdentityRef.current || !identityVerified) return;
+    awaitingIdentityRef.current = false;
+
+    if (isReturningPeer && interruptedTransfer) {
+      // ── Same peer with an interrupted transfer → auto-resume ──
+      addLog('Same peer returned — auto-resuming transfer', 'success');
+      
+      const { setResumeContext } = useRoomStore.getState();
+      setResumeContext({
+        transferId: interruptedTransfer.transferId,
+        fileName: interruptedTransfer.fileName,
+        fileSize: interruptedTransfer.fileSize,
+        totalChunks: interruptedTransfer.totalChunks,
+        chunkBitmap: interruptedTransfer.chunkBitmap || null,
+        direction: interruptedTransfer.direction === 'sending' ? 'sending' : 'receiving',
+        fileManifest: interruptedTransfer.fileManifest || null,
+        progress: interruptedTransfer.lastProgress || 0,
+        inRoom: true, // flag: don't create new room, resume in current room
+      });
+
+      // Reset transfer UI to re-enter the send/receive flow cleanly
+      multiTransfer.resetTransfer();
+      resetTransferState();
+      resetUiTransferState();
+      setMultiFileMode(false);
+      // Files survive in roomStore — sender can re-send
+    } else {
+      // ── New/different peer or no interrupted transfer → full reset ──
+      addLog('Peer reconnected — ready to re-send', 'info');
+      multiTransfer.resetTransfer();
+      resetTransferState();
+      resetUiTransferState();
+      setMultiFileMode(false);
+    }
+  }, [identityVerified, isReturningPeer, interruptedTransfer]);
 
   // ============ PROGRESS PERSISTENCE ============
   // Periodically save transfer progress to IndexedDB during active transfers
@@ -350,6 +387,22 @@ export default function Room() {
   };
 
   const handleLeave = () => {
+    // If there's an active transfer in progress, mark it as interrupted in IndexedDB
+    // so Home page can offer a Resume option. Don't delete it — user may want to resume.
+    const currentTransferId = transfer.transferId;
+    const currentState = isMultiFile ? multiTransfer.multiTransferState : transferState;
+    const isActive = currentState === 'sending' || currentState === 'receiving' || currentState === 'paused';
+
+    if (currentTransferId && isActive) {
+      // Flush bitmap and mark interrupted (fire-and-forget)
+      tracking.flushBitmap().then(() => {
+        updateTransfer(currentTransferId, {
+          status: 'interrupted',
+          interruptedAt: Date.now(),
+        }).catch(() => {}); // best-effort
+      }).catch(() => {});
+    }
+
     // Close data channel, peer connection, and all WebRTC resources
     if (dataChannelRef.current) {
       dataChannelRef.current.close();

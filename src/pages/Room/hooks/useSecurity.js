@@ -10,11 +10,15 @@
  * This hook still provides:
  *   - `tofuVerified` / `tofuVerifiedRef` (true once data-channel opens)
  *   - `verificationStatus` ('pending' → 'verified')
- *   - Optional identity handshake for session resumption
+ *   - Identity handshake for session resumption + in-room reconnection
+ *   - `isReturningPeer` — true when the reconnecting peer is the same UUID
+ *   - `interruptedTransfer` — IndexedDB record for the room if peer is returning
  */
 import { useState, useRef, useCallback } from 'react';
 import { getLocalUUID, savePeerSession, verifyPeer } from '../../../utils/identityManager.js';
 import { useRoomStore } from '../../../stores/roomStore.js';
+import { listTransfers } from '../../../infrastructure/database/transfers.repository.js';
+import logger from '../../../utils/logger.js';
 
 /**
  * Hook for managing security verification
@@ -29,6 +33,8 @@ export function useSecurity(roomId, sendJSON, addLog) {
   const [verificationStatus, setVerificationStatus] = useState('pending');
   const [identityVerified, setIdentityVerified] = useState(false);
   const [tofuVerified, setTofuVerified] = useState(false);
+  const [isReturningPeer, setIsReturningPeer] = useState(false);
+  const [interruptedTransfer, setInterruptedTransfer] = useState(null);
 
   const myUUID = useRef(getLocalUUID());
   const tofuVerifiedRef = useRef(false);
@@ -49,7 +55,7 @@ export function useSecurity(roomId, sendJSON, addLog) {
     addLog('Peer verified (encrypted signaling succeeded)', 'success');
   }, [addLog]);
 
-  // ── Optional identity handshake (session resumption) ──────────────────────
+  // ── Identity handshake (session resumption + reconnection) ────────────────
 
   /**
    * Send identity handshake to peer
@@ -63,17 +69,39 @@ export function useSecurity(roomId, sendJSON, addLog) {
   }, [addLog]);
 
   /**
-   * Handle received identity handshake from peer
-   * @param {Object} msg - Handshake message
+   * Handle received identity handshake from peer.
+   * If the peer is recognized (same UUID for this room), query IndexedDB
+   * for an interrupted transfer. This enables in-room resume: instead of
+   * resetting transfer state, the Room component can trigger the resume flow.
+   * 
+   * @param {Object} msg - Handshake message { type: 'handshake', uuid: string }
    */
   const handleHandshake = useCallback(async (msg) => {
     const peerUuidShort = msg.uuid?.slice(0, 8) || 'unknown';
     addLog(`Received identity: ${peerUuidShort}...`, 'info');
 
+    let returning = false;
+    let interrupted = null;
+
     try {
       const isKnownPeer = await verifyPeer(msg.uuid, roomId);
       if (isKnownPeer) {
+        returning = true;
         addLog('Session resumed with known peer', 'success');
+
+        // Query IndexedDB for interrupted/paused/active transfer in this room
+        try {
+          const allTransfers = await listTransfers();
+          interrupted = allTransfers.find(
+            (t) => t.roomId === roomId &&
+              (t.status === 'interrupted' || t.status === 'paused' || t.status === 'active')
+          ) || null;
+          if (interrupted) {
+            logger.log('[Security] Found interrupted transfer for room:', interrupted.transferId);
+          }
+        } catch (e) {
+          logger.warn('[Security] Failed to query interrupted transfers:', e);
+        }
       } else {
         addLog('New session established', 'info');
       }
@@ -82,6 +110,8 @@ export function useSecurity(roomId, sendJSON, addLog) {
       console.warn('[Security] Identity storage error:', err);
     }
 
+    setIsReturningPeer(returning);
+    setInterruptedTransfer(interrupted);
     setIdentityVerified(true);
   }, [roomId, addLog]);
 
@@ -91,6 +121,8 @@ export function useSecurity(roomId, sendJSON, addLog) {
     tofuVerifiedRef.current = false;
     setTofuVerified(false);
     setIdentityVerified(false);
+    setIsReturningPeer(false);
+    setInterruptedTransfer(null);
     setVerificationStatus('pending');
   }, []);
 
@@ -100,6 +132,8 @@ export function useSecurity(roomId, sendJSON, addLog) {
     identityVerified,
     tofuVerified,
     tofuVerifiedRef,
+    isReturningPeer,
+    interruptedTransfer,
 
     // Identity
     myUUID,

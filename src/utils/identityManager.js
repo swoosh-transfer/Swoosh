@@ -9,14 +9,17 @@ import logger from './logger.js';
 
 const STORE_NAME = STORE_NAMES.SESSIONS;
 
+/** Maximum session age before cleanup (24 hours) */
+const MAX_SESSION_AGE_MS = 24 * 60 * 60 * 1000;
+
 // 1. Get Local UUID (Ephemeral - dies on tab close)
 export function getLocalUUID() {
   let uuid = sessionStorage.getItem('device_session_uuid');
   
   if (!uuid) {
-    // Fresh tab detected: Clear old session data from IndexedDB
-    // This ensures we don't accidentally resume a session from a closed tab
-    clearOldSessions(); 
+    // Fresh tab detected: Clear stale sessions (older than 24h)
+    // Selective cleanup preserves recent sessions for other rooms
+    clearStaleSessions(MAX_SESSION_AGE_MS); 
     
     // Generate new UUID
     uuid = crypto.randomUUID();
@@ -25,16 +28,36 @@ export function getLocalUUID() {
   return uuid;
 }
 
-// 2. Clear old session data (Housekeeping)
-async function clearOldSessions() {
+// 2. Clear stale sessions (selective — only removes sessions older than maxAge)
+async function clearStaleSessions(maxAgeMs = MAX_SESSION_AGE_MS) {
   try {
     const db = await getDatabase();
     const tx = db.transaction(STORE_NAME, 'readwrite');
     const store = tx.objectStore(STORE_NAME);
-    store.clear(); 
-    logger.log('[Identity] Cleared stale session data');
+    const req = store.openCursor();
+    const cutoff = Date.now() - maxAgeMs;
+    let deletedCount = 0;
+
+    req.onsuccess = (event) => {
+      const cursor = event.target.result;
+      if (cursor) {
+        const record = cursor.value;
+        // Delete if no timestamp or older than cutoff
+        if (!record.lastConnected || record.lastConnected < cutoff) {
+          cursor.delete();
+          deletedCount++;
+        }
+        cursor.continue();
+      }
+    };
+
+    tx.oncomplete = () => {
+      if (deletedCount > 0) {
+        logger.log(`[Identity] Cleaned ${deletedCount} stale session(s)`);
+      }
+    };
   } catch (e) {
-    logger.error('[Identity] Error clearing sessions:', e);
+    logger.error('[Identity] Error clearing stale sessions:', e);
     // Ignore error if store doesn't exist yet
   }
 }
