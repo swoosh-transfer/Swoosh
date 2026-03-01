@@ -228,7 +228,7 @@ export function TransferSection({
             isHost={isHost}
             savedToFileSystem={downloadResult?.savedToFileSystem}
             fileName={pendingFile?.name}
-            fileCount={isMultiFile ? selectedFiles.length : (incomingManifest?.totalFiles || 1)}
+            fileCount={isMultiFile ? (incomingManifest?.totalFiles || selectedFiles.length || 1) : 1}
           />
         </div>
       )}

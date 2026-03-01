@@ -208,6 +208,12 @@ export function useMultiFileTransfer({
     await receiverRef.current?.handleFileComplete(fileIndex);
   }, []);
 
+  // ─── Sender: receiver-ready signal ──────────────────────────────
+
+  const onReceiverReady = useCallback(() => {
+    managerRef.current?.receiverReady();
+  }, []);
+
   // ─── Controls ───────────────────────────────────────────────────
 
   const pauseAll = useCallback(() => {
@@ -288,6 +294,7 @@ export function useMultiFileTransfer({
 
     // Sender actions
     startMultiTransfer,
+    onReceiverReady,
 
     // Receiver actions
     handleMultiFileManifest,

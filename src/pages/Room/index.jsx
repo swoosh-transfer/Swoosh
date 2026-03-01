@@ -34,11 +34,11 @@ import {
 export default function Room() {
   const { roomId } = useParams();
   const navigate = useNavigate();
-  const { isHost, securityPayload, selectedFile, selectedFiles, addFiles, removeFile, clearFiles, resetRoom, error: roomError } = useRoomStore();
+  const { isHost, securityPayload, selectedFiles, addFiles, removeFile, clearFiles, resetRoom, error: roomError } = useRoomStore();
   const [showQRCode, setShowQRCode] = useState(false);
 
-  // Determine if we're in multi-file mode
-  const isMultiFile = selectedFiles.length > 1;
+  // Derive selectedFile from selectedFiles (first file or null)
+  const selectedFile = selectedFiles.length > 0 ? selectedFiles[0].file : null;
 
   // ============ HOOKS ============
   
@@ -101,8 +101,16 @@ export default function Room() {
     addLog,
   });
 
+  // Determine if we're in multi-file mode
+  // Sender: more than one file selected
+  // Receiver: has incoming manifest or actively receiving multi-file
+  const isMultiFile = selectedFiles.length > 1 || 
+    multiTransfer.incomingManifest != null || 
+    multiTransfer.multiTransferState === 'receiving' || 
+    multiTransfer.multiTransferState === 'completed';
+
   // Message Protocol (routes messages to appropriate handlers)
-  useMessages(
+  const { setMultiFileMode } = useMessages(
     dataChannelRef,
     dataChannelReady,
     isHost,
@@ -117,8 +125,11 @@ export default function Room() {
 
   const handleStartTransfer = () => {
     if (isMultiFile) {
+      // Tell message handler we're in multi-file mode (sender-side)
+      setMultiFileMode(true);
       multiTransfer.startMultiTransfer();
     } else {
+      setMultiFileMode(false);
       startTransfer();
     }
   };

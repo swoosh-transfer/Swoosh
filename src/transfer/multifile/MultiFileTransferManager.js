@@ -53,6 +53,10 @@ export class MultiFileTransferManager {
     this._startTime = 0;
     this._totalBytesSent = 0;
 
+    /** Promise resolved when receiver sends receiver-ready */
+    this._receiverReadyResolve = null;
+    this._receiverReady = false;
+
     /** Callbacks */
     this._onProgress = null;      // (progressObj) => void
     this._onFileStart = null;     // (fileIndex) => void
@@ -99,9 +103,14 @@ export class MultiFileTransferManager {
     });
     this._addLog(`Sending ${manifest.totalFiles} file(s), ${this._formatBytes(manifest.totalSize)} total`, 'info');
 
-    // Start bandwidth monitor & auto-scaling
+    // Wait for receiver to accept and send receiver-ready
+    this._addLog('Waiting for receiver to accept...', 'info');
+    await this._waitForReceiverReady();
+
+    if (this._isCancelled) return;
+
+    // Start bandwidth monitor (auto-scaling disabled for stability)
     this._bandwidthMonitor.start();
-    this._startAutoScaling();
 
     try {
       if (this._mode === TRANSFER_MODE.SEQUENTIAL) {
@@ -264,6 +273,9 @@ export class MultiFileTransferManager {
     this._isCancelled = true;
     this._isPaused = false;
     this._pauseResolve?.();
+    // Unblock receiver-ready wait if still pending
+    this._receiverReadyResolve?.();
+    this._receiverReadyResolve = null;
     for (const [, engine] of this._engines) {
       engine.cancel?.();
     }
@@ -334,6 +346,29 @@ export class MultiFileTransferManager {
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────
+
+  /**
+   * Wait for the receiver to accept and send receiver-ready.
+   * Resolves when receiverReady() is called externally.
+   */
+  _waitForReceiverReady() {
+    if (this._receiverReady) return Promise.resolve();
+    return new Promise((resolve) => {
+      this._receiverReadyResolve = resolve;
+    });
+  }
+
+  /**
+   * Called externally when receiver-ready signal arrives.
+   * Unblocks the start() flow to begin sending data.
+   */
+  receiverReady() {
+    this._receiverReady = true;
+    if (this._receiverReadyResolve) {
+      this._receiverReadyResolve();
+      this._receiverReadyResolve = null;
+    }
+  }
 
   _waitIfPaused() {
     if (!this._isPaused) return Promise.resolve();

@@ -59,7 +59,7 @@ export function useMessages(
     handleRemotePause: handleMultiRemotePause,
     handleRemoteResume: handleMultiRemoteResume,
     handleRemoteCancel: handleMultiRemoteCancel,
-    startMultiTransfer,
+    onReceiverReady: handleMultiReceiverReady,
   } = multiTransfer;
 
   const {
@@ -71,6 +71,16 @@ export function useMessages(
   const pendingBinaryQueueRef = useRef([]);
   /** Track whether we're in a multi-file transfer */
   const isMultiFileRef = useRef(false);
+  /** Message processing serialization */
+  const messageQueueRef = useRef([]);
+  const isProcessingRef = useRef(false);
+
+  /**
+   * Mark that we're in multi-file transfer mode (called by sender before sending manifest)
+   */
+  const setMultiFileMode = useCallback((value) => {
+    isMultiFileRef.current = value;
+  }, []);
 
   /**
    * Handle incoming binary chunk data
@@ -93,12 +103,12 @@ export function useMessages(
   }, [receiveChunk, handleMultiBinaryChunk]);
 
   /**
-   * Main message handler for data channel.
+   * Main message processor for data channel.
    * All messages arrive only after encrypted signaling succeeded,
    * so they are implicitly trusted.
    * @param {MessageEvent} event - Message event
    */
-  const handleMessage = useCallback(async (event) => {
+  const processMessage = useCallback(async (event) => {
     try {
       // Binary data = file chunk
       if (event.data instanceof ArrayBuffer) {
@@ -152,10 +162,9 @@ export function useMessages(
         case 'receiver-ready':
           if (isHost) {
             addLog('Receiver ready, sending...', 'success');
-            // Determine if we're in multi-file mode based on whether manifest was sent
             if (isMultiFileRef.current) {
-              // Multi-file already started via startMultiTransfer
-              // The receiver-ready signal comes in during the start flow
+              // Signal the MultiFileTransferManager to start sending data
+              handleMultiReceiverReady();
             } else {
               await sendFileChunks();
             }
@@ -222,10 +231,32 @@ export function useMessages(
     handleMultiRemotePause,
     handleMultiRemoteResume,
     handleMultiRemoteCancel,
+    handleMultiReceiverReady,
     setPendingFileData,
     setDownloadResultData,
     addLog,
   ]);
+
+  /**
+   * Serializing message handler — ensures messages are processed one at a time
+   * to prevent race conditions with async chunk processing.
+   */
+  const handleMessage = useCallback((event) => {
+    messageQueueRef.current.push(event);
+
+    if (isProcessingRef.current) return;
+
+    const drain = async () => {
+      isProcessingRef.current = true;
+      while (messageQueueRef.current.length > 0) {
+        const nextEvent = messageQueueRef.current.shift();
+        await processMessage(nextEvent);
+      }
+      isProcessingRef.current = false;
+    };
+
+    drain();
+  }, [processMessage]);
 
   /**
    * Setup message listener on data channel
@@ -244,5 +275,6 @@ export function useMessages(
 
   return {
     handleMessage,
+    setMultiFileMode,
   };
 }

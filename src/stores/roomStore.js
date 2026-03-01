@@ -32,12 +32,6 @@ export const useRoomStore = create((set, get) => ({
   // Files selected on Home.jsx, persists to Room.jsx for transfer
   // Each entry: { file: File, relativePath: string | null }
   selectedFiles: [],
-
-  // Backward-compat alias (returns first file or null)
-  get selectedFile() {
-    const files = get().selectedFiles;
-    return files.length > 0 ? files[0].file : null;
-  },
   
   // Global room-level error (navigation failures, critical issues)
   error: null,
