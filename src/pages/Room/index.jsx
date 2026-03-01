@@ -7,9 +7,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useRoomStore } from '../../stores/roomStore.js';
-import { ErrorDisplay, CrashRecoveryPrompt } from '../../components/RoomUI.jsx';
+import { ErrorDisplay } from '../../components/RoomUI.jsx';
 import FileDropZone from '../../components/FileDropZone.jsx';
 import { disconnectSocket, leaveRoom } from '../../utils/signaling.js';
+import { closePeerConnection } from '../../utils/p2pManager.js';
 import { getQRCodeUrl } from '../../utils/qrCode.js';
 import { TRANSFER_MODE, STORAGE_CHUNK_SIZE } from '../../constants/transfer.constants.js';
 
@@ -45,7 +46,7 @@ export default function Room() {
   
   // UI State (logs, copy state, pending file, etc.)
   const uiState = useRoomState();
-  const { addLog, logs, copied, handleCopy, pendingFile, awaitingSaveLocation, downloadResult, recoverableTransfers, clearPendingFile, removeRecoverableTransfer, resetUiTransferState } = uiState;
+  const { addLog, logs, copied, handleCopy, pendingFile, awaitingSaveLocation, downloadResult, clearPendingFile, resetUiTransferState } = uiState;
 
   // WebRTC Connection (socket, peer connection, data channel)
   const connection = useRoomConnection(
@@ -114,7 +115,7 @@ export default function Room() {
     multiTransfer.multiTransferState === 'error';
 
   // Message Protocol (routes messages to appropriate handlers)
-  const { setMultiFileMode } = useMessages(
+  const { setMultiFileMode, sendResumeRequest } = useMessages(
     dataChannelRef,
     dataChannelReady,
     isHost,
@@ -122,7 +123,8 @@ export default function Room() {
     transfer,
     multiTransfer,
     uiState,
-    addLog
+    addLog,
+    sendJSON
   );
 
   // Transfer Tracking (IndexedDB persistence for cross-session resume)
@@ -130,19 +132,37 @@ export default function Room() {
     roomId,
     peerDisconnected,
     addLog,
-    addRecoverableTransfer: uiState.addRecoverableTransfer,
   });
 
   // ============ AUTO-PAUSE ON DISCONNECT ============
   const autoPausedRef = useRef(false);
+  const wasDisconnectedRef = useRef(false);
 
   useEffect(() => {
     if (!peerDisconnected) {
+      // Peer reconnected — reset transfer machinery but KEEP files so sender can re-send
+      if (wasDisconnectedRef.current) {
+        const wasActive = autoPausedRef.current;
+        const currentState = isMultiFile ? multiTransfer.multiTransferState : transferState;
+        const isErrored = currentState === 'error';
+
+        if (wasActive || isErrored) {
+          addLog('Peer reconnected — ready to re-send', 'info');
+          multiTransfer.resetTransfer();
+          resetTransferState();
+          resetUiTransferState();
+          setMultiFileMode(false);
+          // Do NOT call clearFiles() — sender's file selection survives reconnect
+          // so the Send button reappears once data channel opens.
+        }
+      }
       autoPausedRef.current = false;
+      wasDisconnectedRef.current = false;
       return;
     }
 
-    // Peer disconnected — auto-pause any active transfer
+    // Peer disconnected — mark and auto-pause any active transfer
+    wasDisconnectedRef.current = true;
     const activeState = isMultiFile ? multiTransfer.multiTransferState : transferState;
     const isActive = activeState === 'sending' || activeState === 'receiving';
 
@@ -185,6 +205,36 @@ export default function Room() {
     }
   }, [transferProgress, multiTransfer.overallProgress, transferState, multiTransfer.multiTransferState]);
 
+  // ============ RECEIVER-SIDE TRANSFER TRACKING ============
+  // Track incoming transfers in IndexedDB so receiver can also recover on reconnect
+  useEffect(() => {
+    if (isHost || !pendingFile || !transfer.transferId) return;
+
+    // Single-file receive: track when we receive file-metadata
+    tracking.trackTransferStart({
+      transferId: transfer.transferId,
+      fileName: pendingFile.name,
+      fileSize: pendingFile.size,
+      totalChunks: pendingFile.totalChunks || 0,
+      direction: 'receiving',
+    });
+  }, [pendingFile]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (isHost || !multiTransfer.incomingManifest) return;
+
+    // Multi-file receive: track the overall manifest as a single recoverable transfer
+    const manifest = multiTransfer.incomingManifest;
+    const transferId = `multi-${roomId}-${Date.now()}`;
+    tracking.trackTransferStart({
+      transferId,
+      fileName: `${manifest.totalFiles} files`,
+      fileSize: manifest.totalSize || 0,
+      totalChunks: manifest.totalFiles || 0,
+      direction: 'receiving',
+    });
+  }, [multiTransfer.incomingManifest]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ============ UI HANDLERS ============
 
   const handleStartTransfer = () => {
@@ -204,6 +254,17 @@ export default function Room() {
         fileName: selectedFile.name,
         fileSize: selectedFile.size,
         totalChunks: Math.ceil(selectedFile.size / STORAGE_CHUNK_SIZE),
+        direction: 'sending',
+      });
+    }
+    // Track multi-file send start
+    if (isHost && isMultiFile && selectedFiles.length > 0) {
+      const totalSize = selectedFiles.reduce((sum, f) => sum + f.size, 0);
+      tracking.trackTransferStart({
+        transferId: `multi-${roomId}-${Date.now()}`,
+        fileName: `${selectedFiles.length} files`,
+        fileSize: totalSize,
+        totalChunks: selectedFiles.length,
         direction: 'sending',
       });
     }
@@ -230,32 +291,12 @@ export default function Room() {
     await setupFileWriter(pendingFile?.name, clearPendingFile);
   };
 
-  const handleRecoverTransfer = async (transferId) => {
-    addLog(`Recovering transfer: ${transferId}`, 'info');
-    // Get full recovery info from IndexedDB for future resume protocol
-    const info = await tracking.getRecoverableTransferInfo(transferId);
-    if (info) {
-      addLog(`Resumable: ${info.fileName} (${info.progress}%, ${info.receivedCount}/${info.totalChunks} chunks)`, 'info');
-    }
-    removeRecoverableTransfer(transferId);
-  };
-
-  const handleDiscardRecovery = async (transferId) => {
-    // Clean up IndexedDB records for this transfer
-    await tracking.discardRecoverableTransfer(transferId);
-    removeRecoverableTransfer(transferId);
-    addLog('Transfer discarded', 'info');
-  };
-
-  const handleSelectFileForRecovery = (transferId) => {
-    addLog(`Select file to resume: ${transferId}`, 'info');
-    removeRecoverableTransfer(transferId);
-  };
-
   const handleLeave = () => {
+    // Close data channel, peer connection, and all WebRTC resources
     if (dataChannelRef.current) {
       dataChannelRef.current.close();
     }
+    closePeerConnection();
 
     leaveRoom();
     disconnectSocket();
@@ -268,14 +309,6 @@ export default function Room() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 p-4">
-      {/* Crash Recovery Prompt */}
-      <CrashRecoveryPrompt
-        transfers={recoverableTransfers}
-        onResume={handleRecoverTransfer}
-        onDiscard={handleDiscardRecovery}
-        onSelectFile={handleSelectFileForRecovery}
-      />
-
       {/* Peer Disconnected Banner */}
       {peerDisconnected && (
         <div className="fixed top-0 left-0 right-0 z-50 bg-red-900/95 border-b border-red-700 px-4 py-3 text-center animate-in slide-in-from-top">

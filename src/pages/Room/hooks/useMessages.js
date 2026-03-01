@@ -12,6 +12,10 @@
 import { useEffect, useCallback, useRef } from 'react';
 import { MESSAGE_TYPE } from '../../../constants/messages.constants.js';
 import { getChannelPool } from '../../../utils/p2pManager.js';
+import {
+  deserializeBitmap,
+  getFirstMissingChunk,
+} from '../../../infrastructure/database/chunkBitmap.js';
 import logger from '../../../utils/logger.js';
 
 /**
@@ -34,7 +38,9 @@ export function useMessages(
   transfer,
   multiTransfer,
   uiState,
-  addLog
+  addLog,
+  sendJSON,
+  resumeCallbacks
 ) {
   const {
     handleHandshake,
@@ -253,22 +259,80 @@ export function useMessages(
           break;
 
         // ─── Resume protocol ─────────────────────────────────
-        case MESSAGE_TYPE.RESUME_TRANSFER:
+        case MESSAGE_TYPE.RESUME_TRANSFER: {
           addLog(`Peer requests resume: ${msg.fileName || msg.transferId}`, 'info');
-          // TODO Phase 4: Verify file match, accept/reject resume
           logger.log('[Room] Resume request received:', msg);
-          break;
 
-        case MESSAGE_TYPE.RESUME_ACCEPTED:
+          // Sender-side: validate the file the receiver wants to resume
+          const currentFile = transfer.currentFile || (transfer.selectedFile);
+          let accepted = false;
+          let reason = '';
+
+          if (!currentFile) {
+            reason = 'No file currently selected to resume';
+          } else if (msg.fileSize !== undefined && currentFile.size !== msg.fileSize) {
+            reason = `File size mismatch: expected ${msg.fileSize}, got ${currentFile.size}`;
+          } else if (msg.fileHash && transfer.fileHash && msg.fileHash !== transfer.fileHash) {
+            reason = 'File hash mismatch — file may have changed';
+          } else {
+            accepted = true;
+          }
+
+          if (accepted) {
+            // Determine where to resume from using the receiver's bitmap
+            let startFromChunk = 0;
+            if (msg.chunkBitmap && msg.totalChunks) {
+              const bitmap = deserializeBitmap(msg.chunkBitmap);
+              startFromChunk = getFirstMissingChunk(bitmap, msg.totalChunks);
+              if (startFromChunk === -1) startFromChunk = msg.totalChunks; // All complete
+            }
+
+            sendJSON({
+              type: MESSAGE_TYPE.RESUME_ACCEPTED,
+              transferId: msg.transferId,
+              startFromChunk,
+              totalChunks: msg.totalChunks,
+            });
+            addLog(`Resume accepted — starting from chunk ${startFromChunk}`, 'success');
+          } else {
+            sendJSON({
+              type: MESSAGE_TYPE.RESUME_REJECTED,
+              transferId: msg.transferId,
+              reason,
+            });
+            addLog(`Resume rejected: ${reason}`, 'warning');
+          }
+          break;
+        }
+
+        case MESSAGE_TYPE.RESUME_ACCEPTED: {
           addLog(`Resume accepted, starting from chunk ${msg.startFromChunk}`, 'success');
-          // TODO Phase 4: Start sending from msg.startFromChunk
           logger.log('[Room] Resume accepted:', msg);
-          break;
 
-        case MESSAGE_TYPE.RESUME_REJECTED:
+          // Notify the transfer layer to skip to the accepted chunk
+          if (resumeCallbacks?.onResumeAccepted) {
+            resumeCallbacks.onResumeAccepted({
+              transferId: msg.transferId,
+              startFromChunk: msg.startFromChunk,
+              totalChunks: msg.totalChunks,
+            });
+          }
+          break;
+        }
+
+        case MESSAGE_TYPE.RESUME_REJECTED: {
           addLog(`Resume rejected: ${msg.reason || 'file mismatch'}`, 'warning');
           logger.log('[Room] Resume rejected:', msg);
+
+          // Notify the UI to fall back to fresh transfer or re-select file
+          if (resumeCallbacks?.onResumeRejected) {
+            resumeCallbacks.onResumeRejected({
+              transferId: msg.transferId,
+              reason: msg.reason,
+            });
+          }
           break;
+        }
 
         default:
           logger.log('[Room] Unknown message:', msg.type);
@@ -357,8 +421,38 @@ export function useMessages(
     return () => pool.off('channel-message', onPoolMessage);
   }, [handleMessage, dataChannelReady]);
 
+  /**
+   * Send a resume request to the peer.
+   * Called when entering a room with resume context.
+   * 
+   * @param {Object} transferInfo - Resume context
+   * @param {string} transferInfo.transferId - Original transfer ID
+   * @param {string} transferInfo.fileName - File name
+   * @param {number} transferInfo.fileSize - File size in bytes
+   * @param {string} [transferInfo.fileHash] - SHA-256 hash of first N bytes
+   * @param {number} transferInfo.totalChunks - Total chunk count
+   * @param {string} [transferInfo.chunkBitmap] - Base64 bitmap of completed chunks
+   */
+  const sendResumeRequest = useCallback((transferInfo) => {
+    if (!sendJSON) {
+      logger.warn('[Room] Cannot send resume request — sendJSON not available');
+      return;
+    }
+    sendJSON({
+      type: MESSAGE_TYPE.RESUME_TRANSFER,
+      transferId: transferInfo.transferId,
+      fileName: transferInfo.fileName,
+      fileSize: transferInfo.fileSize,
+      fileHash: transferInfo.fileHash || null,
+      totalChunks: transferInfo.totalChunks,
+      chunkBitmap: transferInfo.chunkBitmap || null,
+    });
+    addLog(`Sent resume request for: ${transferInfo.fileName}`, 'info');
+  }, [sendJSON, addLog]);
+
   return {
     handleMessage,
     setMultiFileMode,
+    sendResumeRequest,
   };
 }
