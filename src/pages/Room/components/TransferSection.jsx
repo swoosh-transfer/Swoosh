@@ -35,6 +35,7 @@ export function TransferSection({
   transferSpeed,
   transferEta,
   isPaused,
+  pausedBy,
   onPause,
   onResume,
   onCancel,
@@ -72,10 +73,17 @@ export function TransferSection({
 
   return (
     <div className="space-y-4">
-      {/* Host: Compact FileDropZone for adding more files in-room */}
-      {isHost && isIdle && (
+      {/* FileDropZone for adding files in-room — shown when idle for both sender and receiver */}
+      {isIdle && !awaitingDirectory && !incomingManifest && (
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-          <h2 className="text-sm font-medium text-zinc-400 mb-3">Files to Send</h2>
+          <h2 className="text-sm font-medium text-zinc-400 mb-3">
+            {isHost ? 'Files to Send' : 'Send Files Back'}
+          </h2>
+          {!isHost && selectedFiles.length === 0 && (
+            <p className="text-xs text-zinc-500 mb-3">
+              You can also send files to the other peer. Select files below, or wait to receive.
+            </p>
+          )}
           <FileDropZone
             compact
             files={selectedFiles}
@@ -87,8 +95,8 @@ export function TransferSection({
         </div>
       )}
 
-      {/* Host: Transfer mode toggle */}
-      {isHost && isIdle && selectedFiles.length > 1 && (
+      {/* Transfer mode toggle — shown when multiple files selected */}
+      {isIdle && selectedFiles.length > 1 && (
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
           <h2 className="text-sm font-medium text-zinc-400 mb-3">Transfer Mode</h2>
           <div className="flex rounded-lg overflow-hidden border border-zinc-700">
@@ -121,12 +129,12 @@ export function TransferSection({
         </div>
       )}
 
-      {/* Large file tip — shown when large files are selected */}
-      {isHost && isIdle && selectedFiles.length > 0 && selectedFiles.some(f => f.file.size > 100 * 1024 * 1024) && (
-        <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-3">
-          <p className="text-xs text-zinc-500">
-            💡 <strong className="text-zinc-400">Tip:</strong> For large files, consider compressing them into a ZIP/RAR archive before sending.
-            This can significantly reduce transfer time and improve reliability.
+      {/* Large file / folder warning */}
+      {isIdle && selectedFiles.length > 0 && (selectedFiles.some(f => f.file.size > 100 * 1024 * 1024) || selectedFiles.length > 5) && (
+        <div className="bg-amber-950/40 border border-amber-700/50 rounded-xl p-3">
+          <p className="text-sm text-amber-300">
+            ⚠️ <strong>Recommendation:</strong> For {selectedFiles.length > 5 ? 'many files or folders' : 'large files'}, compress them into a ZIP/RAR archive before sending.
+            This significantly reduces transfer time, improves reliability, and keeps folder structure intact.
           </p>
         </div>
       )}
@@ -138,8 +146,8 @@ export function TransferSection({
         </div>
       )}
 
-      {/* Receiver: Waiting for file loading state */}
-      {!isHost && !pendingFile && !incomingManifest && dataChannelReady && !isTransferring && !isCompleted && !isError && (
+      {/* Receiver: Waiting for file loading state — only when no files selected to send */}
+      {!isHost && selectedFiles.length === 0 && !pendingFile && !incomingManifest && dataChannelReady && !isTransferring && !isCompleted && !isError && (
         <div className="bg-zinc-900 border border-emerald-800 rounded-xl p-8">
           <div className="flex flex-col items-center justify-center">
             <div className="mb-6">
@@ -214,6 +222,7 @@ export function TransferSection({
             speed={transferSpeed}
             eta={transferEta}
             isPaused={isPaused}
+            pausedBy={pausedBy}
             onPause={onPause}
             onResume={onResume}
             onCancel={onCancel}
@@ -258,7 +267,7 @@ export function TransferSection({
               onClick={onReset}
               className="w-full mt-3 py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-medium transition-colors"
             >
-              {isHost ? 'Send More Files' : 'Receive More Files'}
+              {isHost ? 'Send More Files' : 'Receive More Files / Send Files'}
             </button>
           )}
         </div>
@@ -290,8 +299,8 @@ export function TransferSection({
         </div>
       )}
 
-      {/* Host: Send Button */}
-      {isHost && (selectedFiles.length > 0 || selectedFile) && tofuVerified && dataChannelReady && isIdle && (
+      {/* Send Button — shown for anyone with files when idle and connected */}
+      {(selectedFiles.length > 0 || selectedFile) && tofuVerified && dataChannelReady && isIdle && (
         <button
           onClick={onStartTransfer}
           className="w-full py-3 bg-zinc-100 text-zinc-900 hover:bg-white rounded-xl font-medium transition-colors"

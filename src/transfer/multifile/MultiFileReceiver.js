@@ -111,19 +111,60 @@ export class MultiFileReceiver {
   }
 
   /**
+   * Set a single file handle (for single-file transfers using showSaveFilePicker).
+   * @param {FileSystemFileHandle} fileHandle
+   */
+  async setSingleFileHandle(fileHandle) {
+    const state = this._files.get(0);
+    if (state) {
+      state.handle = fileHandle;
+      state.writable = await fileHandle.createWritable();
+    }
+  }
+
+  /**
    * Sanitize a filename for File System Access API.
-   * Removes characters that are invalid on Windows/macOS/Linux.
+   * The FSAPI is stricter than the OS filesystem — it rejects names that are
+   * too long, contain certain patterns, or use Windows-reserved device names.
    */
   _sanitizeFileName(name) {
     if (!name) return 'unnamed_file';
-    // Remove or replace characters invalid in filenames
+
     let safe = name
-      .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')  // Windows-illegal chars
-      .replace(/\.+$/, '')                        // Trailing dots
-      .replace(/^\s+|\s+$/g, '')                  // Leading/trailing whitespace
+      // Replace characters illegal on Windows / FSAPI
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+      // Replace any remaining control characters or zero-width chars
+      .replace(/[\x7F\u200B-\u200F\uFEFF]/g, '')
+      // Collapse multiple underscores into one
+      .replace(/_{2,}/g, '_')
+      // Remove trailing dots and spaces (Windows rejects these)
+      .replace(/[\s.]+$/, '')
+      // Remove leading dots and spaces
+      .replace(/^[\s.]+/, '')
       .trim();
+
+    // Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+    if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(safe.split('.')[0])) {
+      safe = '_' + safe;
+    }
+
     // Ensure non-empty
-    return safe || 'unnamed_file';
+    if (!safe) return 'unnamed_file';
+
+    // FSAPI / NTFS limit: 255 characters max for a single name component.
+    // Preserve the extension when truncating.
+    if (safe.length > 200) {
+      const dotIdx = safe.lastIndexOf('.');
+      if (dotIdx > 0) {
+        const ext = safe.slice(dotIdx);          // e.g. ".mp4"
+        const stem = safe.slice(0, 200 - ext.length);
+        safe = stem + ext;
+      } else {
+        safe = safe.slice(0, 200);
+      }
+    }
+
+    return safe;
   }
 
   /**

@@ -44,7 +44,7 @@ export default function Room() {
   
   // UI State (logs, copy state, pending file, etc.)
   const uiState = useRoomState();
-  const { addLog, logs, copied, handleCopy, pendingFile, awaitingSaveLocation, downloadResult, recoverableTransfers, clearPendingFile, removeRecoverableTransfer } = uiState;
+  const { addLog, logs, copied, handleCopy, pendingFile, awaitingSaveLocation, downloadResult, recoverableTransfers, clearPendingFile, removeRecoverableTransfer, resetUiTransferState } = uiState;
 
   // WebRTC Connection (socket, peer connection, data channel)
   const connection = useRoomConnection(
@@ -103,9 +103,9 @@ export default function Room() {
   });
 
   // Determine if we're in multi-file mode
-  // Sender: more than one file selected OR actively sending multi-file
+  // Always use multi-file path (even for 1 file) to leverage multi-channel transfer
   // Receiver: has incoming manifest or actively receiving/completed multi-file
-  const isMultiFile = selectedFiles.length > 1 || 
+  const isMultiFile = selectedFiles.length >= 1 || 
     multiTransfer.incomingManifest != null || 
     multiTransfer.multiTransferState === 'sending' ||
     multiTransfer.multiTransferState === 'receiving' || 
@@ -142,6 +142,8 @@ export default function Room() {
     multiTransfer.resetTransfer();
     // Reset single-file transfer state so UI doesn't show stale 'completed'
     resetTransferState();
+    // Reset UI state (pendingFile, downloadResult, awaitingSaveLocation)
+    resetUiTransferState();
     // Reset message handler mode
     setMultiFileMode(false);
     // Clear file selections so user can pick new files
@@ -216,7 +218,7 @@ export default function Room() {
         {/* Header */}
         <div className="text-center mb-6">
           <h1 className="text-2xl font-light tracking-tight mb-1">
-            {isHost ? 'Send File' : 'Receive File'}
+            File Transfer
           </h1>
           <p className="text-zinc-500 text-sm font-mono">Room: {roomId}</p>
         </div>
@@ -282,6 +284,7 @@ export default function Room() {
               transferSpeed={isMultiFile ? multiTransfer.speed : transferSpeed}
               transferEta={isMultiFile ? multiTransfer.eta : transferEta}
               isPaused={isMultiFile ? multiTransfer.isPaused : isPaused}
+              pausedBy={isMultiFile ? multiTransfer.pausedBy : transfer.pausedBy}
               onPause={isMultiFile ? multiTransfer.pauseAll : pauseTransfer}
               onResume={isMultiFile ? multiTransfer.resumeAll : resumeTransfer}
               onCancel={isMultiFile ? multiTransfer.cancelAll : cancelTransfer}

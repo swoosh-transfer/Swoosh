@@ -53,6 +53,8 @@ export function useMultiFileTransfer({
   const [eta, setEta] = useState(null);
   const [channelCount, setChannelCount] = useState(1);
   const [isPaused, setIsPaused] = useState(false);
+  // Track who initiated the pause: 'local' | 'remote' | null
+  const [pausedBy, setPausedBy] = useState(null);
 
   // Receive-side state
   const [incomingManifest, setIncomingManifest] = useState(null);
@@ -144,6 +146,11 @@ export function useMultiFileTransfer({
     setEta(null);
     setIsPaused(false);
 
+    // Sync transfer mode from sender's manifest so the receiver UI shows correctly
+    if (manifest.mode) {
+      setTransferMode(manifest.mode);
+    }
+
     const receiver = new MultiFileReceiver();
 
     receiver.onManifest = (m) => {
@@ -188,22 +195,32 @@ export function useMultiFileTransfer({
     const receiver = receiverRef.current;
     if (!receiver) return;
 
-    let directorySelected = false;
+    let fileSystemSelected = false;
+    const isSingleFile = receiver.manifest?.totalFiles === 1;
 
     try {
-      if (receiver.supportsDirectoryPicker) {
+      if (isSingleFile && typeof window.showSaveFilePicker === 'function') {
+        // Single file: use showSaveFilePicker for cleaner UX (no folder prompt)
+        const fileName = receiver.manifest.files[0].name;
+        const fileHandle = await window.showSaveFilePicker({
+          suggestedName: fileName,
+        });
+        await receiver.setSingleFileHandle(fileHandle);
+        addLog('Save location selected — file will be saved via File System API', 'success');
+        fileSystemSelected = true;
+      } else if (receiver.supportsDirectoryPicker) {
         const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
         await receiver.setDirectoryHandle(dirHandle);
         addLog('Save directory selected — files will be saved via File System API', 'success');
-        directorySelected = true;
+        fileSystemSelected = true;
       } else {
         addLog('Directory picker not supported — files will be downloaded individually via browser', 'info');
       }
     } catch (err) {
       if (err.name === 'AbortError') {
-        addLog('Directory selection cancelled — files will be downloaded individually via browser', 'info');
+        addLog('Save location cancelled — files will be downloaded individually via browser', 'info');
       } else {
-        addLog(`Directory picker error: ${err.message} — files will be downloaded individually`, 'error');
+        addLog(`File picker error: ${err.message} — files will be downloaded individually`, 'error');
       }
     }
 
@@ -212,8 +229,8 @@ export function useMultiFileTransfer({
 
     // Tell sender we're ready
     sendJSON({ type: MESSAGE_TYPE.RECEIVER_READY });
-    addLog(directorySelected
-      ? 'Ready to receive — saving to chosen directory'
+    addLog(fileSystemSelected
+      ? 'Ready to receive — saving via File System API'
       : 'Ready to receive — will prompt to save each file individually', 'info');
   }, [sendJSON, addLog]);
 
@@ -242,14 +259,18 @@ export function useMultiFileTransfer({
   const pauseAll = useCallback(() => {
     managerRef.current?.pause();
     setIsPaused(true);
+    setPausedBy('local');
     sendJSON({ type: MESSAGE_TYPE.TRANSFER_PAUSED });
   }, [sendJSON]);
 
   const resumeAll = useCallback(() => {
+    // Only the person who paused can resume
+    if (pausedBy === 'remote') return;
     managerRef.current?.resume();
     setIsPaused(false);
+    setPausedBy(null);
     sendJSON({ type: MESSAGE_TYPE.TRANSFER_RESUMED });
-  }, [sendJSON]);
+  }, [sendJSON, pausedBy]);
 
   const cancelAll = useCallback(() => {
     managerRef.current?.cancel();
@@ -265,20 +286,20 @@ export function useMultiFileTransfer({
   // ─── Remote signals ─────────────────────────────────────────────
 
   const handleRemotePause = useCallback(() => {
-    if (isHost) {
-      managerRef.current?.pause();
-    }
+    // Pause sender if we are the sender, otherwise no-op
+    managerRef.current?.pause();
     setIsPaused(true);
+    setPausedBy('remote');
     addLog('Peer paused transfer', 'warning');
-  }, [isHost, addLog]);
+  }, [addLog]);
 
   const handleRemoteResume = useCallback(() => {
-    if (isHost) {
-      managerRef.current?.resume();
-    }
+    // Resume sender if we are the sender, otherwise no-op
+    managerRef.current?.resume();
     setIsPaused(false);
+    setPausedBy(null);
     addLog('Peer resumed transfer', 'success');
-  }, [isHost, addLog]);
+  }, [addLog]);
 
   const handleRemoteCancel = useCallback(() => {
     managerRef.current?.cancel();
@@ -304,6 +325,7 @@ export function useMultiFileTransfer({
     setEta(null);
     setChannelCount(1);
     setIsPaused(false);
+    setPausedBy(null);
     setIncomingManifest(null);
     setAwaitingDirectory(false);
   }, []);
@@ -326,6 +348,7 @@ export function useMultiFileTransfer({
     eta,
     channelCount,
     isPaused,
+    pausedBy,
     transferMode,
     setTransferMode,
 

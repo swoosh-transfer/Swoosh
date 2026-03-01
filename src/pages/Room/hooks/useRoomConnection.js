@@ -219,7 +219,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
         setPolite(true); // Guest is polite
         logger.log('[Room] Set polite mode: true');
 
-        initializePeerConnection(socket, roomId, (channel) => {
+        const guestPc = initializePeerConnection(socket, roomId, (channel) => {
           logger.log('[Room] Data channel ready');
           dataChannelRef.current = channel;
           setDataChannelReady(true);
@@ -239,6 +239,37 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
         }, (stats) => {
           setConnInfo(prev => ({ ...prev, rtt: stats.rtt, packetLoss: stats.packetLoss }));
         });
+
+        // Attach ICE state handler for connection details (same as host path)
+        if (guestPc) {
+          guestPc.oniceconnectionstatechange = () => {
+            setConnInfo(prev => ({ ...prev, iceState: guestPc.iceConnectionState }));
+            if (guestPc.iceConnectionState === 'connected' || guestPc.iceConnectionState === 'completed') {
+              guestPc.getStats().then(stats => {
+                stats.forEach(report => {
+                  if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+                    const localCandidate = stats.get(report.localCandidateId);
+                    const remoteCandidate = stats.get(report.remoteCandidateId);
+                    setConnInfo(prev => ({
+                      ...prev,
+                      candidateType: localCandidate?.candidateType || null,
+                      remoteCandidateType: remoteCandidate?.candidateType || null,
+                      protocol: localCandidate?.protocol || null,
+                      networkType: localCandidate?.networkType || null,
+                      availableOutgoingBitrate: report.availableOutgoingBitrate || null,
+                    }));
+                  }
+                });
+              }).catch(() => { /* stats unavailable */ });
+            }
+            if (guestPc.iceConnectionState === 'failed') {
+              logger.log('[Room] ICE connection failed, attempting restart...');
+            }
+          };
+          guestPc.onsignalingstatechange = () => {
+            setConnInfo(prev => ({ ...prev, signalingState: guestPc.signalingState }));
+          };
+        }
 
         setupSignalingListeners({
           onUserJoined: async (data) => {

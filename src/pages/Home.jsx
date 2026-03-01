@@ -216,12 +216,12 @@ export default function Home() {
             />
           </div>
 
-          {/* Large file tip */}
-          {hasFiles && selectedFiles.some(f => f.file.size > 100 * 1024 * 1024) && (
-            <div className="mb-4 p-3 bg-zinc-900/50 border border-zinc-800 rounded-lg">
-              <p className="text-xs text-zinc-500">
-                💡 <strong className="text-zinc-400">Tip:</strong> For large files, consider compressing them into a ZIP/RAR archive before sending.
-                This can significantly reduce transfer time and improve reliability.
+          {/* Large file / folder warning */}
+          {hasFiles && (selectedFiles.some(f => f.file.size > 100 * 1024 * 1024) || selectedFiles.length > 5) && (
+            <div className="mb-4 p-3 bg-amber-950/40 border border-amber-700/50 rounded-lg">
+              <p className="text-sm text-amber-300">
+                ⚠️ <strong>Recommendation:</strong> For {selectedFiles.length > 5 ? 'many files or folders' : 'large files'}, compress them into a ZIP/RAR archive before sending.
+                This significantly reduces transfer time, improves reliability, and keeps folder structure intact.
               </p>
             </div>
           )}

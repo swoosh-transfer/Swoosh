@@ -11,6 +11,7 @@
  */
 import { useEffect, useCallback, useRef } from 'react';
 import { MESSAGE_TYPE } from '../../../constants/messages.constants.js';
+import { getChannelPool } from '../../../utils/p2pManager.js';
 import logger from '../../../utils/logger.js';
 
 /**
@@ -160,14 +161,14 @@ export function useMessages(
           break;
 
         case 'receiver-ready':
-          if (isHost) {
-            addLog('Receiver ready, sending...', 'success');
-            if (isMultiFileRef.current) {
-              // Signal the MultiFileTransferManager to start sending data
-              handleMultiReceiverReady();
-            } else {
-              await sendFileChunks();
-            }
+          // Either side can be the sender (bidirectional), so no isHost gate.
+          // If we have an active sender, unblock it; otherwise the call is a safe no-op.
+          addLog('Receiver ready, sending...', 'success');
+          if (isMultiFileRef.current) {
+            // Signal the MultiFileTransferManager to start sending data
+            handleMultiReceiverReady();
+          } else {
+            await sendFileChunks();
           }
           break;
 
@@ -214,7 +215,6 @@ export function useMessages(
       logger.error('[Room] Message error:', err);
     }
   }, [
-    isHost,
     handleHandshake,
     sendFileChunks,
     initializeReceive,
@@ -272,6 +272,27 @@ export function useMessages(
       sendHandshake(channel);
     }
   }, [dataChannelRef, dataChannelReady, handleMessage, sendHandshake]);
+
+  /**
+   * Listen for messages on ALL data channels (1+) via ChannelPool.
+   * Channel-0 is handled directly above via channel.onmessage.
+   * Channels 1+ are used by MultiFileTransferManager for multi-channel chunk delivery.
+   */
+  useEffect(() => {
+    const pool = getChannelPool();
+    if (!pool || !dataChannelReady) return;
+
+    const onPoolMessage = (channelIndex, event) => {
+      // Only handle messages from data channels (1+)
+      // Channel-0 is already handled via its own onmessage above
+      if (channelIndex >= 1) {
+        handleMessage(event);
+      }
+    };
+
+    pool.on('channel-message', onPoolMessage);
+    return () => pool.off('channel-message', onPoolMessage);
+  }, [handleMessage, dataChannelReady]);
 
   return {
     handleMessage,
