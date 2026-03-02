@@ -219,7 +219,7 @@ export default function FileDropZone({
                   <span className="text-zinc-500 shrink-0 whitespace-nowrap">{formatFileSize(f.file.size)}</span>
                   <button
                     onClick={() => onFileRemoved?.(idx)}
-                    className="text-zinc-600 hover:text-red-400 transition-colors shrink-0 flex-shrink-0"
+                    className="text-zinc-600 hover:text-red-400 transition-colors shrink-0"
                   >
                     ×
                   </button>
@@ -340,7 +340,7 @@ export default function FileDropZone({
               <span className="text-zinc-500 text-xs shrink-0 whitespace-nowrap mx-2">{formatFileSize(f.file.size)}</span>
               <button
                 onClick={(e) => { e.stopPropagation(); onFileRemoved?.(idx); }}
-                className="text-zinc-600 hover:text-red-400 transition-colors shrink-0 p-1 flex-shrink-0"
+                className="text-zinc-600 hover:text-red-400 transition-colors shrink-0 p-1"
                 title="Remove file"
               >
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>

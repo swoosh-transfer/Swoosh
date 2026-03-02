@@ -32,6 +32,7 @@ import {
   notifySessionMismatch,
 } from '../../../utils/transferNotifications.js';
 import { verifyPeer, getPeerSessionMetadata, isNewSession } from '../../../utils/identityManager.js';
+import { resumeEventBus } from './resumeEventBus.js';
 
 /**
  * Hook for managing message protocol handling
@@ -43,6 +44,11 @@ import { verifyPeer, getPeerSessionMetadata, isNewSession } from '../../../utils
  * @param {Object} multiTransfer - Multi-file transfer hook return value
  * @param {Object} uiState - UI state hook return value
  * @param {Function} addLog - Logging function
+ * @param {Function} sendJSON - JSON message sender
+ * @param {string} roomId - Room identifier
+ * @param {string} localUuid - Local UUID
+ * @param {Object} sessionToken - Ref to local session token
+ * @param {Object} peerSessionToken - Ref to peer's session token
  * @returns {Object} Message handlers
  */
 export function useMessages(
@@ -55,9 +61,10 @@ export function useMessages(
   uiState,
   addLog,
   sendJSON,
-  resumeCallbacks,
   roomId,
-  peerUuid
+  localUuid,
+  sessionToken,
+  peerSessionToken
 ) {
   const {
     handleHandshake,
@@ -343,15 +350,27 @@ export function useMessages(
           addLog(`Peer requests resume: ${msg.fileName || msg.transferId}`, 'info');
           logger.log('[Room] Resume request received:', msg);
 
-          // ★ CRITICAL: Verify peer BEFORE accepting resume
-          // This prevents a different peer from hijacking the transfer
-          if (!peerUuid) {
+          // ★ CRITICAL: Verify session token FIRST for replay protection
+          if (!msg.sessionToken || msg.sessionToken !== sessionToken?.current) {
             sendJSON({
               type: MESSAGE_TYPE.RESUME_REJECTED,
               transferId: msg.transferId,
-              reason: 'Peer identity not established',
+              reason: 'Invalid or missing session token (replay protection)',
             });
-            addLog('Resume rejected: peer identity not established', 'warning');
+            addLog('Resume rejected: invalid session token', 'warning');
+            logger.warn('[Room] Resume rejected: session token mismatch');
+            break;
+          }
+
+          // ★ CRITICAL: Verify peer identity BEFORE accepting resume
+          // This prevents a different peer from hijacking the transfer
+          if (!roomId || !msg.requesterUuid) {
+            sendJSON({
+              type: MESSAGE_TYPE.RESUME_REJECTED,
+              transferId: msg.transferId,
+              reason: 'Peer identity not provided for resume verification',
+            });
+            addLog('Resume rejected: missing peer identity for verification', 'warning');
             break;
           }
 
@@ -359,17 +378,18 @@ export function useMessages(
           let verificationReason = '';
           
           // Check if this is the same peer from the original transfer
-          const peerSession = await getPeerSessionMetadata(roomId);
-          if (peerSession && peerSession.peerUuid) {
-            const isOriginalPeer = peerSession.peerUuid === peerUuid;
-            if (!isOriginalPeer) {
-              isPeerVerified = false;
-              verificationReason = `Different peer detected - expected ${peerSession.peerUuid}, got ${peerUuid}`;
-              notifySessionMismatch(peerSession.peerUuid, peerUuid);
-              logger.warn(`[Room] Session mismatch: ${verificationReason}`);
-            } else {
-              notifyPeerReconnected(peerUuid, true);
+          const isKnownPeer = await verifyPeer(msg.requesterUuid, roomId);
+          if (!isKnownPeer) {
+            isPeerVerified = false;
+            const peerSession = await getPeerSessionMetadata(roomId);
+            const expectedPeer = peerSession?.peerUuid || 'unknown';
+            verificationReason = `Different peer detected - expected ${expectedPeer}, got ${msg.requesterUuid}`;
+            if (peerSession?.peerUuid) {
+              notifySessionMismatch(peerSession.peerUuid, msg.requesterUuid);
             }
+            logger.warn(`[Room] Session mismatch: ${verificationReason}`);
+          } else {
+            notifyPeerReconnected(msg.requesterUuid, true);
           }
 
           // Reject immediately if peer verification fails
@@ -393,10 +413,17 @@ export function useMessages(
             reason = 'No file currently selected to resume';
           } else if (msg.fileSize !== undefined && currentFile.size !== msg.fileSize) {
             reason = `File size mismatch: expected ${msg.fileSize}, got ${currentFile.size}`;
-          } else if (msg.fileHash && transfer.fileHash && msg.fileHash !== transfer.fileHash) {
-            reason = 'File hash mismatch — file may have changed';
+          } else if (!msg.fileHash) {
+            reason = 'Resume rejected: missing file hash in resume request';
           } else {
-            accepted = true;
+            const localHash = transfer.fileHash || await transfer.ensureFileHash?.(currentFile);
+            if (!localHash) {
+              reason = 'Resume rejected: unable to verify file hash';
+            } else if (msg.fileHash !== localHash) {
+              reason = 'File hash mismatch — file may have changed';
+            } else {
+              accepted = true;
+            }
           }
 
           if (accepted) {
@@ -469,16 +496,14 @@ export function useMessages(
           // Extract missing chunks list if provided
           let missingChunksList = msg.missingChunks || [];
           
-          // Notify the transfer layer to skip to the accepted chunk
-          if (resumeCallbacks?.onResumeAccepted) {
-            resumeCallbacks.onResumeAccepted({
-              transferId: msg.transferId,
-              startFromChunk: msg.startFromChunk,
-              totalChunks: msg.totalChunks,
-              missingChunks: missingChunksList,
-              senderBitmap: msg.senderBitmap,
-            });
-          }
+          // Emit resume accepted event (consumed by useResumeTransfer)
+          resumeEventBus.emit('resumeAccepted', {
+            transferId: msg.transferId,
+            startFromChunk: msg.startFromChunk,
+            totalChunks: msg.totalChunks,
+            missingChunks: missingChunksList,
+            senderBitmap: msg.senderBitmap,
+          });
           break;
         }
 
@@ -486,13 +511,11 @@ export function useMessages(
           addLog(`Resume rejected: ${msg.reason || 'file mismatch'}`, 'warning');
           logger.log('[Room] Resume rejected:', msg);
 
-          // Notify the UI to fall back to fresh transfer or re-select file
-          if (resumeCallbacks?.onResumeRejected) {
-            resumeCallbacks.onResumeRejected({
-              transferId: msg.transferId,
-              reason: msg.reason,
-            });
-          }
+          // Emit resume rejected event (consumed by useResumeTransfer)
+          resumeEventBus.emit('resumeRejected', {
+            transferId: msg.transferId,
+            reason: msg.reason,
+          });
           break;
         }
 
@@ -523,6 +546,8 @@ export function useMessages(
     setPendingFileData,
     setDownloadResultData,
     addLog,
+    sendJSON,
+    roomId,
   ]);
 
   /**
@@ -586,6 +611,7 @@ export function useMessages(
   /**
    * Send a resume request to the peer.
    * Called when entering a room with resume context.
+   * Includes session token for replay protection.
    * 
    * @param {Object} transferInfo - Resume context
    * @param {string} transferInfo.transferId - Original transfer ID
@@ -600,6 +626,11 @@ export function useMessages(
       logger.warn('[Room] Cannot send resume request — sendJSON not available');
       return;
     }
+    if (!peerSessionToken?.current) {
+      logger.warn('[Room] Cannot send resume request — peer session token not exchanged yet');
+      addLog('Resume failed: waiting for peer handshake', 'warning');
+      return;
+    }
     sendJSON({
       type: MESSAGE_TYPE.RESUME_TRANSFER,
       transferId: transferInfo.transferId,
@@ -608,13 +639,26 @@ export function useMessages(
       fileHash: transferInfo.fileHash || null,
       totalChunks: transferInfo.totalChunks,
       chunkBitmap: transferInfo.chunkBitmap || null,
+      requesterUuid: localUuid || null,
+      sessionToken: peerSessionToken.current,
     });
     addLog(`Sent resume request for: ${transferInfo.fileName}`, 'info');
-  }, [sendJSON, addLog]);
+  }, [sendJSON, addLog, localUuid, peerSessionToken]);
+
+  /**
+   * Subscribe to resume request events from useResumeTransfer.
+   * When resume hook emits 'resumeRequest', send the actual RESUME_TRANSFER message.
+   */
+  useEffect(() => {
+    const unsubscribe = resumeEventBus.on('resumeRequest', (transferInfo) => {
+      sendResumeRequest(transferInfo);
+    });
+
+    return unsubscribe;
+  }, [sendResumeRequest]);
 
   return {
     handleMessage,
     setMultiFileMode,
-    sendResumeRequest,
   };
 }

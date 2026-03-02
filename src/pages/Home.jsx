@@ -378,7 +378,7 @@ export default function Home() {
         <div className="flex flex-col lg:flex-row gap-6 lg:gap-8 items-start">
           
           {/* Security Section - Left on Large, Bottom on Small */}
-          <div className="order-2 lg:order-1 w-full lg:w-96 lg:flex-shrink-0">
+          <div className="order-2 lg:order-1 w-full lg:w-96 lg:shrink-0">
             <div className="p-6 bg-zinc-900/50 border border-zinc-800 rounded-xl">
               <h2 className="text-lg font-medium text-zinc-100 mb-4 flex items-center gap-2">
                 <svg className="w-5 h-5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">

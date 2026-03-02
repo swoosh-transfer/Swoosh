@@ -11,6 +11,9 @@ let iceCandidateQueue = [];
 let isNegotiating = false; // Track if we're in the middle of negotiation
 let isPolite = false; // For perfect negotiation pattern
 let makingOffer = false; // Track if we're creating an offer
+let recoveryOfferTimer = null;
+let recoveryOfferAttempts = 0;
+const MAX_RECOVERY_OFFER_ATTEMPTS = 3;
 
 const rtcConfig = {
   iceServers: [
@@ -77,6 +80,11 @@ export function initializePeerConnection(socket, roomId, onChannelReady, onState
   iceCandidateQueue = [];
   isNegotiating = false;
   makingOffer = false;
+  recoveryOfferAttempts = 0;
+  if (recoveryOfferTimer) {
+    clearTimeout(recoveryOfferTimer);
+    recoveryOfferTimer = null;
+  }
 
   peerConnection = new RTCPeerConnection(rtcConfig);
   channelPool = new ChannelPool(peerConnection);
@@ -95,6 +103,11 @@ export function initializePeerConnection(socket, roomId, onChannelReady, onState
     if (onStateChange) onStateChange(state);
 
     if (state === 'connected') {
+      recoveryOfferAttempts = 0;
+      if (recoveryOfferTimer) {
+        clearTimeout(recoveryOfferTimer);
+        recoveryOfferTimer = null;
+      }
       startHealthMonitoring(peerConnection, onStats);
     } 
     else if (state === 'disconnected' || state === 'failed') {
@@ -124,6 +137,38 @@ export function initializePeerConnection(socket, roomId, onChannelReady, onState
   };
 
   return peerConnection;
+}
+
+function scheduleNegotiationRecovery(socket, roomId) {
+  if (!peerConnection) return;
+  if (peerConnection.connectionState === 'connected') return;
+  if (recoveryOfferAttempts >= MAX_RECOVERY_OFFER_ATTEMPTS) return;
+
+  if (recoveryOfferTimer) {
+    clearTimeout(recoveryOfferTimer);
+  }
+
+  const delayMs = 500 * Math.pow(2, recoveryOfferAttempts);
+  recoveryOfferTimer = setTimeout(async () => {
+    recoveryOfferTimer = null;
+
+    if (!peerConnection || peerConnection.connectionState === 'connected') {
+      return;
+    }
+
+    recoveryOfferAttempts += 1;
+    logger.warn(`[P2P] Negotiation recovery attempt ${recoveryOfferAttempts}/${MAX_RECOVERY_OFFER_ATTEMPTS}`);
+
+    try {
+      await createOffer(socket, roomId);
+    } catch (error) {
+      logger.warn('[P2P] Negotiation recovery attempt failed:', error);
+    }
+
+    if (peerConnection && peerConnection.connectionState !== 'connected') {
+      scheduleNegotiationRecovery(socket, roomId);
+    }
+  }, delayMs);
 }
 
 /**
@@ -179,6 +224,7 @@ export async function handleOffer(offer, socket, roomId) {
       // If we're impolite, ignore the incoming offer
       if (!isPolite) {
         logger.log('[P2P] Ignoring offer collision (impolite peer)');
+        scheduleNegotiationRecovery(socket, roomId);
         return;
       }
       // If we're polite, rollback our offer and accept theirs
@@ -200,6 +246,7 @@ export async function handleOffer(offer, socket, roomId) {
   } catch (err) {
     logger.error("Error handling offer:", err);
     isNegotiating = false;
+    scheduleNegotiationRecovery(socket, roomId);
   }
 }
 
@@ -316,5 +363,10 @@ export function closePeerConnection() {
   iceCandidateQueue = [];
   isNegotiating = false;
   makingOffer = false;
+  recoveryOfferAttempts = 0;
+  if (recoveryOfferTimer) {
+    clearTimeout(recoveryOfferTimer);
+    recoveryOfferTimer = null;
+  }
   logger.log('[P2P] Peer connection closed and cleaned up');
 }

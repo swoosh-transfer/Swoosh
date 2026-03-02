@@ -41,6 +41,10 @@ export function useSecurity(roomId, sendJSON, addLog) {
   const tofuVerifiedRef = useRef(false);
   const pendingHandshakeChannelRef = useRef(null);
   const hasSentHandshakeRef = useRef(false);
+  
+  // Session-specific token for resume replay protection
+  const sessionToken = useRef(null);
+  const peerSessionToken = useRef(null);
 
   // Initialize room-scoped UUID synchronously, then restore from IndexedDB in background
   useEffect(() => {
@@ -75,13 +79,17 @@ export function useSecurity(roomId, sendJSON, addLog) {
   }, [roomId]);
 
   useEffect(() => {
-    if (!uuidInitialized || !myUUID.current || hasSentHandshakeRef.current) {
+    if (!uuidInitialized || !myUUID.current || hasSentHandshakeRef.current || !sessionToken.current) {
       return;
     }
 
     const channel = pendingHandshakeChannelRef.current;
     if (channel?.readyState === 'open') {
-      channel.send(JSON.stringify({ type: 'handshake', uuid: myUUID.current }));
+      channel.send(JSON.stringify({ 
+        type: 'handshake', 
+        uuid: myUUID.current,
+        sessionToken: sessionToken.current,
+      }));
       hasSentHandshakeRef.current = true;
       addLog('Sent identity handshake', 'info');
       pendingHandshakeChannelRef.current = null;
@@ -95,19 +103,28 @@ export function useSecurity(roomId, sendJSON, addLog) {
    * Called by the parent when the data channel opens — if we got here the
    * encrypted signaling round-trip succeeded, proving both sides hold the
    * shared secret.
+   * Also generates a fresh session token for resume replay protection.
    */
   const markVerified = useCallback(() => {
     if (tofuVerifiedRef.current) return; // idempotent
+    
+    // Generate fresh session token (cryptographic random)
+    const tokenArray = new Uint8Array(16);
+    crypto.getRandomValues(tokenArray);
+    sessionToken.current = Array.from(tokenArray, b => b.toString(16).padStart(2, '0')).join('');
+    
     tofuVerifiedRef.current = true;
     setTofuVerified(true);
     setVerificationStatus('verified');
     addLog('Peer verified (encrypted signaling succeeded)', 'success');
+    logger.log(`[Security] Session token generated: ${sessionToken.current.slice(0, 16)}...`);
   }, [addLog]);
 
   // ── Identity handshake (session resumption + reconnection) ────────────────
 
   /**
    * Send identity handshake to peer
+   * Includes UUID and session token for resume replay protection.
    * @param {RTCDataChannel} channel - Data channel to send through
    */
   const sendHandshake = useCallback((channel) => {
@@ -118,8 +135,12 @@ export function useSecurity(roomId, sendJSON, addLog) {
       return;
     }
     
-    if (channel.readyState === 'open' && !hasSentHandshakeRef.current) {
-      channel.send(JSON.stringify({ type: 'handshake', uuid: myUUID.current }));
+    if (channel.readyState === 'open' && !hasSentHandshakeRef.current && sessionToken.current) {
+      channel.send(JSON.stringify({ 
+        type: 'handshake', 
+        uuid: myUUID.current,
+        sessionToken: sessionToken.current,
+      }));
       hasSentHandshakeRef.current = true;
       addLog('Sent identity handshake', 'info');
       pendingHandshakeChannelRef.current = null;
@@ -128,15 +149,22 @@ export function useSecurity(roomId, sendJSON, addLog) {
 
   /**
    * Handle received identity handshake from peer.
+   * Stores peer's session token for resume request validation.
    * If the peer is recognized (same UUID for this room), query IndexedDB
    * for an interrupted transfer. This enables in-room resume: instead of
    * resetting transfer state, the Room component can trigger the resume flow.
    * 
-   * @param {Object} msg - Handshake message { type: 'handshake', uuid: string }
+   * @param {Object} msg - Handshake message { type: 'handshake', uuid: string, sessionToken: string }
    */
   const handleHandshake = useCallback(async (msg) => {
     const peerUuidShort = msg.uuid?.slice(0, 8) || 'unknown';
     addLog(`Received identity: ${peerUuidShort}...`, 'info');
+    
+    // Store peer's session token for resume validation
+    if (msg.sessionToken) {
+      peerSessionToken.current = msg.sessionToken;
+      logger.log(`[Security] Peer session token received: ${msg.sessionToken.slice(0, 16)}...`);
+    }
 
     let returning = false;
     let interrupted = null;
@@ -184,6 +212,8 @@ export function useSecurity(roomId, sendJSON, addLog) {
     tofuVerifiedRef.current = false;
     hasSentHandshakeRef.current = false;
     pendingHandshakeChannelRef.current = null;
+    sessionToken.current = null;
+    peerSessionToken.current = null;
     setTofuVerified(false);
     setIdentityVerified(false);
     setIsReturningPeer(false);
@@ -205,6 +235,10 @@ export function useSecurity(roomId, sendJSON, addLog) {
     myUUID,
     sendHandshake,
     handleHandshake,
+
+    // Session tokens (for resume replay protection)
+    sessionToken,
+    peerSessionToken,
 
     // Encrypted-signaling verification
     markVerified,

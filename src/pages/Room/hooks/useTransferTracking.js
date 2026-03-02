@@ -42,6 +42,10 @@ const TRACKED_STATUS = {
   CANCELLED: 'cancelled',
 };
 
+// Bitmap flush policy
+const BITMAP_FLUSH_CHUNK_THRESHOLD = 100;
+const BITMAP_FLUSH_DEBOUNCE_MS = 5000;
+
 /**
  * Hook for tracking transfer progress in IndexedDB
  * 
@@ -248,7 +252,8 @@ export function useTransferTracking({
   /**
    * Track a chunk being sent or received (metadata only — no binary in IDB).
    * Updates in-memory bitmap and queues throttled flush to IndexedDB.
-   * Flushes every 25 chunks or every 2 seconds, whichever comes first.
+   * Flushes every BITMAP_FLUSH_CHUNK_THRESHOLD chunks or every
+   * BITMAP_FLUSH_DEBOUNCE_MS milliseconds, whichever comes first.
    * 
    * @param {string} transferId - Transfer ID (per-file ID for multi-file)
    * @param {number} chunkIndex - Chunk index within the file
@@ -272,15 +277,22 @@ export function useTransferTracking({
       return; // No bitmap initialized
     }
 
-    // Flush every 25 chunks
-    if (chunksSinceFlushRef.current >= 25) {
+    // Flush by chunk threshold (throughput-driven)
+    if (chunksSinceFlushRef.current >= BITMAP_FLUSH_CHUNK_THRESHOLD) {
+      if (bitmapFlushTimerRef.current) {
+        clearTimeout(bitmapFlushTimerRef.current);
+        bitmapFlushTimerRef.current = null;
+      }
       flushBitmap();
-    } else if (!bitmapFlushTimerRef.current) {
-      // Or schedule a flush in 2 seconds
+      return;
+    }
+
+    // Flush by debounce window (time-driven)
+    if (!bitmapFlushTimerRef.current) {
       bitmapFlushTimerRef.current = setTimeout(() => {
         bitmapFlushTimerRef.current = null;
         flushBitmap();
-      }, 2000);
+      }, BITMAP_FLUSH_DEBOUNCE_MS);
     }
   }, [flushBitmap]);
 

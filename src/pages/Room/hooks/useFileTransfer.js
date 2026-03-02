@@ -12,6 +12,7 @@ import { ChunkingEngine } from '../../../transfer/sending/ChunkingEngine.js';
 import { AssemblyEngine } from '../../../transfer/receiving/AssemblyEngine.js';
 import { getSocket } from '../../../utils/signaling.js';
 import { cleanupTransferData } from '../../../infrastructure/database/index.js';
+import { getTransfer } from '../../../infrastructure/database/transfers.repository.js';
 import { resumableTransferManager } from '../../../transfer/resumption/ResumableTransferManager.js';
 import { progressTracker } from '../../../transfer/shared/ProgressTracker.js';
 import { useTransferStore } from '../../../stores/transferStore.js';
@@ -69,6 +70,11 @@ export function useFileTransfer(
   const receiverLastChunkRef = useRef(-1); // Track receiver's last chunk when paused (sender side)
   const progressUnsubRef = useRef(null); // ProgressTracker subscription cleanup
   const resumeFromChunkRef = useRef(0); // Resume chunk offset when resuming from IndexedDB
+  const fileHashRef = useRef(null); // SHA-256 fingerprint for resume verification
+  const fileHashKeyRef = useRef(null); // Cache key for current file hash
+  const fileHashPromiseRef = useRef(null); // In-flight hash calculation
+  const chunkAuthKeyRef = useRef(null); // HMAC key for chunk authentication
+  const chunkAuthKeyPromiseRef = useRef(null); // In-flight key derivation
 
   // Cleanup progress subscription on unmount
   useEffect(() => {
@@ -79,6 +85,143 @@ export function useFileTransfer(
       }
     };
   }, []);
+
+  /**
+   * Compute a deterministic file fingerprint used by resume protocol.
+   * Uses the first 1MB SHA-256 plus file size/lastModified metadata.
+   *
+   * @param {File} file
+   * @returns {Promise<string|null>}
+   */
+  const ensureFileHash = useCallback(async (file = selectedFile) => {
+    if (!file) return null;
+
+    const cacheKey = `${file.name}:${file.size}:${file.lastModified ?? 0}`;
+    if (fileHashRef.current && fileHashKeyRef.current === cacheKey) {
+      return fileHashRef.current;
+    }
+
+    if (fileHashPromiseRef.current && fileHashKeyRef.current === cacheKey) {
+      return fileHashPromiseRef.current;
+    }
+
+    fileHashKeyRef.current = cacheKey;
+    fileHashPromiseRef.current = (async () => {
+      try {
+        const sampleSize = Math.min(file.size, 1024 * 1024);
+        const sample = await file.slice(0, sampleSize).arrayBuffer();
+        const digest = await crypto.subtle.digest('SHA-256', sample);
+        const digestHex = Array.from(new Uint8Array(digest))
+          .map((byte) => byte.toString(16).padStart(2, '0'))
+          .join('');
+
+        const fingerprint = `${digestHex}:${file.size}:${file.lastModified ?? 0}`;
+        fileHashRef.current = fingerprint;
+        return fingerprint;
+      } catch (error) {
+        logger.warn('[FileTransfer] Failed to compute file hash:', error);
+        return null;
+      } finally {
+        fileHashPromiseRef.current = null;
+      }
+    })();
+
+    return fileHashPromiseRef.current;
+  }, [selectedFile]);
+
+  const bytesToHex = useCallback((bytes) => {
+    return Array.from(bytes)
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('');
+  }, []);
+
+  const ensureChunkAuthKey = useCallback(async () => {
+    if (chunkAuthKeyRef.current) {
+      return chunkAuthKeyRef.current;
+    }
+
+    if (chunkAuthKeyPromiseRef.current) {
+      return chunkAuthKeyPromiseRef.current;
+    }
+
+    const sharedSecret = securityPayload?.secret;
+    if (!sharedSecret) {
+      return null;
+    }
+
+    chunkAuthKeyPromiseRef.current = (async () => {
+      try {
+        const secretBytes = new Uint8Array(
+          atob(sharedSecret).split('').map((char) => char.charCodeAt(0))
+        );
+
+        const key = await crypto.subtle.importKey(
+          'raw',
+          secretBytes,
+          { name: 'HMAC', hash: 'SHA-256' },
+          false,
+          ['sign', 'verify']
+        );
+
+        chunkAuthKeyRef.current = key;
+        return key;
+      } catch (error) {
+        logger.warn('[FileTransfer] Failed to derive chunk auth key:', error);
+        return null;
+      } finally {
+        chunkAuthKeyPromiseRef.current = null;
+      }
+    })();
+
+    return chunkAuthKeyPromiseRef.current;
+  }, [securityPayload]);
+
+  const createChunkAuthTag = useCallback(async (metadata, binaryData) => {
+    const key = await ensureChunkAuthKey();
+    if (!key || !binaryData) {
+      return null;
+    }
+
+    try {
+      const descriptor = `${metadata.transferId ?? transferIdRef.current}:${metadata.chunkIndex}:${metadata.size}`;
+      const descriptorBytes = new TextEncoder().encode(descriptor);
+      const payload = new Uint8Array(descriptorBytes.length + binaryData.length);
+      payload.set(descriptorBytes, 0);
+      payload.set(binaryData, descriptorBytes.length);
+
+      const signature = await crypto.subtle.sign('HMAC', key, payload);
+      return bytesToHex(new Uint8Array(signature));
+    } catch (error) {
+      logger.warn('[FileTransfer] Failed to create chunk auth tag:', error);
+      return null;
+    }
+  }, [ensureChunkAuthKey, bytesToHex]);
+
+  const verifyChunkAuthTag = useCallback(async (metadata, data) => {
+    const key = await ensureChunkAuthKey();
+    if (!key) {
+      return true;
+    }
+
+    if (!metadata?.authTag) {
+      return false;
+    }
+
+    try {
+      const binaryData = data instanceof Uint8Array ? data : new Uint8Array(data);
+      const descriptor = `${metadata.transferId ?? transferIdRef.current}:${metadata.chunkIndex}:${metadata.size}`;
+      const descriptorBytes = new TextEncoder().encode(descriptor);
+      const payload = new Uint8Array(descriptorBytes.length + binaryData.length);
+      payload.set(descriptorBytes, 0);
+      payload.set(binaryData, descriptorBytes.length);
+
+      const expectedHex = bytesToHex(new Uint8Array(await crypto.subtle.sign('HMAC', key, payload)));
+      return expectedHex === metadata.authTag;
+    } catch (error) {
+      logger.warn('[FileTransfer] Failed to verify chunk auth tag:', error);
+      return false;
+    }
+  }, [ensureChunkAuthKey, bytesToHex]);
 
   /**
    * Start transfer process (send file metadata)
@@ -92,6 +235,10 @@ export function useFileTransfer(
     const sessionId = 'session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
     transferIdRef.current = transferId;
     sessionIdRef.current = sessionId;
+
+    // Precompute file hash in background for secure resume validation.
+    // Sending should not block on this calculation.
+    ensureFileHash(selectedFile).catch(() => {});
 
     // Emit analytics event (skip if resuming to avoid duplicate analytics)
     const socket = getSocket();
@@ -125,12 +272,13 @@ export function useFileTransfer(
       size: selectedFile.size,
       mimeType: selectedFile.type,
       totalChunks: Math.ceil(selectedFile.size / STORAGE_CHUNK_SIZE),
+      fileHash: fileHashRef.current || null,
     });
 
     addLog('Waiting for receiver...', 'info');
 
     return transferId;
-  }, [selectedFile, tofuVerified, roomId, sendJSON, addLog, initiateUpload]);
+  }, [selectedFile, tofuVerified, roomId, sendJSON, addLog, initiateUpload, ensureFileHash]);
 
   /**
    * Initialize resume for a paused transfer
@@ -146,6 +294,11 @@ export function useFileTransfer(
     transferIdRef.current = transferId;
     setTransferState('preparing');
     addLog(`Resuming transfer: ${transferId}`, 'info');
+
+    // Ensure sender has a file hash ready before resume validation messages.
+    if (selectedFile) {
+      ensureFileHash(selectedFile).catch(() => {});
+    }
   }, [addLog]);
 
   /**
@@ -160,6 +313,9 @@ export function useFileTransfer(
 
     setTransferState('sending');
     startTimeRef.current = Date.now();
+
+    // Ensure hash is available during active transfer for resume validation.
+    await ensureFileHash(selectedFile);
 
     // Determine resume chunk: use parameter, or ref, or default to 0
     const resumeFromChunk = startFromChunk ?? resumeFromChunkRef.current ?? 0;
@@ -190,8 +346,10 @@ export function useFileTransfer(
           // Wait for buffer drain (backpressure)
           await waitForDrain();
 
+          const authTag = await createChunkAuthTag(metadata, binaryData);
+
           // Send chunk metadata
-          sendJSON({ type: 'chunk-metadata', ...metadata });
+          sendJSON({ type: 'chunk-metadata', ...metadata, authTag });
 
           // Wait again then send binary
           await waitForDrain();
@@ -258,7 +416,7 @@ export function useFileTransfer(
         addLog('Analytics: Transfer failed', 'error');
       }
     }
-  }, [selectedFile, tofuVerified, securityPayload, roomId, sendJSON, sendBinary, waitForDrain, addLog]);
+  }, [selectedFile, tofuVerified, securityPayload, roomId, sendJSON, sendBinary, waitForDrain, addLog, ensureFileHash, createChunkAuthTag]);
 
   /**
    * Handle retransmission request from receiver
@@ -279,7 +437,8 @@ export function useFileTransfer(
         selectedFile,
         async ({ metadata, binaryData }) => {
           await waitForDrain();
-          sendJSON({ type: 'chunk-metadata', ...metadata });
+          const authTag = await createChunkAuthTag(metadata, binaryData);
+          sendJSON({ type: 'chunk-metadata', ...metadata, authTag });
           await waitForDrain();
           
           const buffer = binaryData.buffer.slice(
@@ -299,7 +458,7 @@ export function useFileTransfer(
     } catch (err) {
       addLog(`Retransmission failed: ${err.message}`, 'error');
     }
-  }, [selectedFile, isHost, sendJSON, sendBinary, waitForDrain, addLog]);
+  }, [selectedFile, isHost, sendJSON, sendBinary, waitForDrain, addLog, createChunkAuthTag]);
 
   /**
    * Initialize file receive (setup FileReceiver)
@@ -402,6 +561,12 @@ export function useFileTransfer(
    */
   const receiveChunk = useCallback(async (metadata, data) => {
     try {
+      const authValid = await verifyChunkAuthTag(metadata, data);
+      if (!authValid) {
+        addLog(`Chunk ${metadata.chunkIndex} authentication failed`, 'error');
+        return;
+      }
+
       const result = await assemblyEngineRef.current.receiveChunk(
         transferIdRef.current,
         {
@@ -425,7 +590,7 @@ export function useFileTransfer(
     } catch (err) {
       addLog(`Chunk ${metadata.chunkIndex} error: ${err.message}`, 'error');
     }
-  }, [addLog, trackChunkProgress]);
+  }, [addLog, trackChunkProgress, verifyChunkAuthTag]);
 
   /**
    * Complete transfer (finalize file)
@@ -794,6 +959,8 @@ export function useFileTransfer(
     isPaused,
     pausedBy,
     transferId: transferIdRef.current,
+    currentFile: selectedFile,
+    fileHash: fileHashRef.current,
     
     // Sending
     startTransfer,
@@ -816,6 +983,8 @@ export function useFileTransfer(
     // Resume
     setResumeFromChunk,
     applyReceiverBitmap,
+    ensureFileHash,
+    getTransferRecord: getTransfer,
     
     // Remote signals
     handleRemotePause,

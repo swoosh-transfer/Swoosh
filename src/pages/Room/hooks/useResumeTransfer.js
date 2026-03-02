@@ -13,27 +13,29 @@
  * Responsibilities:
  * - Load resume context from roomStore on mount / when set
  * - Initiate resume handshake when peer connects
- *   - Send RESUME_TRANSFER proposal with saved bitmap
- * - Handle RESUME_ACCEPTED / RESUME_REJECTED callbacks
+ *   - Emit resume request event (consumed by useMessages)
+ * - Handle RESUME_ACCEPTED / RESUME_REJECTED events from useMessages
  * - Fall back to fresh transfer if resume fails
  * - Clear resume context after handshake completes
+ * 
+ * Uses event bus pattern to eliminate circular dependency with useMessages.
  */
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useRoomStore } from '../../../stores/roomStore.js';
 import logger from '../../../utils/logger.js';
+import { resumeEventBus } from './resumeEventBus.js';
 
 /**
  * @param {Object} params
  * @param {boolean} params.dataChannelReady - Whether the data channel is open
- * @param {Function} params.sendResumeRequest - From useMessages — sends RESUME_TRANSFER
  * @param {Function} params.addLog - UI log helper
  * @returns {Object} Resume transfer state and handlers
  */
 export function useResumeTransfer({
   dataChannelReady,
-  sendResumeRequest,
   addLog,
 }) {
+  const RESUME_TIMEOUT_MS = 15000;
   const { resumeContext, clearResumeContext } = useRoomStore();
   const hasInitiatedRef = useRef(false);
   const timeoutRefRef = useRef(null);
@@ -51,21 +53,21 @@ export function useResumeTransfer({
   }, [resumeContext]);
 
   /**
-   * 5-second timeout for resume handshake proposal.
-   * If peer doesn't respond (RESUME_ACCEPTED or RESUME_REJECTED) within 5 seconds,
+   * Timeout for resume handshake proposal.
+   * If peer doesn't respond (RESUME_ACCEPTED or RESUME_REJECTED) in time,
    * auto-reject and start fresh transfer instead.
    */
   useEffect(() => {
     if (resumeState !== 'proposing') return;
 
-    // Set 5-second timeout
+    // Set resume timeout
     timeoutRefRef.current = setTimeout(() => {
-      logger.warn('[ResumeTransfer] Resume handshake timeout (5s) — falling back to fresh transfer');
+      logger.warn(`[ResumeTransfer] Resume handshake timeout (${RESUME_TIMEOUT_MS}ms) — falling back to fresh transfer`);
       setResumeState('timeout');
-      addLog('Resume timeout. Starting fresh transfer instead...', 'warning');
+      addLog('Resume negotiation timed out. Starting a fresh transfer instead...', 'warning');
       // Clear resume context to trigger fresh start flow
       clearResumeContext();
-    }, 5000);
+    }, RESUME_TIMEOUT_MS);
 
     return () => {
       if (timeoutRefRef.current) {
@@ -73,38 +75,27 @@ export function useResumeTransfer({
         timeoutRefRef.current = null;
       }
     };
-  }, [resumeState, addLog, clearResumeContext]);
+  }, [resumeState, addLog, clearResumeContext, RESUME_TIMEOUT_MS]);
 
   /**
    * Initiate resume handshake when data channel opens and we have resume context.
    * Works for both cross-session (Home→Room) and in-room reconnection.
+   * Emits 'resumeRequest' event consumed by useMessages.
    */
   useEffect(() => {
     if (!dataChannelReady || !resumeContext || hasInitiatedRef.current) return;
-    if (!sendResumeRequest) return;
 
     hasInitiatedRef.current = true;
 
     const label = resumeContext.inRoom ? 'In-room' : 'Cross-session';
 
-    if (resumeContext.direction === 'sending') {
-      // Sender side: propose resume with saved bitmap
+    if (resumeContext.direction === 'sending' || resumeContext.direction === 'receiving') {
       setResumeState('proposing');
-      addLog(`${label} resume: proposing to peer...`, 'info');
-      sendResumeRequest({
-        transferId: resumeContext.transferId,
-        fileName: resumeContext.fileName,
-        fileSize: resumeContext.fileSize,
-        fileHash: resumeContext.fileHash,
-        totalChunks: resumeContext.totalChunks,
-        chunkBitmap: resumeContext.chunkBitmap,
-        inRoom: !!resumeContext.inRoom,
-      });
-    } else if (resumeContext.direction === 'receiving') {
-      // Receiver side: propose resume (receiver proposes, sender validates)
-      setResumeState('proposing');
-      addLog(`${label} resume: requesting from peer...`, 'info');
-      sendResumeRequest({
+      const action = resumeContext.direction === 'sending' ? 'proposing to peer' : 'requesting from peer';
+      addLog(`${label} resume: ${action}...`, 'info');
+      
+      // Emit resume request event (consumed by useMessages)
+      resumeEventBus.emit('resumeRequest', {
         transferId: resumeContext.transferId,
         fileName: resumeContext.fileName,
         fileSize: resumeContext.fileSize,
@@ -114,39 +105,42 @@ export function useResumeTransfer({
         inRoom: !!resumeContext.inRoom,
       });
     }
-  }, [dataChannelReady, resumeContext, sendResumeRequest, addLog]);
+  }, [dataChannelReady, resumeContext, addLog]);
 
   /**
-   * Callback when resume is accepted by the peer.
-   * Called from useMessages RESUME_ACCEPTED handler.
+   * Subscribe to resume response events from useMessages.
+   * Handles both RESUME_ACCEPTED and RESUME_REJECTED.
    */
-  const onResumeAccepted = useCallback(({ transferId, startFromChunk, totalChunks }) => {
-    logger.log(`[ResumeTransfer] Resume accepted — start from chunk ${startFromChunk}`);
-    // Clear timeout since we got a response
-    if (timeoutRefRef.current) {
-      clearTimeout(timeoutRefRef.current);
-      timeoutRefRef.current = null;
-    }
-    setResumeState('accepted');
-    setResumeInfo({ transferId, startFromChunk, totalChunks });
-    addLog(`Resume accepted! Continuing from chunk ${startFromChunk}/${totalChunks}`, 'success');
-  }, [addLog]);
+  useEffect(() => {
+    const unsubAccepted = resumeEventBus.on('resumeAccepted', ({ transferId, startFromChunk, totalChunks }) => {
+      logger.log(`[ResumeTransfer] Resume accepted — start from chunk ${startFromChunk}`);
+      // Clear timeout since we got a response
+      if (timeoutRefRef.current) {
+        clearTimeout(timeoutRefRef.current);
+        timeoutRefRef.current = null;
+      }
+      setResumeState('accepted');
+      setResumeInfo({ transferId, startFromChunk, totalChunks });
+      addLog(`Resume accepted! Continuing from chunk ${startFromChunk}/${totalChunks}`, 'success');
+    });
 
-  /**
-   * Callback when resume is rejected by the peer.
-   * Called from useMessages RESUME_REJECTED handler.
-   */
-  const onResumeRejected = useCallback(({ transferId, reason }) => {
-    logger.log(`[ResumeTransfer] Resume rejected: ${reason}`);
-    // Clear timeout since we got a response
-    if (timeoutRefRef.current) {
-      clearTimeout(timeoutRefRef.current);
-      timeoutRefRef.current = null;
-    }
-    setResumeState('rejected');
-    addLog(`Resume rejected: ${reason}. Starting fresh transfer instead.`, 'warning');
-    // Clear resume context so room falls back to normal flow (triggers fresh start)
-    clearResumeContext();
+    const unsubRejected = resumeEventBus.on('resumeRejected', ({ transferId, reason }) => {
+      logger.log(`[ResumeTransfer] Resume rejected: ${reason}`);
+      // Clear timeout since we got a response
+      if (timeoutRefRef.current) {
+        clearTimeout(timeoutRefRef.current);
+        timeoutRefRef.current = null;
+      }
+      setResumeState('rejected');
+      addLog(`Resume rejected: ${reason}. Starting fresh transfer instead.`, 'warning');
+      // Clear resume context so room falls back to normal flow (triggers fresh start)
+      clearResumeContext();
+    });
+
+    return () => {
+      unsubAccepted();
+      unsubRejected();
+    };
   }, [addLog, clearResumeContext]);
 
   /**
@@ -168,8 +162,6 @@ export function useResumeTransfer({
     resumeState,
     resumeInfo,
     isResuming: resumeState === 'proposing' || resumeState === 'accepted',
-    onResumeAccepted,
-    onResumeRejected,
     clearResume,
   };
 }

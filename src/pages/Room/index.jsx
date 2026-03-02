@@ -126,11 +126,8 @@ export default function Room() {
     multiTransfer.multiTransferState === 'completed' ||
     multiTransfer.multiTransferState === 'error';
 
-  // Resume callbacks ref — breaks circular dependency between useMessages and useResumeTransfer
-  const resumeCallbacksRef = useRef({ onResumeAccepted: null, onResumeRejected: null });
-
   // Message Protocol (routes messages to appropriate handlers)
-  const { setMultiFileMode, sendResumeRequest } = useMessages(
+  const { setMultiFileMode } = useMessages(
     dataChannelRef,
     dataChannelReady,
     isHost,
@@ -140,19 +137,17 @@ export default function Room() {
     uiState,
     addLog,
     sendJSON,
-    resumeCallbacksRef.current
+    roomId,
+    security.myUUID?.current,
+    security.sessionToken,
+    security.peerSessionToken
   );
 
   // Resume Transfer (handles resume handshake when entering with resume context)
   const resumeFlow = useResumeTransfer({
     dataChannelReady,
-    sendResumeRequest,
     addLog,
   });
-
-  // Wire resume callbacks after both hooks are initialized
-  resumeCallbacksRef.current.onResumeAccepted = resumeFlow.onResumeAccepted;
-  resumeCallbacksRef.current.onResumeRejected = resumeFlow.onResumeRejected;
 
   // When resume is accepted, store the startFromChunk for sendFileChunks
   useEffect(() => {
@@ -407,7 +402,7 @@ export default function Room() {
             // setupFileWriter with resume=true will prompt user to select the file again
             // (browser security requirement for File System Access API)
             try {
-              addLog('Please select the file to resume receiving...', 'info');
+              addLog('Please select the file again to resume receiving (browser security requirement).', 'info');
               await transfer.setupFileWriter(resumeCtx.fileName, () => {
                 addLog('File selected — resuming reception', 'success');
               });
@@ -623,6 +618,15 @@ export default function Room() {
               Leave Room
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Resume Negotiation Banner */}
+      {resumeFlow.resumeState === 'proposing' && (
+        <div className="fixed top-0 left-0 right-0 z-40 bg-blue-900/95 border-b border-blue-700 px-4 py-3 text-center">
+          <span className="text-blue-100 text-sm font-medium">
+            ⏳ Negotiating transfer resume with peer...
+          </span>
         </div>
       )}
 
