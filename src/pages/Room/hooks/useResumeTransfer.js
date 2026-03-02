@@ -24,6 +24,10 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import { useRoomStore } from '../../../stores/roomStore.js';
 import logger from '../../../utils/logger.js';
 import { resumeEventBus } from './resumeEventBus.js';
+import {
+  RESUME_HANDSHAKE_TIMEOUT,
+  RESUME_REQUEST_RETRY_DELAY,
+} from '../../../constants/timing.constants.js';
 
 /**
  * @param {Object} params
@@ -35,10 +39,11 @@ export function useResumeTransfer({
   dataChannelReady,
   addLog,
 }) {
-  const RESUME_TIMEOUT_MS = 15000;
   const { resumeContext, clearResumeContext } = useRoomStore();
   const hasInitiatedRef = useRef(false);
   const timeoutRefRef = useRef(null);
+  const retryTimerRef = useRef(null);
+  const attemptsRef = useRef(0);
   const [resumeState, setResumeState] = useState('idle'); // idle | proposing | accepted | rejected | failed | timeout
   const [resumeInfo, setResumeInfo] = useState(null); // { startFromChunk, ... }
 
@@ -62,12 +67,12 @@ export function useResumeTransfer({
 
     // Set resume timeout
     timeoutRefRef.current = setTimeout(() => {
-      logger.warn(`[ResumeTransfer] Resume handshake timeout (${RESUME_TIMEOUT_MS}ms) — falling back to fresh transfer`);
+      logger.warn(`[ResumeTransfer] Resume handshake timeout (${RESUME_HANDSHAKE_TIMEOUT}ms) — falling back to fresh transfer`);
       setResumeState('timeout');
       addLog('Resume negotiation timed out. Starting a fresh transfer instead...', 'warning');
       // Clear resume context to trigger fresh start flow
       clearResumeContext();
-    }, RESUME_TIMEOUT_MS);
+    }, RESUME_HANDSHAKE_TIMEOUT);
 
     return () => {
       if (timeoutRefRef.current) {
@@ -75,7 +80,38 @@ export function useResumeTransfer({
         timeoutRefRef.current = null;
       }
     };
-  }, [resumeState, addLog, clearResumeContext, RESUME_TIMEOUT_MS]);
+  }, [resumeState, addLog, clearResumeContext]);
+
+  /**
+   * Re-send resume request while waiting for session token exchange on reconnect.
+   */
+  useEffect(() => {
+    if (resumeState !== 'proposing' || !resumeContext) return;
+
+    const emitResumeRequest = () => {
+      attemptsRef.current += 1;
+      resumeEventBus.emit('resumeRequest', {
+        transferId: resumeContext.transferId,
+        fileName: resumeContext.fileName,
+        fileSize: resumeContext.fileSize,
+        fileHash: resumeContext.fileHash,
+        totalChunks: resumeContext.totalChunks,
+        chunkBitmap: resumeContext.chunkBitmap,
+        inRoom: !!resumeContext.inRoom,
+        attempt: attemptsRef.current,
+      });
+    };
+
+    emitResumeRequest();
+    retryTimerRef.current = setInterval(emitResumeRequest, RESUME_REQUEST_RETRY_DELAY);
+
+    return () => {
+      if (retryTimerRef.current) {
+        clearInterval(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+    };
+  }, [resumeState, resumeContext]);
 
   /**
    * Initiate resume handshake when data channel opens and we have resume context.
@@ -90,20 +126,10 @@ export function useResumeTransfer({
     const label = resumeContext.inRoom ? 'In-room' : 'Cross-session';
 
     if (resumeContext.direction === 'sending' || resumeContext.direction === 'receiving') {
+      attemptsRef.current = 0;
       setResumeState('proposing');
       const action = resumeContext.direction === 'sending' ? 'proposing to peer' : 'requesting from peer';
       addLog(`${label} resume: ${action}...`, 'info');
-      
-      // Emit resume request event (consumed by useMessages)
-      resumeEventBus.emit('resumeRequest', {
-        transferId: resumeContext.transferId,
-        fileName: resumeContext.fileName,
-        fileSize: resumeContext.fileSize,
-        fileHash: resumeContext.fileHash,
-        totalChunks: resumeContext.totalChunks,
-        chunkBitmap: resumeContext.chunkBitmap,
-        inRoom: !!resumeContext.inRoom,
-      });
     }
   }, [dataChannelReady, resumeContext, addLog]);
 
@@ -119,6 +145,10 @@ export function useResumeTransfer({
         clearTimeout(timeoutRefRef.current);
         timeoutRefRef.current = null;
       }
+      if (retryTimerRef.current) {
+        clearInterval(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
       setResumeState('accepted');
       setResumeInfo({ transferId, startFromChunk, totalChunks });
       addLog(`Resume accepted! Continuing from chunk ${startFromChunk}/${totalChunks}`, 'success');
@@ -130,6 +160,10 @@ export function useResumeTransfer({
       if (timeoutRefRef.current) {
         clearTimeout(timeoutRefRef.current);
         timeoutRefRef.current = null;
+      }
+      if (retryTimerRef.current) {
+        clearInterval(retryTimerRef.current);
+        retryTimerRef.current = null;
       }
       setResumeState('rejected');
       addLog(`Resume rejected: ${reason}. Starting fresh transfer instead.`, 'warning');
@@ -151,8 +185,13 @@ export function useResumeTransfer({
       clearTimeout(timeoutRefRef.current);
       timeoutRefRef.current = null;
     }
+    if (retryTimerRef.current) {
+      clearInterval(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
     setResumeState('idle');
     setResumeInfo(null);
+    attemptsRef.current = 0;
     hasInitiatedRef.current = false;
     clearResumeContext();
   }, [clearResumeContext]);

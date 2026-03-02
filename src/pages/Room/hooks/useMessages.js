@@ -109,11 +109,58 @@ export function useMessages(
   /** Message processing serialization */
   const messageQueueRef = useRef([]);
   const isProcessingRef = useRef(false);
+  const pendingResumeRequestRef = useRef(null);
+  const resumeWaitLoggedRef = useRef(false);
   
   /** Sender-side chunk tracking: transferId → bitmap of chunks receiver has acknowledged */
   const senderChunkBitmapsRef = useRef(new Map());
   const lastSenderFlushRef = useRef(new Map()); // transferId → last chunk count when flushed
   const SENDER_BITMAP_FLUSH_INTERVAL = 50; // Flush sender bitmap every 50 ACKs
+
+  /**
+   * Dispatch a resume request immediately, or queue it until peer handshake/session token exists.
+   * @param {Object} transferInfo
+   * @param {{ fromQueue?: boolean }} [options]
+   * @returns {boolean}
+   */
+  const dispatchResumeRequest = useCallback((transferInfo, options = {}) => {
+    const { fromQueue = false } = options;
+
+    if (!sendJSON) {
+      logger.warn('[Room] Cannot send resume request — sendJSON not available');
+      return false;
+    }
+
+    if (!peerSessionToken?.current) {
+      pendingResumeRequestRef.current = transferInfo;
+      if (!resumeWaitLoggedRef.current) {
+        addLog('Resume waiting for peer handshake...', 'warning');
+        resumeWaitLoggedRef.current = true;
+      }
+      return false;
+    }
+
+    sendJSON({
+      type: MESSAGE_TYPE.RESUME_TRANSFER,
+      transferId: transferInfo.transferId,
+      fileName: transferInfo.fileName,
+      fileSize: transferInfo.fileSize,
+      fileHash: transferInfo.fileHash || null,
+      totalChunks: transferInfo.totalChunks,
+      chunkBitmap: transferInfo.chunkBitmap || null,
+      requesterUuid: localUuid || null,
+      sessionToken: peerSessionToken.current,
+    });
+
+    pendingResumeRequestRef.current = null;
+    if (resumeWaitLoggedRef.current || fromQueue) {
+      addLog('Resume request sent after peer handshake', 'info');
+    } else {
+      addLog(`Sent resume request for: ${transferInfo.fileName}`, 'info');
+    }
+    resumeWaitLoggedRef.current = false;
+    return true;
+  }, [sendJSON, addLog, localUuid, peerSessionToken]);
 
   /**
    * Mark that we're in multi-file transfer mode (called by sender before sending manifest)
@@ -136,9 +183,8 @@ export function useMessages(
       const meta = queue?.length > 0 ? queue.shift() : null;
       
       if (meta) {
-        // Metadata found — process immediately
-        const fileIndex = meta.fileIndex;
-        await handleMultiBinaryChunk(data, fileIndex);
+        // Metadata found — pass it directly to avoid cross-channel mismatch
+        await handleMultiBinaryChunk(data, meta.fileIndex, meta);
       } else {
         // No metadata yet — this should rarely happen due to message serialization,
         // but queue the binary just in case of out-of-order network delivery
@@ -182,6 +228,10 @@ export function useMessages(
       switch (msg.type) {
         case 'handshake':
           await handleHandshake(msg);
+          if (pendingResumeRequestRef.current && peerSessionToken?.current) {
+            const pendingRequest = pendingResumeRequestRef.current;
+            dispatchResumeRequest(pendingRequest, { fromQueue: true });
+          }
           break;
 
         // ─── Multi-file messages ──────────────────────────────
@@ -548,6 +598,8 @@ export function useMessages(
     addLog,
     sendJSON,
     roomId,
+    peerSessionToken,
+    dispatchResumeRequest,
   ]);
 
   /**
@@ -622,28 +674,8 @@ export function useMessages(
    * @param {string} [transferInfo.chunkBitmap] - Base64 bitmap of completed chunks
    */
   const sendResumeRequest = useCallback((transferInfo) => {
-    if (!sendJSON) {
-      logger.warn('[Room] Cannot send resume request — sendJSON not available');
-      return;
-    }
-    if (!peerSessionToken?.current) {
-      logger.warn('[Room] Cannot send resume request — peer session token not exchanged yet');
-      addLog('Resume failed: waiting for peer handshake', 'warning');
-      return;
-    }
-    sendJSON({
-      type: MESSAGE_TYPE.RESUME_TRANSFER,
-      transferId: transferInfo.transferId,
-      fileName: transferInfo.fileName,
-      fileSize: transferInfo.fileSize,
-      fileHash: transferInfo.fileHash || null,
-      totalChunks: transferInfo.totalChunks,
-      chunkBitmap: transferInfo.chunkBitmap || null,
-      requesterUuid: localUuid || null,
-      sessionToken: peerSessionToken.current,
-    });
-    addLog(`Sent resume request for: ${transferInfo.fileName}`, 'info');
-  }, [sendJSON, addLog, localUuid, peerSessionToken]);
+    dispatchResumeRequest(transferInfo);
+  }, [dispatchResumeRequest]);
 
   /**
    * Subscribe to resume request events from useResumeTransfer.

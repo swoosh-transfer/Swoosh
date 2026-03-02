@@ -15,6 +15,7 @@ import {
   CHANNEL_BUFFER_LOW_WATERMARK,
   CHANNEL_BUFFER_HIGH_WATERMARK,
   MAX_CHANNELS,
+  getTransferReliabilityProfile,
 } from '../../constants/transfer.constants.js';
 import logger from '../../utils/logger.js';
 
@@ -32,6 +33,9 @@ export class ChannelPool {
 
     /** Round-robin pointer */
     this._rrIndex = 0;
+
+    this._profile = getTransferReliabilityProfile();
+    this._channelBufferLowWatermark = this._profile.channelBufferLowWatermark || CHANNEL_BUFFER_LOW_WATERMARK;
   }
 
   // ─── Channel lifecycle ────────────────────────────────────────────
@@ -175,12 +179,12 @@ export class ChannelPool {
   waitForDrain(channelIndex) {
     const ch = this._channels.get(channelIndex);
     if (!ch) return Promise.resolve();
-    if (ch.bufferedAmount <= CHANNEL_BUFFER_LOW_WATERMARK) return Promise.resolve();
+    if (ch.bufferedAmount <= this._channelBufferLowWatermark) return Promise.resolve();
 
     return new Promise((resolve) => {
       // Use bufferedamountlow event if supported
       if (typeof ch.bufferedAmountLowThreshold === 'number') {
-        ch.bufferedAmountLowThreshold = CHANNEL_BUFFER_LOW_WATERMARK;
+        ch.bufferedAmountLowThreshold = this._channelBufferLowWatermark;
         const handler = () => {
           ch.removeEventListener('bufferedamountlow', handler);
           resolve();
@@ -189,7 +193,7 @@ export class ChannelPool {
       } else {
         // Poll fallback
         const poll = setInterval(() => {
-          if (!ch || ch.readyState !== 'open' || ch.bufferedAmount <= CHANNEL_BUFFER_LOW_WATERMARK) {
+          if (!ch || ch.readyState !== 'open' || ch.bufferedAmount <= this._channelBufferLowWatermark) {
             clearInterval(poll);
             resolve();
           }

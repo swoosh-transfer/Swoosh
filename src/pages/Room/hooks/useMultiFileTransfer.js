@@ -245,8 +245,8 @@ export function useMultiFileTransfer({
     receiverRef.current?.handleChunkMetadata(metadata);
   }, []);
 
-  const handleMultiBinaryChunk = useCallback(async (data, fileIndex) => {
-    await receiverRef.current?.handleBinaryChunk(data, fileIndex);
+  const handleMultiBinaryChunk = useCallback(async (data, fileIndex, matchedMeta) => {
+    await receiverRef.current?.handleBinaryChunk(data, fileIndex, matchedMeta);
   }, []);
 
   const handleFileComplete = useCallback(async (fileIndex) => {

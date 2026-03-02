@@ -18,7 +18,8 @@ import {
   MIN_CHUNK_SIZE,
   SPEED_HIGH_THRESHOLD,
   SPEED_LOW_THRESHOLD,
-  SPEED_ADJUSTMENT_INCREMENT
+  SPEED_ADJUSTMENT_INCREMENT,
+  getTransferReliabilityProfile,
 } from '../../constants/transfer.constants.js';
 import { createBitmap, markChunk, serializeBitmap, deserializeBitmap, getCompletedCount } from '../../infrastructure/database/chunkBitmap.js';
 import { updateTransfer, saveTransfer } from '../../infrastructure/database/transfers.repository.js';
@@ -36,6 +37,7 @@ export class ChunkingEngine {
     
     // Bitmap persistence settings
     this.BITMAP_FLUSH_INTERVAL = 50; // Flush bitmap every 50 chunks
+    this.transferProfile = getTransferReliabilityProfile();
   }
 
   /**
@@ -152,7 +154,9 @@ export class ChunkingEngine {
     const totalChunks = Math.ceil(file.size / STORAGE_CHUNK_SIZE);
     
     // Set initial chunk size from bandwidth test result (per-transfer tracking)
-    const chunkSize = initialChunkSize || NETWORK_CHUNK_SIZE;
+    const chunkSize = this.transferProfile.constrained
+      ? (initialChunkSize || NETWORK_CHUNK_SIZE)
+      : STORAGE_CHUNK_SIZE;
     this.chunkSizes.set(transferId, chunkSize);
     logger.log(`[ChunkingEngine] Starting with chunk size: ${chunkSize / 1024}KB`);
     
@@ -252,6 +256,7 @@ export class ChunkingEngine {
     this.performanceMetrics.set(transferId, {
       startTime: Date.now(),
       chunksProcessed: storageChunkIndex,
+      bytesProcessedWindow: 0,
       bytesPerSecond: 0,
       adaptiveChunkSize: chunkSize
     });
@@ -478,6 +483,10 @@ export class ChunkingEngine {
    * @private
    */
   _adaptChunkSize(transferId) {
+    if (!this.transferProfile.constrained) {
+      return;
+    }
+
     const metrics = this.performanceMetrics.get(transferId);
     if (!metrics) return;
 
@@ -487,7 +496,7 @@ export class ChunkingEngine {
     // Adjust every 1-2 seconds for stability
     if (timeDiff > 1000) {
       let chunkSize = this.chunkSizes.get(transferId) || NETWORK_CHUNK_SIZE;
-      const bytesPerSecond = (metrics.chunksProcessed * chunkSize * 1000) / timeDiff;
+      const bytesPerSecond = (metrics.bytesProcessedWindow * 1000) / timeDiff;
       metrics.bytesPerSecond = bytesPerSecond;
 
       const oldChunkSize = chunkSize;
@@ -537,6 +546,7 @@ export class ChunkingEngine {
       metrics.adaptiveChunkSize = chunkSize;
       metrics.startTime = currentTime;
       metrics.chunksProcessed = 0;
+      metrics.bytesProcessedWindow = 0;
     }
   }
 
@@ -548,6 +558,7 @@ export class ChunkingEngine {
     const metrics = this.performanceMetrics.get(transferId);
     if (metrics) {
       metrics.chunksProcessed++;
+      metrics.bytesProcessedWindow += bytesProcessed;
     }
   }
 

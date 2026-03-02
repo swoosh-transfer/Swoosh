@@ -370,3 +370,36 @@ export function closePeerConnection() {
   }
   logger.log('[P2P] Peer connection closed and cleaned up');
 }
+
+/**
+ * Explicitly request ICE restart negotiation for connection recovery.
+ * Used by heartbeat/lifecycle handlers after mobile background transitions.
+ *
+ * @param {string} roomId - Active room ID
+ * @returns {Promise<boolean>} True if restart offer was sent
+ */
+export async function requestIceRestart(roomId) {
+  if (!peerConnection || !roomId) {
+    return false;
+  }
+
+  if (peerConnection.signalingState === 'closed' || peerConnection.connectionState === 'closed') {
+    return false;
+  }
+
+  if (peerConnection.signalingState !== 'stable') {
+    logger.warn(`[P2P] Skipping manual ICE restart in signalingState=${peerConnection.signalingState}`);
+    return false;
+  }
+
+  try {
+    const offer = await peerConnection.createOffer({ iceRestart: true });
+    await peerConnection.setLocalDescription(offer);
+    await sendOffer(offer, roomId);
+    logger.warn('[P2P] Manual ICE restart offer sent');
+    return true;
+  } catch (error) {
+    logger.error('[P2P] Manual ICE restart failed:', error);
+    return false;
+  }
+}

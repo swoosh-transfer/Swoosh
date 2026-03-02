@@ -35,6 +35,12 @@ export class WriteQueue {
    */
   async add(chunkIndex, data) {
     this.queue.set(chunkIndex, data);
+    
+    // Log early out-of-order arrivals
+    if (chunkIndex < 10 && chunkIndex > this.nextExpected) {
+      logger.log(`[WriteQueue] Early chunk ${chunkIndex} buffered (waiting for ${this.nextExpected}, ${this.queue.size} pending)`);
+    }
+    
     await this.processQueue();
     
     return { 
@@ -59,6 +65,11 @@ export class WriteQueue {
       while (this.queue.has(this.nextExpected)) {
         const data = this.queue.get(this.nextExpected);
         this.queue.delete(this.nextExpected);
+
+        // Log early chunks to diagnose  corruption
+        if (this.nextExpected < 10) {
+          logger.log(`[WriteQueue] Writing early chunk ${this.nextExpected} (${data.byteLength} bytes, total written: ${this.bytesWritten})`);
+        }
 
         // Simple sequential append - no position tracking needed
         await this.writable.write(new Uint8Array(data));
@@ -122,6 +133,94 @@ export class WriteQueue {
    */
   getPendingChunks() {
     return Array.from(this.queue.keys());
+  }
+
+  /**
+   * Wait for queue to be empty and all pending writes to complete.
+   * Useful before closing the file.
+   * 
+   * Note: This waits for consecutive chunks from start to be written.
+   * If there's a missing chunk, it will write everything up to the gap,
+   * then timeout after MAX_FLUSH_WAIT and log any stuck chunks.
+   * 
+   * @param {number} timeoutMs - Max time to wait for missing chunks (default 500ms)
+   * @returns {Promise<void>}
+   */
+  async flush(timeoutMs = 500) {
+    const startTime = Date.now();
+    let lastProgressTime = startTime;
+    let lastProgress = this.nextExpected;
+
+    while (this.queue.size > 0 || this.processing) {
+      // Check timeout
+      const elapsed = Date.now() - startTime;
+      if (elapsed > timeoutMs) {
+        // Timeout occurred - log stuck chunks and give up
+        const stuckChunks = this.getPendingChunks();
+        if (stuckChunks.length > 0) {
+          logger.warn(`[WriteQueue] Flush timeout after ${elapsed}ms: ${stuckChunks.length} chunks stuck in buffer`);
+          logger.warn(`[WriteQueue] Stuck chunks: ${stuckChunks.slice(0, 10).join(', ')}${stuckChunks.length > 10 ? '...' : ''}`);
+          logger.warn(`[WriteQueue] Written so far: ${this.nextExpected} chunks, bytes: ${this.bytesWritten}`);
+        }
+        break;
+      }
+
+      // Wait for ongoing processing to finish
+      if (this.processing) {
+        await new Promise(resolve => setTimeout(resolve, 5));
+        continue;
+      }
+      
+      // If queue is empty, we're done
+      if (this.queue.size === 0) break;
+      
+      // Process queue (writes consecutive chunks from nextExpected)
+      await this.processQueue();
+      
+      // Track progress
+      if (this.nextExpected > lastProgress) {
+        lastProgress = this.nextExpected;
+        lastProgressTime = Date.now();
+      }
+      
+      // If processQueue didn't process anything (gap exists)
+      if (this.nextExpected === lastProgress && this.queue.size > 0) {
+        // No progress - there's a gap, wait briefly for missing chunk
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+    }
+  }
+
+  /**
+   * Force-flush remaining buffered chunks skipping any gaps.
+   * WARNING: This will write out-of-order chunks and can corrupt sequential files!
+   * Only use when you know remaining chunks are meant to be appended.
+   * 
+   * @returns {Promise<number>} Number of chunks force-written
+   */
+  async forceFlush() {
+    const remaining = Array.from(this.queue.keys()).sort((a, b) => a - b);
+    let written = 0;
+
+    for (const chunkIndex of remaining) {
+      const data = this.queue.get(chunkIndex);
+      if (data) {
+        try {
+          await this.writable.write(new Uint8Array(data));
+          this.bytesWritten += data.byteLength;
+          this.queue.delete(chunkIndex);
+          written++;
+        } catch (err) {
+          logger.error(`[WriteQueue] Force-flush error at chunk ${chunkIndex}:`, err);
+          break;
+        }
+      }
+    }
+
+    if (written > 0) {
+      logger.log(`[WriteQueue] Force-flushed ${written} buffered chunks`);
+    }
+    return written;
   }
 
   /**

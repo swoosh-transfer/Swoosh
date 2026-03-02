@@ -2,7 +2,7 @@
  * Room UI Components
  */
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { getQRCodeUrl } from '../utils/qrCode';
 import { formatBytes } from '../lib/formatters.js';
 
@@ -268,6 +268,56 @@ export function TransferProgressWithControls({
   onResume,
   onCancel
 }) {
+  const [displayProgress, setDisplayProgress] = useState(progress ?? 0);
+  const displayProgressRef = useRef(progress ?? 0);
+
+  useEffect(() => {
+    const normalizedTarget = Math.max(0, Math.min(100, Number(progress) || 0));
+    const isActive = state === 'sending' || state === 'receiving' || state === 'preparing';
+
+    if (state === 'completed' || normalizedTarget >= 100) {
+      displayProgressRef.current = 100;
+      setDisplayProgress(100);
+      return;
+    }
+
+    if (!isActive && normalizedTarget === 0) {
+      displayProgressRef.current = 0;
+      setDisplayProgress(0);
+      return;
+    }
+
+    const target = isActive
+      ? Math.max(normalizedTarget, displayProgressRef.current)
+      : normalizedTarget;
+
+    let frameId;
+    const animate = () => {
+      const current = displayProgressRef.current;
+      const delta = target - current;
+
+      if (Math.abs(delta) < 0.2) {
+        displayProgressRef.current = target;
+        setDisplayProgress(target);
+        return;
+      }
+
+      const step = Math.max(0.18, Math.abs(delta) * 0.22);
+      const next = delta > 0
+        ? Math.min(target, current + step)
+        : Math.max(target, current - step);
+
+      displayProgressRef.current = next;
+      setDisplayProgress(next);
+      frameId = requestAnimationFrame(animate);
+    };
+
+    frameId = requestAnimationFrame(animate);
+    return () => {
+      if (frameId) cancelAnimationFrame(frameId);
+    };
+  }, [progress, state]);
+
   return (
     <div className="space-y-3">
       <div className="flex justify-between items-center">
@@ -280,13 +330,13 @@ export function TransferProgressWithControls({
            state === 'preparing' ? 'Preparing...' :
            state === 'completed' ? 'Complete!' : 'Transferring...'}
         </span>
-        <span className="text-zinc-300 font-mono text-sm">{progress}%</span>
+        <span className="text-zinc-300 font-mono text-sm">{Math.round(displayProgress)}%</span>
       </div>
       
       <div className="h-1.5 bg-zinc-800 rounded-full overflow-hidden">
         <div 
           className={`h-full transition-all duration-300 ${isPaused ? 'bg-amber-500' : 'bg-emerald-500'}`}
-          style={{ width: `${progress}%` }}
+          style={{ width: `${displayProgress}%` }}
         />
       </div>
       

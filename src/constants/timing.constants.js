@@ -68,3 +68,17 @@ export const CONNECTION_MONITOR_INTERVAL = 1000;
  * Maximum time to wait for TOFU security verification to complete.
  */
 export const TOFU_VERIFICATION_TIMEOUT = 30 * 1000;
+
+/**
+ * RESUME_HANDSHAKE_TIMEOUT: 20 seconds
+ *
+ * Maximum time to wait for resume negotiation before falling back to fresh transfer.
+ */
+export const RESUME_HANDSHAKE_TIMEOUT = 20 * 1000;
+
+/**
+ * RESUME_REQUEST_RETRY_DELAY: 1.5 seconds
+ *
+ * Interval for re-sending resume request while waiting for peer session handshake.
+ */
+export const RESUME_REQUEST_RETRY_DELAY = 1500;

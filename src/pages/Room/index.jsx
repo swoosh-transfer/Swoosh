@@ -14,7 +14,7 @@ import { closePeerConnection } from '../../utils/p2pManager.js';
 import { getQRCodeUrl } from '../../utils/qrCode.js';
 import { heartbeatMonitor } from '../../utils/heartbeatMonitor.js';
 import { initNotifications } from '../../utils/transferNotifications.js';
-import { TRANSFER_MODE, STORAGE_CHUNK_SIZE } from '../../constants/transfer.constants.js';
+import { STORAGE_CHUNK_SIZE } from '../../constants/transfer.constants.js';
 import { updateTransfer } from '../../infrastructure/database/transfers.repository.js';
 
 // Custom hooks
@@ -63,7 +63,18 @@ export default function Room() {
     },
     addLog
   );
-  const { socketConnected, dataChannelReady, shareUrl, connInfo, peerDisconnected, sendJSON, sendBinary, waitForDrain, dataChannelRef } = connection;
+  const {
+    socketConnected,
+    dataChannelReady,
+    shareUrl,
+    connInfo,
+    peerDisconnected,
+    sendJSON,
+    sendBinary,
+    waitForDrain,
+    dataChannelRef,
+    requestConnectionRecovery,
+  } = connection;
 
   // Security (encrypted signaling verification)
   const security = useSecurity(roomId, sendJSON, addLog);
@@ -214,14 +225,46 @@ export default function Room() {
         }
       };
 
+      const handleHeartbeatLost = async (lostRoomId) => {
+        if (lostRoomId !== roomId) return;
+        const currentState = isMultiFile ? multiTransfer.multiTransferState : transferState;
+        const transferActive = currentState === 'sending' || currentState === 'receiving' || currentState === 'preparing';
+
+        if (transferActive) {
+          addLog('Heartbeat delayed during active transfer — keeping current connection', 'warning');
+          return;
+        }
+
+        addLog('Connection heartbeat missed — attempting recovery...', 'warning');
+        await requestConnectionRecovery?.('heartbeat-timeout');
+      };
+
+      const handleHeartbeatRestored = (restoredRoomId) => {
+        if (restoredRoomId !== roomId) return;
+        addLog('Connection heartbeat restored', 'success');
+      };
+
+      heartbeatMonitor.onLost(handleHeartbeatLost);
+      heartbeatMonitor.onRestored(handleHeartbeatRestored);
       heartbeatMonitor.start(roomId, sendHeartbeatMessage);
       addLog('Connection health monitoring active', 'info');
 
       return () => {
+        heartbeatMonitor.onLost(null);
+        heartbeatMonitor.onRestored(null);
         heartbeatMonitor.stop(roomId);
       };
     }
-  }, [dataChannelReady, roomId, sendJSON, addLog]);
+  }, [
+    dataChannelReady,
+    roomId,
+    sendJSON,
+    addLog,
+    requestConnectionRecovery,
+    isMultiFile,
+    transferState,
+    multiTransfer.multiTransferState,
+  ]);
 
   // ============ AUTO-PAUSE ON DISCONNECT ============
   const autoPausedRef = useRef(false);
@@ -632,11 +675,19 @@ export default function Room() {
 
       <div className="max-w-4xl mx-auto">
         {/* Header */}
-        <div className="text-center mb-6">
-          <h1 className="text-2xl font-light tracking-tight mb-1">
-            File Transfer
-          </h1>
-          <p className="text-zinc-500 text-sm font-mono">Room: {roomId}</p>
+        <div className="flex items-center justify-between mb-5">
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight">
+              File Transfer
+            </h1>
+            <p className="text-zinc-500 text-xs font-mono mt-0.5">Room: {roomId}</p>
+          </div>
+          <button
+            onClick={handleLeave}
+            className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-sm text-zinc-400 transition-colors"
+          >
+            Leave
+          </button>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -724,93 +775,36 @@ export default function Room() {
 
             {/* Error Display */}
             <ErrorDisplay error={roomError} />
-
-            {/* Leave Button */}
-            <button
-              onClick={handleLeave}
-              className="w-full py-3 bg-zinc-800 hover:bg-zinc-700 rounded-xl text-zinc-400 transition-colors"
-            >
-              Leave Room
-            </button>
           </div>
 
-          {/* Right Column - Connection Status, Security, Activity Log */}
-          <div className="space-y-4">
-            {/* Connection Status */}
+          {/* Right Column - Connection Status, Activity Log */}
+          <div className="space-y-3">
+            {/* Connection Status — compact combined card */}
             <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-              <h2 className="text-sm font-medium text-zinc-400 mb-3">Status</h2>
-              <div className="space-y-3">
-                <div className="flex justify-between">
+              <div className="flex items-center justify-between mb-3">
+                <h2 className="text-sm font-medium text-zinc-400">Connection</h2>
+                {/* Mini status dots */}
+                <div className="flex items-center gap-1.5">
                   {[
                     { label: 'Socket', done: socketConnected },
                     { label: 'P2P', done: dataChannelReady },
                     { label: 'Verified', done: tofuVerified },
-                  ].map((status, i) => (
-                    <div key={status.label} className="flex items-center gap-2">
-                      <div className={`w-3 h-3 rounded-full ${status.done ? 'bg-emerald-500' : 'bg-zinc-700'}`} />
-                      <span className="text-sm text-zinc-400">{status.label}</span>
-                      {i < 2 && <div className="w-8 h-px bg-zinc-800 ml-2" />}
-                    </div>
+                  ].map((s) => (
+                    <div
+                      key={s.label}
+                      title={`${s.label}: ${s.done ? 'Connected' : 'Pending'}`} 
+                      className={`w-2.5 h-2.5 rounded-full transition-colors ${s.done ? 'bg-emerald-500' : 'bg-zinc-700'}`}
+                    />
                   ))}
                 </div>
               </div>
-            </div>
 
-            {/* Connection Details */}
-            {connInfo && (
-              <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-                <h2 className="text-sm font-medium text-zinc-400 mb-3">Connection Details</h2>
-                <div className="space-y-2 text-sm">
-                  {connInfo.socketId && (
-                    <div className="flex justify-between">
-                      <span className="text-zinc-500">Socket ID</span>
-                      <span className="text-emerald-500 font-mono text-xs">{connInfo.socketId}</span>
-                    </div>
-                  )}
-                  {connInfo.iceState && (
-                    <div className="flex justify-between">
-                      <span className="text-zinc-500">ICE State</span>
-                      <span className={connInfo.iceState === 'connected' || connInfo.iceState === 'completed' ? 'text-emerald-500' : 'text-zinc-400'}>
-                        {connInfo.iceState}
-                      </span>
-                    </div>
-                  )}
-                  {connInfo.rtcState && (
-                    <div className="flex justify-between">
-                      <span className="text-zinc-500">RTC State</span>
-                      <span className={connInfo.rtcState === 'connected' ? 'text-emerald-500' : 'text-zinc-400'}>
-                        {connInfo.rtcState}
-                      </span>
-                    </div>
-                  )}
-                  {connInfo.dataChannelState && (
-                    <div className="flex justify-between">
-                      <span className="text-zinc-500">Data Channel</span>
-                      <span className={connInfo.dataChannelState === 'open' ? 'text-emerald-500' : 'text-zinc-400'}>
-                        {connInfo.dataChannelState}
-                      </span>
-                    </div>
-                  )}
-                  {/* Multi-channel info */}
-                  {multiTransfer.channelCount > 1 && (
-                    <div className="flex justify-between">
-                      <span className="text-zinc-500">Active Channels</span>
-                      <span className="text-blue-400">{multiTransfer.channelCount}</span>
-                    </div>
-                  )}
-                  {/* Transfer mode */}
-                  {isMultiFile && (multiTransfer.multiTransferState === 'sending' || multiTransfer.multiTransferState === 'receiving') && (
-                    <div className="flex justify-between">
-                      <span className="text-zinc-500">Transfer Mode</span>
-                      <span className="text-zinc-300">
-                        {multiTransfer.transferMode === TRANSFER_MODE.PARALLEL ? 'Parallel' : 'Sequential'}
-                      </span>
-                    </div>
-                  )}
-                  {/* Candidate type & protocol from WebRTC stats */}
+              {/* Inline connection details */}
+              {connInfo && (
+                <div className="space-y-1.5 text-xs">
                   {connInfo.candidateType && (
                     <div className="flex justify-between">
-                      <span className="text-zinc-500">Connection Type</span>
+                      <span className="text-zinc-500">Type</span>
                       <span className={connInfo.candidateType === 'host' ? 'text-emerald-400' : 'text-yellow-400'}>
                         {connInfo.candidateType === 'host' ? 'Direct (LAN)' :
                          connInfo.candidateType === 'srflx' ? 'STUN (NAT)' :
@@ -828,7 +822,7 @@ export default function Room() {
                   )}
                   {connInfo.availableOutgoingBitrate != null && connInfo.availableOutgoingBitrate > 0 && (
                     <div className="flex justify-between">
-                      <span className="text-zinc-500">Est. Bandwidth</span>
+                      <span className="text-zinc-500">Bandwidth</span>
                       <span className="text-zinc-300">
                         {(connInfo.availableOutgoingBitrate / 1000000).toFixed(1)} Mbps
                       </span>
@@ -836,13 +830,23 @@ export default function Room() {
                   )}
                   {connInfo.rtt > 0 && (
                     <div className="flex justify-between">
-                      <span className="text-zinc-500">RTT</span>
+                      <span className="text-zinc-500">Latency</span>
                       <span className="text-zinc-300">{connInfo.rtt.toFixed(0)} ms</span>
                     </div>
                   )}
+                  {multiTransfer.channelCount > 1 && (
+                    <div className="flex justify-between">
+                      <span className="text-zinc-500">Channels</span>
+                      <span className="text-blue-400">{multiTransfer.channelCount}</span>
+                    </div>
+                  )}
                 </div>
-              </div>
-            )}
+              )}
+
+              {!connInfo && (
+                <p className="text-xs text-zinc-600">Establishing connection...</p>
+              )}
+            </div>
 
             {/* Activity Log */}
             <ActivityLogSection logs={logs} />

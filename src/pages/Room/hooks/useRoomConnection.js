@@ -27,9 +27,11 @@ import {
   handleIceCandidate,
   setPolite,
   getPeerConnection,
+  requestIceRestart,
 } from '../../../utils/p2pManager.js';
 import { deriveEncryptionKey } from '../../../utils/tofuSecurity.js';
 import { useRoomStore } from '../../../stores/roomStore.js';
+import { getTransferReliabilityProfile } from '../../../constants/transfer.constants.js';
 import logger from '../../../utils/logger.js';
 
 /**
@@ -79,6 +81,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
   const dataChannelRef = useRef(null);
   const handshakeSentRef = useRef(false); // Prevent double handshake
   const webrtcSetupRef = useRef(false); // Track if guest set up WebRTC early (before join)
+  const transferProfileRef = useRef(getTransferReliabilityProfile());
 
   /**
    * Send JSON message through data channel
@@ -109,24 +112,47 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
   const waitForDrain = useCallback(() => {
     return new Promise(resolve => {
       const channel = dataChannelRef.current;
-      if (!channel || channel.bufferedAmount <= 65536) {
+      const lowWatermark = transferProfileRef.current.channelBufferLowWatermark;
+
+      if (!channel || channel.bufferedAmount <= lowWatermark) {
         resolve();
         return;
       }
 
       const check = () => {
-        if (channel.bufferedAmount <= 65536) {
+        if (channel.bufferedAmount <= lowWatermark) {
           channel.removeEventListener('bufferedamountlow', check);
           clearInterval(poll);
           resolve();
         }
       };
 
-      channel.bufferedAmountLowThreshold = 65536;
+      channel.bufferedAmountLowThreshold = lowWatermark;
       channel.addEventListener('bufferedamountlow', check);
       const poll = setInterval(check, 10);
     });
   }, []);
+
+  /**
+   * Trigger explicit signaling + ICE recovery after heartbeat/lifecycle disruptions.
+   */
+  const requestConnectionRecovery = useCallback(async (reason = 'manual') => {
+    const socket = getSocket();
+
+    if (socket && !socket.connected) {
+      logger.log(`[Room] requestConnectionRecovery(${reason}) reconnecting socket...`);
+      socket.connect();
+      return false;
+    }
+
+    if (socket?.connected && roomId) {
+      socket.emit('verify-room', roomId);
+    }
+
+    const restartSent = await requestIceRestart(roomId);
+    logger.log(`[Room] requestConnectionRecovery(${reason}) iceRestart=${restartSent}`);
+    return restartSent;
+  }, [roomId]);
 
   // Track socket state for host (socket already connected from Home.jsx)
   useEffect(() => {
@@ -546,6 +572,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     sendJSON,
     sendBinary,
     waitForDrain,
+    requestConnectionRecovery,
     
     // Handshake tracking
     handshakeSentRef,

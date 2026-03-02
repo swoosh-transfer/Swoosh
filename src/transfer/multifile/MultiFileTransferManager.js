@@ -18,6 +18,7 @@ import {
   CHANNEL_SCALE_INTERVAL,
   MAX_CHANNELS,
   MIN_CHANNELS,
+  getTransferReliabilityProfile,
 } from '../../constants/transfer.constants.js';
 import { MESSAGE_TYPE } from '../../constants/messages.constants.js';
 import {
@@ -45,6 +46,13 @@ export class MultiFileTransferManager {
     this._addLog = options.addLog || (() => {});
     this._trackChunkProgress = options.trackChunkProgress || (() => {});
     this._mode = options.mode || TRANSFER_MODE.SEQUENTIAL;
+    this._profile = getTransferReliabilityProfile();
+    this._maxAutoChannels = Math.max(
+      MIN_CHANNELS,
+      Math.min(MAX_CHANNELS, this._profile.maxChannels)
+    );
+    this._maxParallelWorkers = this._profile.minParallelWorkers;
+    this._channelScaleInterval = this._profile.channelScaleInterval;
 
     /** @type {FileQueue|null} */
     this._queue = null;
@@ -74,6 +82,10 @@ export class MultiFileTransferManager {
     this._onFileComplete = null;  // (fileIndex) => void
     this._onAllComplete = null;   // () => void
     this._onError = null;         // (error) => void
+
+    if (this._profile.constrained) {
+      this._addLog('Using mobile reliability transfer profile', 'info');
+    }
   }
 
   // ─── Configuration ────────────────────────────────────────────────
@@ -119,6 +131,8 @@ export class MultiFileTransferManager {
     await this._waitForReceiverReady();
 
     if (this._isCancelled) return;
+
+    this._warmupDataChannels();
 
     // Start bandwidth monitor and auto-scaling for multi-channel support
     this._bandwidthMonitor.start();
@@ -183,7 +197,7 @@ export class MultiFileTransferManager {
     // Use at least 3 concurrent file workers regardless of channel count.
     // Even on a single channel, interleaving chunks from multiple files
     // gives the user visible parallel progress and overlaps I/O.
-    const maxParallel = Math.max(this._pool.openDataCount, 3);
+    const maxParallel = Math.max(this._pool.openDataCount, this._maxParallelWorkers);
     const tasks = [];
     let nextFileIdx = 0;
 
@@ -311,6 +325,15 @@ export class MultiFileTransferManager {
         resumeFromChunk // Resume from chunk if applicable
       );
 
+      // CRITICAL: Flush all channels to ensure all chunks are sent before marking complete
+      // This ensures the receiver has time to receive all chunks before FILE_COMPLETE message
+      for (let chIdx = 0; chIdx < this._pool.size; chIdx++) {
+        const ch = this._pool.getChannel(chIdx);
+        if (ch && ch.readyState === 'open') {
+          await this._pool.waitForDrain(chIdx);
+        }
+      }
+
       this._queue.markCompleted(fileIndex);
       this._sendJSON({ type: MESSAGE_TYPE.FILE_COMPLETE, fileIndex });
       this._addLog(`✓ ${item.file.name}`, 'success');
@@ -379,32 +402,42 @@ export class MultiFileTransferManager {
     this._scaleTimerId = setInterval(() => {
       if (this._isPaused || this._isCancelled) return;
 
-      const currentCount = this._pool.openCount;
-      const recommended = this._bandwidthMonitor.getRecommendedChannelCount(currentCount);
+      const currentDataCount = Math.max(this._pool.openDataCount, 1);
+      const recommended = this._bandwidthMonitor.getRecommendedChannelCount(currentDataCount);
 
-      if (recommended > currentCount && currentCount < MAX_CHANNELS) {
+      if (recommended > currentDataCount && currentDataCount < this._maxAutoChannels) {
         // Scale up — add a data channel
         const newIdx = this._pool.size; // next index
         this._pool.addChannel(newIdx);
-        this._addLog(`↑ Scaled to ${currentCount + 1} channels`, 'info');
-        logger.log(`[MultiFileTransferManager] Scaled UP to ${currentCount + 1} channels`);
-      } else if (recommended < currentCount && currentCount > MIN_CHANNELS) {
+        this._addLog(`↑ Scaled to ${currentDataCount + 1} channels`, 'info');
+        logger.log(`[MultiFileTransferManager] Scaled UP to ${currentDataCount + 1} channels`);
+      } else if (recommended < currentDataCount && currentDataCount > MIN_CHANNELS) {
         // Scale down — remove the highest-indexed data channel
         const indices = this._pool.indices.filter((i) => i >= 1);
         if (indices.length > 0) {
           const remove = indices[indices.length - 1];
           this._pool.removeChannel(remove);
-          this._addLog(`↓ Scaled to ${currentCount - 1} channels`, 'info');
-          logger.log(`[MultiFileTransferManager] Scaled DOWN to ${currentCount - 1} channels`);
+          this._addLog(`↓ Scaled to ${currentDataCount - 1} channels`, 'info');
+          logger.log(`[MultiFileTransferManager] Scaled DOWN to ${currentDataCount - 1} channels`);
         }
       }
-    }, CHANNEL_SCALE_INTERVAL);
+    }, this._channelScaleInterval || CHANNEL_SCALE_INTERVAL);
   }
 
   _stopAutoScaling() {
     if (this._scaleTimerId) {
       clearInterval(this._scaleTimerId);
       this._scaleTimerId = null;
+    }
+  }
+
+  _warmupDataChannels() {
+    const targetDataChannels = this._profile.constrained ? 1 : 2;
+
+    for (let i = 1; i <= targetDataChannels; i++) {
+      if (!this._pool.getChannel(i)) {
+        this._pool.addChannel(i);
+      }
     }
   }
 
