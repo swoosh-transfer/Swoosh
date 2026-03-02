@@ -3,10 +3,73 @@
  * 
  * Production-ready logging with environment-based filtering.
  * - Development: All logs enabled
- * - Production: Only errors logged (can be extended to send to monitoring service)
+ * - Production: Only errors logged and sent to error tracking service
  */
 
 const isDev = import.meta.env.DEV;
+
+// ============================================================================
+// ERROR TRACKING SERVICE INTEGRATION
+// ============================================================================
+
+/**
+ * Initialize error tracking service (Sentry, LogRocket, etc.)
+ * Configure this based on your chosen service provider
+ */
+function initializeErrorTracking() {
+  // Check if we're in production
+  if (!isDev) {
+    // TODO: Configure your error tracking service here
+    // Example for Sentry:
+    // import * as Sentry from "@sentry/react";
+    // Sentry.init({
+    //   dsn: import.meta.env.VITE_SENTRY_DSN,
+    //   environment: import.meta.env.MODE,
+    //   tracesSampleRate: 1.0,
+    // });
+    
+    // Example for LogRocket:
+    // import LogRocket from 'logrocket';
+    // LogRocket.init(import.meta.env.VITE_LOGROCKET_ID);
+  }
+}
+
+// Initialize on module load
+initializeErrorTracking();
+
+/**
+ * Send error to tracking service
+ * @param {Error|string} error - Error object or message
+ * @param {Object} context - Additional context for error tracking
+ */
+function reportError(error, context = {}) {
+  if (!isDev) {
+    // TODO: Implement error reporting based on your chosen service
+    // Example for Sentry:
+    // import * as Sentry from "@sentry/react";
+    // Sentry.captureException(error, { contexts: { app: context } });
+    
+    // Example for LogRocket:
+    // import LogRocket from 'logrocket';
+    // LogRocket.captureException(error);
+    
+    // Fallback: Send to analytics endpoint (optional)
+    try {
+      navigator.sendBeacon?.(
+        '/api/errors',
+        JSON.stringify({
+          timestamp: new Date().toISOString(),
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+          context,
+          userAgent: navigator.userAgent,
+        })
+      );
+    } catch (err) {
+      // Silently fail if reporting fails
+    }
+  }
+}
 
 /**
  * Logger instance with environment-aware logging methods
@@ -36,13 +99,17 @@ export const logger = {
   },
   
   /**
-   * Error messages (always logged)
-   * In production, these could be sent to error tracking service
+   * Error messages (always logged and sent to tracking service)
    * @param {...any} args - Values to log
    */
   error: (...args) => {
     if (isDev) console.error(...args);
-    // TODO: In production, send to error tracking service (Sentry, LogRocket, etc.)
+    // Send first argument to error tracking service if it's an Error
+    if (args.length > 0 && args[0] instanceof Error) {
+      reportError(args[0], { additionalArgs: args.slice(1) });
+    } else if (args.length > 0) {
+      reportError(new Error(String(args[0])), { additionalArgs: args.slice(1) });
+    }
   },
   
   /**

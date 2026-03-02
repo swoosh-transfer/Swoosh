@@ -19,16 +19,9 @@
  *   compact     — smaller layout for Room page
  */
 import React, { useRef, useState, useCallback } from 'react';
+import { formatBytes as formatFileSize } from '../lib/formatters';
 
 // ─── Helpers ────────────────────────────────────────────────────────
-
-function formatFileSize(bytes) {
-  if (!bytes || bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
 
 /**
  * Recursively traverse a DataTransferItem entry to collect all files.

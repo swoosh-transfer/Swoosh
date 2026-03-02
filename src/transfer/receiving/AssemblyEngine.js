@@ -17,16 +17,26 @@ import { progressTracker } from '../shared/ProgressTracker.js';
 import { chunkValidator } from './ChunkValidator.js';
 import { STORAGE_CHUNK_SIZE } from '../../constants/transfer.constants.js';
 import { ValidationError } from '../../lib/errors.js';
+import { createBitmap, markChunk, serializeBitmap, deserializeBitmap, getCompletedCount } from '../../infrastructure/database/chunkBitmap.js';
+import { updateTransfer, saveTransfer } from '../../infrastructure/database/transfers.repository.js';
 
 export class AssemblyEngine {
   constructor() {
     this.activeAssemblies = new Map(); // transferId -> assembly state
     this.receiveBuffers = new Map(); // transferId -> receive buffer
     this.fileWriters = new Map(); // transferId -> FileWriter instance
+    this.chunkBitmaps = new Map(); // transferId -> Uint8Array bitmap
+    this.lastFlushCount = new Map(); // transferId -> last chunk count when bitmap was flushed
+    this.pendingAcks = new Map(); // transferId -> array of chunk indices to acknowledge
 
     // Event callbacks (set by consumer)
     this.onComplete = null; // (transferId, result) => void
     this.onError = null;    // (transferId, error) => void
+    this.onChunkReceived = null; // (transferId, chunkIndices, totalChunks) => void - for sending ACKs to sender
+    
+    // Bitmap persistence settings
+    this.BITMAP_FLUSH_INTERVAL = 50; // Flush bitmap every 50 chunks
+    this.ACK_BATCH_SIZE = 10; // Send ACK every 10 chunks received
   }
 
   /**
@@ -48,11 +58,16 @@ export class AssemblyEngine {
       totalChunks,
       fileSize: size,
       fileName: name,
-      direction: 'receive',
+      direction: 'receiving',
     });
 
     // Initialize chunk validator
     chunkValidator.initialize(transferId, totalChunks);
+
+    // Initialize chunk bitmap for resume capability
+    const chunkBitmap = createBitmap(totalChunks);
+    this.chunkBitmaps.set(transferId, chunkBitmap);
+    this.lastFlushCount.set(transferId, 0);
 
     // Initialize assembly state (file writer comes later in step 2)
     this.activeAssemblies.set(transferId, {
@@ -69,6 +84,28 @@ export class AssemblyEngine {
       currentSize: 0,
       expectedSize: STORAGE_CHUNK_SIZE,
     });
+
+    // Save initial transfer metadata to IndexedDB (for resume support)
+    try {
+      await saveTransfer({
+        transferId,
+        fileName: name,
+        fileSize: size,
+        mimeType,
+        totalChunks,
+        direction: 'receiving',
+        status: 'active',
+        chunkBitmap: serializeBitmap(chunkBitmap),
+        lastProgress: 0,
+        lastChunkIndex: -1,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      logger.log(`[AssemblyEngine] Transfer metadata saved to IndexedDB for ${transferId}`);
+    } catch (error) {
+      logger.warn(`[AssemblyEngine] Failed to save transfer metadata:`, error);
+      // Continue even if IndexedDB save fails (non-critical for active transfer)
+    }
 
     logger.log(`[AssemblyEngine] Initialized receive for ${transferId}: ${totalChunks} chunks expected`);
     return { transferId, totalChunks, fileName: name, fileSize: size };
@@ -204,6 +241,29 @@ export class AssemblyEngine {
       assemblyState.bytesReceived += bufferState.currentSize;
       assemblyState.receivedChunks++;
       
+      // Mark chunk as complete in bitmap
+      const bitmap = this.chunkBitmaps.get(transferId);
+      if (bitmap) {
+        markChunk(bitmap, chunkMetadata.chunkIndex);
+        
+        // Add chunk to pending ACKs for sender-side tracking
+        if (!this.pendingAcks.has(transferId)) {
+          this.pendingAcks.set(transferId, []);
+        }
+        this.pendingAcks.get(transferId).push(chunkMetadata.chunkIndex);
+        
+        // Periodically send ACKs to sender (every N chunks)
+        if (this.pendingAcks.get(transferId).length >= this.ACK_BATCH_SIZE) {
+          this._sendChunkAcknowledgments(transferId);
+        }
+        
+        // Periodically flush bitmap to IndexedDB (every N chunks)
+        const lastFlush = this.lastFlushCount.get(transferId) || 0;
+        if (assemblyState.receivedChunks - lastFlush >= this.BITMAP_FLUSH_INTERVAL) {
+          await this._flushBitmap(transferId);
+        }
+      }
+      
       // Update progress tracker (canonical progress — bitmap tracking is handled by useTransferTracking)
       progressTracker.updateChunk(transferId, chunkMetadata.chunkIndex, bufferState.currentSize);
 
@@ -228,17 +288,91 @@ export class AssemblyEngine {
   }
 
   /**
+   * Flush bitmap to IndexedDB
+   * Persists current chunk completion state for resume capability
+   * @private
+   */
+  async _flushBitmap(transferId) {
+    const bitmap = this.chunkBitmaps.get(transferId);
+    const assemblyState = this.activeAssemblies.get(transferId);
+    if (!bitmap || !assemblyState) return;
+
+    try {
+      const serialized = serializeBitmap(bitmap);
+      const completedCount = getCompletedCount(bitmap);
+      const progress = (completedCount / assemblyState.totalChunks) * 100;
+
+      await updateTransfer(transferId, {
+        chunkBitmap: serialized,
+        lastProgress: progress,
+        lastChunkIndex: assemblyState.receivedChunks - 1,
+        status: 'active',
+      });
+
+      this.lastFlushCount.set(transferId, assemblyState.receivedChunks);
+      logger.log(`[AssemblyEngine] Bitmap flushed for ${transferId}: ${completedCount}/${assemblyState.totalChunks} chunks (${progress.toFixed(1)}%)`);
+    } catch (error) {
+      logger.warn(`[AssemblyEngine] Failed to flush bitmap for ${transferId}:`, error);
+      // Non-critical - continue transfer
+    }
+  }
+
+  /**
+   * Send chunk acknowledgments to sender for sender-side tracking
+   * Batches ACKs to avoid excessive messaging
+   * @private
+   */
+  _sendChunkAcknowledgments(transferId) {
+    const pendingAcks = this.pendingAcks.get(transferId);
+    const assemblyState = this.activeAssemblies.get(transferId);
+    
+    if (!pendingAcks || pendingAcks.length === 0 || !assemblyState) {
+      return;
+    }
+
+    // Send ACKs via callback if registered
+    if (this.onChunkReceived) {
+      try {
+        this.onChunkReceived(transferId, [...pendingAcks], assemblyState.totalChunks);
+        logger.log(`[AssemblyEngine] Sent ${pendingAcks.length} chunk ACKs for ${transferId}`);
+      } catch (error) {
+        logger.warn(`[AssemblyEngine] Failed to send chunk ACKs:`, error);
+      }
+    }
+
+    // Clear pending ACKs after sending
+    this.pendingAcks.set(transferId, []);
+  }
+
+  /**
    * Complete file assembly
    * @private
    */
   async _completeAssembly(transferId) {
     const assemblyState = this.activeAssemblies.get(transferId);
     
+    // Send any remaining chunk ACKs before completing
+    this._sendChunkAcknowledgments(transferId);
+    
+    // Flush final bitmap state to IndexedDB
+    await this._flushBitmap(transferId);
+    
     // Complete the file writing using functional API
     const result = await completeWriter(transferId);
     
     // Update progress tracker
     progressTracker.updateStatus(transferId, 'completed');
+    
+    // Update transfer status in IndexedDB
+    try {
+      await updateTransfer(transferId, {
+        status: 'completed',
+        completedAt: Date.now(),
+        lastProgress: 100,
+      });
+    } catch (error) {
+      logger.warn(`[AssemblyEngine] Failed to update transfer status:`, error);
+    }
     
     // Mark as complete
     assemblyState.isComplete = true;
@@ -295,6 +429,89 @@ export class AssemblyEngine {
   }
 
   /**
+   * Pause receiving for a transfer.
+   * Sets a paused flag so incoming chunks can be deferred.
+   * Flushes bitmap to IndexedDB for resume capability.
+   * 
+   * @param {string} transferId
+   */
+  async pause(transferId) {
+    if (!transferId) {
+      logger.warn(`[AssemblyEngine] pause: invalid transferId (undefined/null)`);
+      return;
+    }
+
+    const assemblyState = this.activeAssemblies.get(transferId);
+    if (!assemblyState) {
+      // Assembly doesn't exist — might be paused already or never started on this side
+      // Still update IndexedDB status if possible
+      logger.warn(`[AssemblyEngine] pause: no active assembly for ${transferId} (may be paused already)`);
+      try {
+        await updateTransfer(transferId, {
+          status: 'paused',
+          pausedAt: Date.now(),
+        });
+      } catch (error) {
+        logger.warn(`[AssemblyEngine] Could not update transfer to paused:`, error);
+      }
+      return;
+    }
+    
+    // Flush bitmap to IndexedDB before pausing
+    await this._flushBitmap(transferId);
+    
+    // Update transfer status
+    try {
+      await updateTransfer(transferId, {
+        status: 'paused',
+        pausedAt: Date.now(),
+      });
+    } catch (error) {
+      logger.warn(`[AssemblyEngine] Failed to update pause status:`, error);
+    }
+    
+    assemblyState.paused = true;
+    logger.log(`[AssemblyEngine] Paused receiving for ${transferId}`);
+  }
+
+  /**
+   * Resume receiving for a transfer.
+   * 
+   * @param {string} transferId
+   */
+  async resume(transferId) {
+    const assemblyState = this.activeAssemblies.get(transferId);
+    if (!assemblyState) {
+      logger.warn(`[AssemblyEngine] resume: no assembly for ${transferId}`);
+      return;
+    }
+    
+    // Update transfer status
+    try {
+      await updateTransfer(transferId, {
+        status: 'active',
+        resumedAt: Date.now(),
+      });
+    } catch (error) {
+      logger.warn(`[AssemblyEngine] Failed to update resume status:`, error);
+    }
+    
+    assemblyState.paused = false;
+    logger.log(`[AssemblyEngine] Resumed receiving for ${transferId}`);
+  }
+
+  /**
+   * Cancel a transfer and clean up all state.
+   * Alias for cleanup().
+   * 
+   * @param {string} transferId
+   */
+  async cancelTransfer(transferId) {
+    logger.log(`[AssemblyEngine] Cancelling transfer ${transferId}`);
+    return this.cleanup(transferId);
+  }
+
+  /**
    * Get missing chunks for retransmission
    */
   getMissingChunks(transferId) {
@@ -308,6 +525,9 @@ export class AssemblyEngine {
    * Cleanup assembly state
    */
   async cleanup(transferId) {
+    // Flush final bitmap state before cleanup
+    await this._flushBitmap(transferId);
+    
     try {
       await cancelWriter(transferId);
     } catch (err) {
@@ -317,6 +537,8 @@ export class AssemblyEngine {
     this.activeAssemblies.delete(transferId);
     this.receiveBuffers.delete(transferId);
     this.fileWriters.delete(transferId);
+    this.chunkBitmaps.delete(transferId);
+    this.lastFlushCount.delete(transferId);
     chunkValidator.clear(transferId);
     progressTracker.clear(transferId);
     

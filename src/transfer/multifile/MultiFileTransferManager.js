@@ -61,6 +61,9 @@ export class MultiFileTransferManager {
     this._startTime = 0;
     this._totalBytesSent = 0;
 
+    /** Resume support: per-file bitmaps of chunks the receiver has */
+    this._fileBitmaps = new Map(); // fileIndex → base64 bitmap
+
     /** Promise resolved when receiver sends receiver-ready */
     this._receiverReadyResolve = null;
     this._receiverReady = false;
@@ -235,6 +238,27 @@ export class MultiFileTransferManager {
     this._engines.set(fileIndex, engine);
     const transferId = `multi-${Date.now()}-${fileIndex}`;
 
+    // Check if receiver has already completed this file (resume scenario)
+    let resumeFromChunk = 0;
+    const fileBitmap = this._fileBitmaps.get(fileIndex);
+    if (fileBitmap) {
+      const totalChunks = Math.ceil(item.file.size / STORAGE_CHUNK_SIZE);
+      const decodedBitmap = deserializeBitmap(fileBitmap);
+      resumeFromChunk = getFirstMissingChunk(decodedBitmap, totalChunks);
+      
+      if (resumeFromChunk === -1) {
+        // All chunks already received — skip this file
+        this._addLog(`✓ ${item.file.name}: already complete on receiver`, 'info');
+        this._queue.markComplete(fileIndex);
+        if (this._onFileComplete) this._onFileComplete(fileIndex);
+        return;
+      }
+      
+      if (resumeFromChunk > 0) {
+        this._addLog(`Resuming ${item.file.name} from chunk ${resumeFromChunk}`, 'info');
+      }
+    }
+
     try {
       await engine.startChunking(
         transferId,
@@ -272,9 +296,9 @@ export class MultiFileTransferManager {
           this._bandwidthMonitor.recordBytes(buffer.byteLength);
           this._totalBytesSent += buffer.byteLength;
 
-          // Track chunk completion in bitmap
+          // Track chunk completion in per-file bitmap
           if (this._trackChunkProgress) {
-            this._trackChunkProgress(transferId, metadata.chunkIndex);
+            this._trackChunkProgress(transferId, metadata.chunkIndex, fileIndex);
           }
 
           // Emit progress immediately per-chunk for responsive UI
@@ -283,7 +307,8 @@ export class MultiFileTransferManager {
         // onProgress — update FileQueue per-file progress
         (bytesRead, _totalSize) => {
           this._queue.updateProgress(fileIndex, bytesRead);
-        }
+        },
+        resumeFromChunk // Resume from chunk if applicable
       );
 
       this._queue.markCompleted(fileIndex);
@@ -425,8 +450,22 @@ export class MultiFileTransferManager {
     this._receiverReady = true;
     if (this._receiverReadyResolve) {
       this._receiverReadyResolve();
-      this._receiverReadyResolve = null;
     }
+  }
+
+  /**
+   * Resume multi-file transfer with per-file bitmaps.
+   * Used when transferring the same set of files and receiver has partially completed.
+   * 
+   * @param {Array<{file: File, relativePath: string|null}>} files
+   * @param {Map<number, string>} fileBitmaps - fileIndex → base64 bitmap of completed chunks
+   */
+  async resumeWithBitmaps(files, fileBitmaps = new Map()) {
+    this._fileBitmaps = fileBitmaps;
+    logger.log('[MultiFileTransferManager] Resuming with per-file bitmaps:', fileBitmaps.size, 'files');
+    
+    // Start normal transfer, but with bitmaps available for skip logic
+    return this.start(files);
   }
 
   _waitIfPaused() {

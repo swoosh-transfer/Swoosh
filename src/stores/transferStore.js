@@ -23,39 +23,7 @@ export const useTransferStore = create((set, get) => ({
 
   // ============ ACTIONS ============
 
-  /**
-   * Record a transfer initiation (lightweight tracking for history)
-   * @param {Object} transferData - Transfer metadata
-   * @param {string} transferData.transferId - Unique transfer identifier
-   * @param {string} transferData.fileName - Name of the file
-   * @param {number} transferData.fileSize - Size of file in bytes
-   * @param {string} transferData.fileType - MIME type of file
-   * @param {number} transferData.totalChunks - Total number of chunks
-   */
-  initiateUpload: (transferData) => {
-    const { transferId, fileName, fileSize, fileType, totalChunks } = transferData;
-    
-    // Lightweight tracking - just for history
-    logger.log(`[TransferStore] Upload initiated: ${fileName} (${transferId})`);
-    return transferId;
-  },
 
-  /**
-   * Record a download initiation (lightweight tracking for history)
-   * @param {Object} transferData - Transfer metadata
-   * @param {string} transferData.transferId - Unique transfer identifier
-   * @param {string} transferData.fileName - Name of the file
-   * @param {number} transferData.fileSize - Size of file in bytes
-   * @param {string} transferData.fileType - MIME type of file
-   * @param {number} transferData.totalChunks - Total number of chunks
-   */
-  initiateDownload: (transferData) => {
-    const { transferId, fileName, fileSize, fileType, totalChunks } = transferData;
-    
-    // Lightweight tracking - just for history
-    logger.log(`[TransferStore] Download initiated: ${fileName} (${transferId})`);
-    return transferId;
-  },
 
   /**
    * Record a completed transfer in history

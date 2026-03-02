@@ -38,53 +38,6 @@ export async function createTransferId() {
 // ============================================================================
 
 /**
- * Initialize a file transfer (sender side)
- * 
- * @param {File} file - File to send
- * @param {string} peerId - Receiver peer ID
- * @returns {Promise<Object>} Transfer information
- */
-export async function initializeFileTransfer(file, peerId) {
-  const transferId = await createTransferId();
-  
-  // Create file metadata
-  const fileMetadata = createFileMetadata({
-    name: file.name,
-    size: file.size,
-    type: file.type,
-    lastModified: file.lastModified
-  });
-  
-  await saveFileMetadata(fileMetadata);
-  const transferRecord = await createTransferRecord({ 
-    transferId, 
-    fileMeta: fileMetadata, 
-    peerId 
-  });
-  
-  return {
-    transferId,
-    fileMetadata,
-    transferRecord
-  };
-}
-
-/**
- * Start file chunking process (with optional resume)
- * 
- * @param {string} transferId - Transfer ID
- * @param {File} file - File to chunk
- * @param {string} peerId - Receiver peer ID
- * @param {Function} onChunkReady - Callback for each chunk
- * @param {number} [resumeFromChunk=0] - Chunk to resume from
- * @param {number} [initialChunkSize] - Initial chunk size from bandwidth test (optional)
- * @returns {Promise<void>}
- */
-export async function startFileChunking(transferId, file, peerId, onChunkReady, resumeFromChunk = 0, initialChunkSize) {
-  return await chunkingEngine.startChunking(transferId, file, peerId, onChunkReady, resumeFromChunk, initialChunkSize);
-}
-
-/**
  * Pause file chunking
  * 
  * @param {string} transferId - Transfer ID
@@ -114,56 +67,9 @@ export function isChunkingPaused(transferId) {
   return chunkingEngine.isPaused(transferId);
 }
 
-/**
- * Get chunking pause state
- * 
- * @param {string} transferId - Transfer ID
- * @returns {Object} Pause state
- */
-export function getChunkingPauseState(transferId) {
-  return chunkingEngine.getPauseState(transferId);
-}
-
-/**
- * Retransmit specific chunks
- * 
- * @param {string} transferId - Transfer ID
- * @param {number[]} chunkIndices - Chunk indices to retransmit
- * @param {File} file - Original file
- * @param {Function} onChunkReady - Callback for each chunk
- * @returns {Promise<Object>} Retransmission results
- */
-export async function retransmitChunks(transferId, chunkIndices, file, onChunkReady) {
-  return await chunkingEngine.retransmitChunks(transferId, chunkIndices, file, onChunkReady);
-}
-
 // ============================================================================
 // RECEIVER-SIDE OPERATIONS
 // ============================================================================
-
-/**
- * Initialize file reception (receiver side)
- * 
- * @param {string} transferId - Transfer ID
- * @param {Object} fileMetadata - File metadata from sender
- * @param {string} peerId - Sender peer ID
- * @returns {Promise<Object>} File writer instance
- */
-export async function initializeFileReception(transferId, fileMetadata, peerId) {
-  return await assemblyEngine.initializeAssembly(transferId, fileMetadata, peerId);
-}
-
-/**
- * Process received chunk
- * 
- * @param {string} transferId - Transfer ID
- * @param {ArrayBuffer} chunkData - Chunk data
- * @param {Object} chunkMetadata - Chunk metadata
- * @returns {Promise<Object>} Processing result
- */
-export async function processReceivedChunk(transferId, chunkData, chunkMetadata) {
-  return await assemblyEngine.receiveChunk(transferId, chunkData, chunkMetadata);
-}
 
 /**
  * Get missing chunks for retransmission

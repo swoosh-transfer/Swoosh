@@ -327,10 +327,10 @@ export class MultiFileReceiver {
     fileState.bytesReceived += data.byteLength;
     this._totalBytesReceived += data.byteLength;
 
-    // Track chunk completion in bitmap (if tracking callback provided)
+    // Track chunk completion in per-file bitmap (if tracking callback provided)
     const transferId = this._transferIdsByFileIndex.get(fileIndex);
     if (transferId && this._trackChunkProgress) {
-      this._trackChunkProgress(transferId, chunkIndex);
+      this._trackChunkProgress(transferId, chunkIndex, fileIndex);
     }
 
     // Write to disk or accumulate in memory

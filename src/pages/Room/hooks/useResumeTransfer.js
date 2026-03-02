@@ -36,7 +36,8 @@ export function useResumeTransfer({
 }) {
   const { resumeContext, clearResumeContext } = useRoomStore();
   const hasInitiatedRef = useRef(false);
-  const [resumeState, setResumeState] = useState('idle'); // idle | proposing | accepted | rejected | failed
+  const timeoutRefRef = useRef(null);
+  const [resumeState, setResumeState] = useState('idle'); // idle | proposing | accepted | rejected | failed | timeout
   const [resumeInfo, setResumeInfo] = useState(null); // { startFromChunk, ... }
 
   /**
@@ -48,6 +49,31 @@ export function useResumeTransfer({
       hasInitiatedRef.current = false;
     }
   }, [resumeContext]);
+
+  /**
+   * 5-second timeout for resume handshake proposal.
+   * If peer doesn't respond (RESUME_ACCEPTED or RESUME_REJECTED) within 5 seconds,
+   * auto-reject and start fresh transfer instead.
+   */
+  useEffect(() => {
+    if (resumeState !== 'proposing') return;
+
+    // Set 5-second timeout
+    timeoutRefRef.current = setTimeout(() => {
+      logger.warn('[ResumeTransfer] Resume handshake timeout (5s) — falling back to fresh transfer');
+      setResumeState('timeout');
+      addLog('Resume timeout. Starting fresh transfer instead...', 'warning');
+      // Clear resume context to trigger fresh start flow
+      clearResumeContext();
+    }, 5000);
+
+    return () => {
+      if (timeoutRefRef.current) {
+        clearTimeout(timeoutRefRef.current);
+        timeoutRefRef.current = null;
+      }
+    };
+  }, [resumeState, addLog, clearResumeContext]);
 
   /**
    * Initiate resume handshake when data channel opens and we have resume context.
@@ -96,6 +122,11 @@ export function useResumeTransfer({
    */
   const onResumeAccepted = useCallback(({ transferId, startFromChunk, totalChunks }) => {
     logger.log(`[ResumeTransfer] Resume accepted — start from chunk ${startFromChunk}`);
+    // Clear timeout since we got a response
+    if (timeoutRefRef.current) {
+      clearTimeout(timeoutRefRef.current);
+      timeoutRefRef.current = null;
+    }
     setResumeState('accepted');
     setResumeInfo({ transferId, startFromChunk, totalChunks });
     addLog(`Resume accepted! Continuing from chunk ${startFromChunk}/${totalChunks}`, 'success');
@@ -107,9 +138,14 @@ export function useResumeTransfer({
    */
   const onResumeRejected = useCallback(({ transferId, reason }) => {
     logger.log(`[ResumeTransfer] Resume rejected: ${reason}`);
+    // Clear timeout since we got a response
+    if (timeoutRefRef.current) {
+      clearTimeout(timeoutRefRef.current);
+      timeoutRefRef.current = null;
+    }
     setResumeState('rejected');
     addLog(`Resume rejected: ${reason}. Starting fresh transfer instead.`, 'warning');
-    // Clear resume context so room falls back to normal flow
+    // Clear resume context so room falls back to normal flow (triggers fresh start)
     clearResumeContext();
   }, [addLog, clearResumeContext]);
 
@@ -117,6 +153,10 @@ export function useResumeTransfer({
    * Clear resume state after the transfer completes or is abandoned.
    */
   const clearResume = useCallback(() => {
+    if (timeoutRefRef.current) {
+      clearTimeout(timeoutRefRef.current);
+      timeoutRefRef.current = null;
+    }
     setResumeState('idle');
     setResumeInfo(null);
     hasInitiatedRef.current = false;

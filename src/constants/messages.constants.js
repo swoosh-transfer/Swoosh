@@ -27,6 +27,7 @@ export const MESSAGE_TYPE = {
   // Chunk Management
   REQUEST_CHUNKS: 'request-chunks',
   MISSING_CHUNKS: 'missing-chunks',
+  CHUNK_RECEIVED_ACK: 'chunk-received-ack',  // Acknowledge received chunks (for sender tracking)
   
   // Error Handling
   TRANSFER_ERROR: 'transfer-error',
@@ -45,9 +46,15 @@ export const MESSAGE_TYPE = {
   RESUME_ACCEPTED: 'resume-accepted',       // Accept resume, includes startFromChunk
   RESUME_REJECTED: 'resume-rejected',       // Reject resume (file changed, etc.)
 
-  // Keep-alive
+  // Keep-alive & Connection Monitoring
   PING: 'ping',
-  PONG: 'pong'
+  PONG: 'pong',
+  HEARTBEAT: 'heartbeat',                   // Periodic heartbeat to detect stale connections
+  HEARTBEAT_ACK: 'heartbeat-ack',           // Heartbeat acknowledgment
+  
+  // Peer Session Events
+  PEER_RECONNECTED: 'peer-reconnected',     // Notify peer of reconnection with session info
+  SESSION_VERIFICATION: 'session-verification' // Request session verification for resume
 };
 
 // Alias for backward compatibility

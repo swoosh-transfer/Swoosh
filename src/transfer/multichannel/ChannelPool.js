@@ -55,16 +55,28 @@ export class ChannelPool {
       return null;
     }
 
+    // Check if peer connection is in valid state for creating data channels
+    if (!this._pc || this._pc.signalingState === 'closed' || this._pc.connectionState === 'closed') {
+      logger.warn(`[ChannelPool] Cannot create channel — peer connection state: signalingState=${this._pc?.signalingState}, connectionState=${this._pc?.connectionState}`);
+      return null;
+    }
+
     const label = `${CHANNEL_LABEL_PREFIX}${index}`;
-    const channel = this._pc.createDataChannel(label, {
-      ordered: true,
-      // Let the browser handle its own buffering
-    });
-    channel.binaryType = 'arraybuffer';
-    this._wire(index, channel);
-    this._channels.set(index, channel);
-    logger.log(`[ChannelPool] Created outgoing channel ${label}`);
-    return channel;
+    try {
+      const channel = this._pc.createDataChannel(label, {
+        ordered: true,
+        // Let the browser handle its own buffering
+      });
+      channel.binaryType = 'arraybuffer';
+      this._wire(index, channel);
+      this._channels.set(index, channel);
+      logger.log(`[ChannelPool] Created outgoing channel ${label}`);
+      return channel;
+    } catch (error) {
+      // Catch any errors from createDataChannel (e.g., InvalidStateError)
+      logger.warn(`[ChannelPool] Failed to create channel ${label}:`, error.message);
+      return null;
+    }
   }
 
   /**

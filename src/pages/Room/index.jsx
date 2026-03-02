@@ -12,6 +12,8 @@ import FileDropZone from '../../components/FileDropZone.jsx';
 import { disconnectSocket, leaveRoom } from '../../utils/signaling.js';
 import { closePeerConnection } from '../../utils/p2pManager.js';
 import { getQRCodeUrl } from '../../utils/qrCode.js';
+import { heartbeatMonitor } from '../../utils/heartbeatMonitor.js';
+import { initNotifications } from '../../utils/transferNotifications.js';
 import { TRANSFER_MODE, STORAGE_CHUNK_SIZE } from '../../constants/transfer.constants.js';
 import { updateTransfer } from '../../infrastructure/database/transfers.repository.js';
 
@@ -38,6 +40,7 @@ export default function Room() {
   const navigate = useNavigate();
   const { isHost, securityPayload, selectedFiles, addFiles, removeFile, clearFiles, resetRoom, error: roomError } = useRoomStore();
   const [showQRCode, setShowQRCode] = useState(false);
+  const pendingResumeRef = useRef(null); // No longer used — file re-selection removed
 
   // Derive selectedFile from selectedFiles (first file or null)
   const selectedFile = selectedFiles.length > 0 ? selectedFiles[0].file : null;
@@ -159,13 +162,77 @@ export default function Room() {
       if (transfer.setResumeFromChunk) {
         transfer.setResumeFromChunk(resumeFlow.resumeInfo.startFromChunk);
       }
+      
+      // For sender: actually resume the transfer
+      if (isHost && transfer.resumeTransfer) {
+        try {
+          transfer.resumeTransfer();
+        } catch (error) {
+          addLog(`Failed to resume transfer: ${error.message}`, 'error');
+        }
+      }
     }
-  }, [resumeFlow.resumeState, resumeFlow.resumeInfo, transfer]);
+  }, [resumeFlow.resumeState, resumeFlow.resumeInfo, transfer, isHost, addLog]);
+
+  // ★ FALLBACK: When resume times out or is rejected, fall back to fresh transfer
+  // This effect detects when resume fails and triggers a fresh start automatically
+  useEffect(() => {
+    if (resumeFlow.resumeState === 'timeout' || resumeFlow.resumeState === 'rejected') {
+      // Resume failed — fall back to fresh transfer start
+      addLog('Auto-starting fresh transfer after resume failed', 'info');
+      
+      if (isMultiFile && isHost && selectedFiles.length > 0) {
+        // Multi-file sender: restart with fresh files
+        setMultiFileMode(true);
+        setTimeout(() => {
+          multiTransfer.startMultiTransfer();
+        }, 300);
+      } else if (!isMultiFile && isHost && selectedFile) {
+        // Single-file sender: restart with fresh file
+        setMultiFileMode(false);
+        startTransfer();
+      } else if (!isMultiFile && !isHost) {
+        // Single-file receiver: wait for sender to re-initiate
+        addLog('Waiting for sender to re-initiate transfer...', 'info');
+      } else if (isMultiFile && !isHost) {
+        // Multi-file receiver: wait for sender to re-send manifest
+        addLog('Waiting for sender to restart transfer...', 'info');
+      }
+    }
+  }, [resumeFlow.resumeState, isMultiFile, isHost, selectedFiles, selectedFile, addLog, startTransfer, multiTransfer, setMultiFileMode]);
+
+  // ============ HEARTBEAT & NOTIFICATIONS ============
+  // Initialize notifications on mount and set up heartbeat monitor for connection health
+  useEffect(() => {
+    initNotifications();
+    addLog('Transfer notifications enabled', 'info');
+  }, [addLog]);
+
+  // Start heartbeat monitor when peer connects, stop when disconnects
+  useEffect(() => {
+    if (dataChannelReady) {
+      const sendHeartbeatMessage = () => {
+        try {
+          sendJSON({ type: 'heartbeat' });
+        } catch (error) {
+          console.warn('[Room] Failed to send heartbeat:', error);
+        }
+      };
+
+      heartbeatMonitor.start(roomId, sendHeartbeatMessage);
+      addLog('Connection health monitoring active', 'info');
+
+      return () => {
+        heartbeatMonitor.stop(roomId);
+      };
+    }
+  }, [dataChannelReady, roomId, sendJSON, addLog]);
 
   // ============ AUTO-PAUSE ON DISCONNECT ============
   const autoPausedRef = useRef(false);
   const wasDisconnectedRef = useRef(false);
   const awaitingIdentityRef = useRef(false); // true while waiting for identity check
+  const hasHandledResumeRef = useRef(false); // Prevents resume flow from running multiple times
 
   useEffect(() => {
     if (!peerDisconnected) {
@@ -189,6 +256,7 @@ export default function Room() {
 
     // Peer disconnected — mark and auto-pause any active transfer
     wasDisconnectedRef.current = true;
+    hasHandledResumeRef.current = false; // Allow resume flow to run again on reconnection
     const activeState = isMultiFile ? multiTransfer.multiTransferState : transferState;
     const isActive = activeState === 'sending' || activeState === 'receiving';
 
@@ -211,34 +279,150 @@ export default function Room() {
 
   // ============ IN-ROOM RECONNECTION RESUME ============
   // After identity handshake completes, decide: resume (same peer) or reset (new peer).
-  // This effect fires when `identityVerified` transitions to true following a reconnection.
+  // This effect fires when `identityVerified` transitions to true.
+  // Handles three cases:
+  //   1. Reconnection after disconnect (awaitingIdentityRef was set)
+  //   2. Page refresh with interrupted transfer in IndexedDB
+  //   3. Fresh connection (no interrupted transfer)
+  
   useEffect(() => {
-    if (!awaitingIdentityRef.current || !identityVerified) return;
+    // Wait for identity verification to complete
+    if (!identityVerified) return;
+    
+    // Only run once per connection
+    if (hasHandledResumeRef.current) return;
+    
+    // Check if we should attempt resume:
+    // - Either we were waiting for identity (in-session reconnect)
+    // - OR we just connected and found an interrupted transfer (cross-session/refresh)
+    const shouldAttemptResume = awaitingIdentityRef.current || (isReturningPeer && interruptedTransfer);
+    
+    if (!shouldAttemptResume) {
+      // No interrupted transfer — normal connection, nothing to do
+      return;
+    }
+    
+    // For multi-file transfers, wait for data channel to be ready before proceeding
+    // (channel pool must be established to create additional channels)
+    const isMultiFileTransfer = !!interruptedTransfer?.fileManifest;
+    if (isMultiFileTransfer && !dataChannelReady) {
+      // Wait for channel to be ready, this effect will re-run when dataChannelReady changes
+      return;
+    }
+    
+    // Mark as handled
+    hasHandledResumeRef.current = true;
     awaitingIdentityRef.current = false;
 
     if (isReturningPeer && interruptedTransfer) {
       // ── Same peer with an interrupted transfer → auto-resume ──
-      addLog('Same peer returned — auto-resuming transfer', 'success');
-      
-      const { setResumeContext } = useRoomStore.getState();
-      setResumeContext({
-        transferId: interruptedTransfer.transferId,
-        fileName: interruptedTransfer.fileName,
-        fileSize: interruptedTransfer.fileSize,
-        totalChunks: interruptedTransfer.totalChunks,
-        chunkBitmap: interruptedTransfer.chunkBitmap || null,
-        direction: interruptedTransfer.direction === 'sending' ? 'sending' : 'receiving',
-        fileManifest: interruptedTransfer.fileManifest || null,
-        progress: interruptedTransfer.lastProgress || 0,
-        inRoom: true, // flag: don't create new room, resume in current room
-      });
+      const isSender = interruptedTransfer.direction === 'sending';
+      const hasFiles = selectedFiles.length > 0;
+      const isMultiFileTransfer = !!interruptedTransfer.fileManifest;
 
-      // Reset transfer UI to re-enter the send/receive flow cleanly
-      multiTransfer.resetTransfer();
-      resetTransferState();
-      resetUiTransferState();
-      setMultiFileMode(false);
-      // Files survive in roomStore — sender can re-send
+      if (isMultiFileTransfer) {
+        // ── Multi-file in-room reconnection ──
+        // Old manager/receiver has dead channels — reset instances but keep mode
+        multiTransfer.resetTransfer();
+        resetTransferState();
+        resetUiTransferState();
+
+        if (isSender) {
+          // Sender: always try resume protocol first (with auto-fallback to fresh if it fails)
+          // Restore file manifest to resumeContext for resume handshake
+          setMultiFileMode(true);
+          addLog('Same peer returned — attempting to resume multi-file transfer', 'success');
+          
+          const resumeCtx = {
+            transferId: interruptedTransfer.transferId,
+            fileName: interruptedTransfer.fileName,
+            fileSize: interruptedTransfer.fileSize,
+            totalChunks: interruptedTransfer.totalChunks,
+            chunkBitmap: interruptedTransfer.chunkBitmap || null,
+            direction: 'sending',
+            fileManifest: interruptedTransfer.fileManifest,
+            progress: interruptedTransfer.lastProgress || 0,
+            inRoom: true,
+            isMultiFile: true,
+          };
+          
+          const { setResumeContext } = useRoomStore.getState();
+          setResumeContext(resumeCtx);
+          
+          // If resume times out or fails, useResumeTransfer will clear context
+          // and Room will fall back to fresh transfer start
+        } else {
+          // Receiver: restore multi-file mode and wait for sender to re-send manifest
+          setMultiFileMode(true);
+          addLog('Same peer returned — waiting for sender to restart transfer', 'info');
+        }
+      } else {
+        // ── Single-file transfer — use resume protocol ──
+        const resumeCtx = {
+          transferId: interruptedTransfer.transferId,
+          fileName: interruptedTransfer.fileName,
+          fileSize: interruptedTransfer.fileSize,
+          totalChunks: interruptedTransfer.totalChunks,
+          chunkBitmap: interruptedTransfer.chunkBitmap || null,
+          direction: isSender ? 'sending' : 'receiving',
+          fileManifest: null,
+          progress: interruptedTransfer.lastProgress || 0,
+          inRoom: true,
+        };
+
+        multiTransfer.resetTransfer();
+        resetTransferState();
+        resetUiTransferState();
+        setMultiFileMode(false);
+
+        if (isSender) {
+          // Sender-side: always try resume protocol (auto-fallback to fresh if it fails)
+          // Don't prompt for file re-selection — let resume handshake timeout/fail, then fall back to fresh
+          transfer.initializeResume(resumeCtx.transferId);
+          addLog('Same peer returned — attempting to resume transfer', 'success');
+          const { setResumeContext } = useRoomStore.getState();
+          setResumeContext(resumeCtx);
+          
+          // If resume times out or is rejected, clearResumeContext() fires
+          // and that triggers the fallback to fresh transfer start
+        } else {
+          // Receiver-side resume: initialize assembly & restore file writer
+          addLog('Same peer returned — resuming reception', 'success');
+          
+          // Initialize assembly engine with the resumed transfer metadata
+          // For resumed transfers, don't prompt for save location again — just resume
+          transfer.initializeReceive(
+            {
+              transferId: resumeCtx.transferId,
+              name: resumeCtx.fileName,
+              size: resumeCtx.fileSize,
+              mimeType: interruptedTransfer.mimeType || 'application/octet-stream',
+            },
+            (pendingFileData) => {
+              // Store pending file data
+              uiState.setPendingFileData(pendingFileData);
+            }
+          ).then(async () => {
+            // Assembly initialized — now restore the file writer
+            // setupFileWriter with resume=true will prompt user to select the file again
+            // (browser security requirement for File System Access API)
+            try {
+              addLog('Please select the file to resume receiving...', 'info');
+              await transfer.setupFileWriter(resumeCtx.fileName, () => {
+                addLog('File selected — resuming reception', 'success');
+              });
+              
+              // File writer ready — now trigger resume protocol
+              const { setResumeContext } = useRoomStore.getState();
+              setResumeContext(resumeCtx);
+            } catch (error) {
+              addLog(`Failed to restore file writer: ${error.message}`, 'error');
+            }
+          }).catch((error) => {
+            addLog(`Failed to initialize resume: ${error.message}`, 'error');
+          });
+        }
+      }
     } else {
       // ── New/different peer or no interrupted transfer → full reset ──
       addLog('Peer reconnected — ready to re-send', 'info');
@@ -247,12 +431,13 @@ export default function Room() {
       resetUiTransferState();
       setMultiFileMode(false);
     }
-  }, [identityVerified, isReturningPeer, interruptedTransfer]);
+  }, [identityVerified, isReturningPeer, interruptedTransfer, dataChannelReady]);
 
   // ============ PROGRESS PERSISTENCE ============
   // Periodically save transfer progress to IndexedDB during active transfers
   useEffect(() => {
-    const currentTransferId = transfer.transferId;
+    // For multi-file transfers, transfer.transferId is null — use the tracking ID instead
+    const currentTransferId = transfer.transferId || tracking.activeTrackingId?.current;
     if (!currentTransferId) return;
 
     const currentState = isMultiFile ? multiTransfer.multiTransferState : transferState;

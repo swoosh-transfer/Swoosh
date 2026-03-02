@@ -28,6 +28,7 @@ import {
   serializeBitmap,
   getCompletedCount,
 } from '../../../infrastructure/database/chunkBitmap.js';
+import { STORAGE_CHUNK_SIZE } from '../../../constants/transfer.constants.js';
 import logger from '../../../utils/logger.js';
 
 /**
@@ -64,24 +65,46 @@ export function useTransferTracking({
   const bitmapFlushTimerRef = useRef(null);
   const chunksSinceFlushRef = useRef(0);
   const flushingRef = useRef(false); // mutex to prevent concurrent flushes
+  const fileBitmapsRef = useRef(null); // Map<fileIndex, Uint8Array> for per-file bitmaps
+  const fileManifestRef = useRef(null); // Stored file manifest (for per-file totalChunks)
 
   /** Flush the current in-memory bitmap to IndexedDB (with mutex) */
   const flushBitmap = useCallback(async () => {
-    if (!bitmapDirtyRef.current || !activeTransferIdRef.current || !bitmapRef.current) return;
+    if (!bitmapDirtyRef.current || !activeTransferIdRef.current) return;
     if (flushingRef.current) return; // already flushing — skip to avoid concurrent writes
     
     flushingRef.current = true;
     const transferId = activeTransferIdRef.current;
-    const bitmap = bitmapRef.current;
     
     try {
-      await updateTransfer(transferId, {
-        chunkBitmap: serializeBitmap(bitmap),
-        completedChunks: getCompletedCount(bitmap),
-      });
-      bitmapDirtyRef.current = false;
-      chunksSinceFlushRef.current = 0;
-      logger.log(`[TransferTracking] Bitmap flushed for ${transferId}`);
+      const patch = {};
+
+      // Per-file bitmaps (multi-file transfers)
+      if (fileBitmapsRef.current && fileBitmapsRef.current.size > 0) {
+        const serialized = {};
+        let totalCompleted = 0;
+        for (const [fileIndex, bitmap] of fileBitmapsRef.current) {
+          serialized[fileIndex] = serializeBitmap(bitmap);
+          totalCompleted += getCompletedCount(bitmap);
+        }
+        patch.fileBitmaps = serialized;
+        patch.completedChunks = totalCompleted;
+      }
+
+      // Single bitmap (single-file transfers)
+      if (bitmapRef.current) {
+        patch.chunkBitmap = serializeBitmap(bitmapRef.current);
+        if (!patch.completedChunks) {
+          patch.completedChunks = getCompletedCount(bitmapRef.current);
+        }
+      }
+
+      if (Object.keys(patch).length > 0) {
+        await updateTransfer(transferId, patch);
+        bitmapDirtyRef.current = false;
+        chunksSinceFlushRef.current = 0;
+        logger.log(`[TransferTracking] Bitmap flushed for ${transferId}`);
+      }
     } catch (err) {
       logger.warn('[TransferTracking] Failed to flush bitmap:', err.message);
     } finally {
@@ -149,17 +172,50 @@ export function useTransferTracking({
       activeTransferIdRef.current = transferId;
       lastSavedProgressRef.current = 0;
 
-      // Initialize chunk bitmap
+      // Initialize chunk bitmap(s)
       const chunks = totalChunks || 0;
-      bitmapRef.current = createBitmap(chunks);
-      bitmapTotalChunksRef.current = chunks;
       bitmapDirtyRef.current = false;
       chunksSinceFlushRef.current = 0;
+
+      // Multi-file: create per-file bitmaps from manifest
+      if (fileManifest && Array.isArray(fileManifest) && fileManifest.length > 0) {
+        fileBitmapsRef.current = new Map();
+        fileManifestRef.current = fileManifest;
+        for (const entry of fileManifest) {
+          const idx = entry.index ?? fileManifest.indexOf(entry);
+          const fileChunks = entry.totalChunks || Math.ceil((entry.fileSize || 0) / STORAGE_CHUNK_SIZE);
+          fileBitmapsRef.current.set(idx, createBitmap(fileChunks));
+        }
+        bitmapRef.current = null; // Don't use single bitmap for multi-file
+        bitmapTotalChunksRef.current = chunks;
+      } else {
+        // Single-file: use single bitmap
+        bitmapRef.current = createBitmap(chunks);
+        bitmapTotalChunksRef.current = chunks;
+        fileBitmapsRef.current = null;
+        fileManifestRef.current = null;
+      }
 
       // Check if File System Access API is available
       const usedFSAPI = typeof window.showSaveFilePicker === 'function';
 
       try {
+        // Build initial bitmap data for persistence
+        const initialBitmapData = {};
+        if (fileBitmapsRef.current) {
+          // Multi-file: serialize per-file bitmaps
+          const serialized = {};
+          for (const [idx, bitmap] of fileBitmapsRef.current) {
+            serialized[idx] = serializeBitmap(bitmap);
+          }
+          initialBitmapData.fileBitmaps = serialized;
+          initialBitmapData.chunkBitmap = null;
+        } else if (bitmapRef.current) {
+          // Single-file: serialize single bitmap
+          initialBitmapData.chunkBitmap = serializeBitmap(bitmapRef.current);
+          initialBitmapData.fileBitmaps = null;
+        }
+
         await saveTransfer({
           transferId,
           roomId,
@@ -170,7 +226,7 @@ export function useTransferTracking({
           status: TRACKED_STATUS.ACTIVE,
           lastChunkIndex: 0,
           usedFSAPI,
-          chunkBitmap: serializeBitmap(bitmapRef.current),
+          ...initialBitmapData,
           completedChunks: 0,
           fileHash: fileHash || null,
           fileLastModified: fileLastModified || null,
@@ -193,13 +249,28 @@ export function useTransferTracking({
    * Track a chunk being sent or received (metadata only — no binary in IDB).
    * Updates in-memory bitmap and queues throttled flush to IndexedDB.
    * Flushes every 25 chunks or every 2 seconds, whichever comes first.
+   * 
+   * @param {string} transferId - Transfer ID (per-file ID for multi-file)
+   * @param {number} chunkIndex - Chunk index within the file
+   * @param {number} [fileIndex] - File index for multi-file transfers
    */
-  const trackChunkProgress = useCallback((transferId, chunkIndex) => {
-    if (!bitmapRef.current) return;
-    
-    markChunk(bitmapRef.current, chunkIndex);
-    bitmapDirtyRef.current = true;
-    chunksSinceFlushRef.current++;
+  const trackChunkProgress = useCallback((transferId, chunkIndex, fileIndex) => {
+    // Per-file bitmap (multi-file transfer)
+    if (fileIndex !== undefined && fileBitmapsRef.current) {
+      const fileBitmap = fileBitmapsRef.current.get(fileIndex);
+      if (fileBitmap) {
+        markChunk(fileBitmap, chunkIndex);
+        bitmapDirtyRef.current = true;
+        chunksSinceFlushRef.current++;
+      }
+    } else if (bitmapRef.current) {
+      // Single bitmap (single-file transfer)
+      markChunk(bitmapRef.current, chunkIndex);
+      bitmapDirtyRef.current = true;
+      chunksSinceFlushRef.current++;
+    } else {
+      return; // No bitmap initialized
+    }
 
     // Flush every 25 chunks
     if (chunksSinceFlushRef.current >= 25) {
@@ -221,6 +292,8 @@ export function useTransferTracking({
     activeTransferIdRef.current = null;
     bitmapRef.current = null;
     bitmapDirtyRef.current = false;
+    fileBitmapsRef.current = null;
+    fileManifestRef.current = null;
     if (bitmapFlushTimerRef.current) {
       clearTimeout(bitmapFlushTimerRef.current);
       bitmapFlushTimerRef.current = null;
@@ -317,6 +390,7 @@ export function useTransferTracking({
   }, []);
 
   return {
+    activeTrackingId: activeTransferIdRef,
     trackTransferStart,
     trackChunkProgress,
     trackTransferProgress,

@@ -133,6 +133,22 @@ export function useFileTransfer(
   }, [selectedFile, tofuVerified, roomId, sendJSON, addLog, initiateUpload]);
 
   /**
+   * Initialize resume for a paused transfer
+   * Sets transferIdRef without resending metadata (metadata already known)
+   * @param {string} transferId - Transfer ID to resume
+   */
+  const initializeResume = useCallback((transferId) => {
+    if (!transferId) {
+      addLog('Cannot resume: invalid transferId', 'error');
+      return;
+    }
+    
+    transferIdRef.current = transferId;
+    setTransferState('preparing');
+    addLog(`Resuming transfer: ${transferId}`, 'info');
+  }, [addLog]);
+
+  /**
    * Send file chunks to receiver
    * @param {number} [startFromChunk] - Optional: chunk index to resume from
    */
@@ -324,6 +340,20 @@ export function useFileTransfer(
 
     assemblyEngineRef.current.onComplete = (tid, result) => {
       addLog('File saved!', 'success');
+    };
+
+    // Wire onChunkReceived to send ACKs to sender for sender-side tracking
+    assemblyEngineRef.current.onChunkReceived = (tid, chunkIndices, totalChunks) => {
+      try {
+        sendJSON({
+          type: 'chunk-received-ack',
+          transferId: tid,
+          chunkIndices,
+          totalChunks,
+        });
+      } catch (error) {
+        logger.warn('[useFileTransfer] Failed to send chunk ACK:', error);
+      }
     };
 
     assemblyEngineRef.current.onError = (tid, error) => {
@@ -534,9 +564,17 @@ export function useFileTransfer(
       sendJSON({ type: 'transfer-paused', transferId });
       addLog('Sending paused', 'warning');
     } else {
-      const result = await assemblyEngineRef.current.pause(transferId);
-      sendJSON({ type: 'transfer-paused', transferId, lastChunk: result.lastChunk });
-      addLog(`Receiving paused at chunk ${result.lastChunk}`, 'warning');
+      try {
+        await assemblyEngineRef.current.pause(transferId);
+        // Get last chunk info from assembly state if available
+        const progress = assemblyEngineRef.current.getProgress(transferId);
+        const lastChunk = progress ? progress.chunksReceived - 1 : 0;
+        sendJSON({ type: 'transfer-paused', transferId, lastChunk });
+        addLog(`Receiving paused at chunk ${lastChunk}`, 'warning');
+      } catch (error) {
+        logger.warn('[FileTransfer] Error pausing transfer:', error);
+        addLog(`Error pausing transfer: ${error.message}`, 'error');
+      }
     }
     setIsPaused(true);
     setPausedBy('local');
@@ -579,10 +617,15 @@ export function useFileTransfer(
       addLog('Sending resumed', 'success');
       receiverLastChunkRef.current = -1;
     } else {
-      const result = await assemblyEngineRef.current.resume(transferId);
-      const resumeFromChunk = result.lastChunk + 1;
-      sendJSON({ type: 'transfer-resumed', transferId, resumeFromChunk });
-      addLog(`Receiving resumed, requesting sender to resume from chunk ${resumeFromChunk}`, 'success');
+      try {
+        const result = await assemblyEngineRef.current.resume(transferId);
+        const resumeFromChunk = result.lastChunk + 1;
+        sendJSON({ type: 'transfer-resumed', transferId, resumeFromChunk });
+        addLog(`Receiving resumed, requesting sender to resume from chunk ${resumeFromChunk}`, 'success');
+      } catch (error) {
+        addLog(`Failed to resume receiving: ${error.message}`, 'error');
+        logger.warn(`[useFileTransfer] Resume failed for receiver: ${error.message}`);
+      }
     }
     setIsPaused(false);
     setPausedBy(null);
@@ -615,20 +658,30 @@ export function useFileTransfer(
    * @param {number} lastChunk - Last chunk received by peer
    */
   const handleRemotePause = useCallback(async (transferId, lastChunk) => {
-    if (isHost) {
-      await chunkingEngineRef.current.pause(transferId);
-      if (lastChunk !== undefined) {
-        receiverLastChunkRef.current = lastChunk;
-        addLog(`Receiver paused at chunk ${lastChunk}`, 'warning');
-      } else {
-        addLog('Peer paused transfer', 'warning');
-      }
-    } else {
-      await assemblyEngineRef.current.pause(transferId);
-      addLog('Sender paused transfer', 'warning');
+    if (!transferId) {
+      addLog('Received pause with undefined transferId — ignoring', 'warning');
+      return;
     }
-    setIsPaused(true);
-    setPausedBy('remote');
+
+    try {
+      if (isHost) {
+        await chunkingEngineRef.current.pause(transferId);
+        if (lastChunk !== undefined) {
+          receiverLastChunkRef.current = lastChunk;
+          addLog(`Receiver paused at chunk ${lastChunk}`, 'warning');
+        } else {
+          addLog('Peer paused transfer', 'warning');
+        }
+      } else {
+        await assemblyEngineRef.current.pause(transferId);
+        addLog('Sender paused transfer', 'warning');
+      }
+      setIsPaused(true);
+      setPausedBy('remote');
+    } catch (error) {
+      logger.warn('[FileTransfer] Error handling remote pause:', error);
+      // Don't fail — just log and continue. The transfer might resume via other means.
+    }
   }, [isHost, addLog]);
 
   /**
@@ -665,8 +718,13 @@ export function useFileTransfer(
       
       receiverLastChunkRef.current = -1;
     } else {
-      await assemblyEngineRef.current.resume(transferId);
-      addLog('Sender resumed transfer', 'success');
+      try {
+        await assemblyEngineRef.current.resume(transferId);
+        addLog('Sender resumed transfer', 'success');
+      } catch (error) {
+        addLog(`Failed to resume receiving: ${error.message}`, 'error');
+        logger.warn(`[useFileTransfer] handleRemoteResume failed for receiver: ${error.message}`);
+      }
     }
     setIsPaused(false);
     setPausedBy(null);
@@ -698,6 +756,24 @@ export function useFileTransfer(
   }, []);
 
   /**
+   * Apply receiver bitmap when resume is accepted (sender side)
+   * Allows sender to skip chunks that receiver has already received
+   */
+  const applyReceiverBitmap = useCallback(async (transferId, receiverBitmap, totalChunks) => {
+    if (!isHost) {
+      logger.warn('[FileTransfer] applyReceiverBitmap called on receiver side');
+      return;
+    }
+
+    try {
+      await chunkingEngineRef.current.applyReceiverBitmap(transferId, receiverBitmap, totalChunks);
+      logger.log('[FileTransfer] Applied receiver bitmap to skip already-sent chunks');
+    } catch (error) {
+      logger.warn('[FileTransfer] Failed to apply receiver bitmap:', error);
+    }
+  }, [isHost]);
+
+  /**
    * Reset transfer state to idle (used when switching to a new transfer)
    */
   const resetTransferState = useCallback(() => {
@@ -721,6 +797,7 @@ export function useFileTransfer(
     
     // Sending
     startTransfer,
+    initializeResume,
     sendFileChunks,
     handleRetransmitRequest,
     
@@ -738,6 +815,7 @@ export function useFileTransfer(
     
     // Resume
     setResumeFromChunk,
+    applyReceiverBitmap,
     
     // Remote signals
     handleRemotePause,

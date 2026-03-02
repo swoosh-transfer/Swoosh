@@ -88,11 +88,6 @@ export const useRoomStore = create((set, get) => ({
    */
   clearFiles: () => set({ selectedFiles: [] }),
 
-  /** @deprecated Use setSelectedFiles instead */
-  setSelectedFile: (file) => set({
-    selectedFiles: file ? [{ file, relativePath: null }] : [],
-  }),
-  
   /**
    * Set resume context for resuming a failed transfer in a new room
    * @param {Object|null} context - Resume metadata

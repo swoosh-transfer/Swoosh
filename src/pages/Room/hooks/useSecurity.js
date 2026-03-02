@@ -14,8 +14,8 @@
  *   - `isReturningPeer` — true when the reconnecting peer is the same UUID
  *   - `interruptedTransfer` — IndexedDB record for the room if peer is returning
  */
-import { useState, useRef, useCallback } from 'react';
-import { getLocalUUID, savePeerSession, verifyPeer } from '../../../utils/identityManager.js';
+import { useState, useRef, useCallback, useEffect } from 'react';
+import { getLocalUUID, restoreUuidIfExists, savePeerSession, verifyPeer } from '../../../utils/identityManager.js';
 import { useRoomStore } from '../../../stores/roomStore.js';
 import { listTransfers } from '../../../infrastructure/database/transfers.repository.js';
 import logger from '../../../utils/logger.js';
@@ -35,9 +35,58 @@ export function useSecurity(roomId, sendJSON, addLog) {
   const [tofuVerified, setTofuVerified] = useState(false);
   const [isReturningPeer, setIsReturningPeer] = useState(false);
   const [interruptedTransfer, setInterruptedTransfer] = useState(null);
+  const [uuidInitialized, setUuidInitialized] = useState(false);
 
-  const myUUID = useRef(getLocalUUID());
+  const myUUID = useRef(null);
   const tofuVerifiedRef = useRef(false);
+  const pendingHandshakeChannelRef = useRef(null);
+  const hasSentHandshakeRef = useRef(false);
+
+  // Initialize room-scoped UUID synchronously, then restore from IndexedDB in background
+  useEffect(() => {
+    let mounted = true;
+    hasSentHandshakeRef.current = false;
+
+    try {
+      const uuid = getLocalUUID(roomId);
+      if (mounted) {
+        myUUID.current = uuid;
+        setUuidInitialized(true);
+        logger.log(`[Security] UUID initialized: ${uuid.slice(0, 8)}...`);
+      }
+    } catch (err) {
+      logger.error('[Security] Failed to initialize UUID:', err);
+    }
+
+    restoreUuidIfExists(roomId, myUUID.current)
+      .then((restoredUuid) => {
+        if (mounted && restoredUuid) {
+          myUUID.current = restoredUuid;
+        }
+      })
+      .catch((err) => {
+        logger.warn('[Security] Background UUID restore failed:', err);
+      });
+    
+    return () => {
+      mounted = false;
+      pendingHandshakeChannelRef.current = null;
+    };
+  }, [roomId]);
+
+  useEffect(() => {
+    if (!uuidInitialized || !myUUID.current || hasSentHandshakeRef.current) {
+      return;
+    }
+
+    const channel = pendingHandshakeChannelRef.current;
+    if (channel?.readyState === 'open') {
+      channel.send(JSON.stringify({ type: 'handshake', uuid: myUUID.current }));
+      hasSentHandshakeRef.current = true;
+      addLog('Sent identity handshake', 'info');
+      pendingHandshakeChannelRef.current = null;
+    }
+  }, [addLog, uuidInitialized]);
 
   // ── Data-channel open = verified ──────────────────────────────────────────
 
@@ -62,11 +111,20 @@ export function useSecurity(roomId, sendJSON, addLog) {
    * @param {RTCDataChannel} channel - Data channel to send through
    */
   const sendHandshake = useCallback((channel) => {
-    if (channel.readyState === 'open') {
-      channel.send(JSON.stringify({ type: 'handshake', uuid: myUUID.current }));
-      addLog('Sent identity handshake', 'info');
+    pendingHandshakeChannelRef.current = channel;
+
+    if (!uuidInitialized || !myUUID.current) {
+      logger.warn('[Security] Cannot send handshake - UUID not initialized yet');
+      return;
     }
-  }, [addLog]);
+    
+    if (channel.readyState === 'open' && !hasSentHandshakeRef.current) {
+      channel.send(JSON.stringify({ type: 'handshake', uuid: myUUID.current }));
+      hasSentHandshakeRef.current = true;
+      addLog('Sent identity handshake', 'info');
+      pendingHandshakeChannelRef.current = null;
+    }
+  }, [addLog, uuidInitialized]);
 
   /**
    * Handle received identity handshake from peer.
@@ -92,7 +150,12 @@ export function useSecurity(roomId, sendJSON, addLog) {
         // Query IndexedDB for interrupted/paused/active transfer in this room
         try {
           const allTransfers = await listTransfers();
+          // Prefer sender-side transfers (actionable) over receiver-side
           interrupted = allTransfers.find(
+            (t) => t.roomId === roomId &&
+              t.direction === 'sending' &&
+              (t.status === 'interrupted' || t.status === 'paused' || t.status === 'active')
+          ) || allTransfers.find(
             (t) => t.roomId === roomId &&
               (t.status === 'interrupted' || t.status === 'paused' || t.status === 'active')
           ) || null;
@@ -119,6 +182,8 @@ export function useSecurity(roomId, sendJSON, addLog) {
 
   const resetSecurityState = useCallback(() => {
     tofuVerifiedRef.current = false;
+    hasSentHandshakeRef.current = false;
+    pendingHandshakeChannelRef.current = null;
     setTofuVerified(false);
     setIdentityVerified(false);
     setIsReturningPeer(false);
@@ -134,6 +199,7 @@ export function useSecurity(roomId, sendJSON, addLog) {
     tofuVerifiedRef,
     isReturningPeer,
     interruptedTransfer,
+    uuidInitialized,
 
     // Identity
     myUUID,

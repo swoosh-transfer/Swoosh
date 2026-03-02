@@ -59,6 +59,7 @@ export function initSocket() {
     if (currentRoom) {
       logger.log('[Socket] Reconnected, rejoining room:', currentRoom);
       const roomToRejoin = currentRoom;
+      const backupRoom = roomToRejoin; // Backup in case rejoin fails
       currentRoom = null; // Reset so joinRoom doesn't short-circuit
       isJoining = false;
       
@@ -75,6 +76,9 @@ export function initSocket() {
         });
       }).catch(err => {
         logger.error('[Socket] Failed to rejoin room:', err);
+        // Restore currentRoom so user can manually rejoin
+        currentRoom = backupRoom;
+        logger.log('[Socket] Room ID preserved for manual rejoin:', backupRoom);
       });
     }
   });
@@ -178,9 +182,8 @@ export function createRoom() {
 
     const onRoomCreated = (data) => {
       cleanup();
-      // Support both old (string) and new (object) payloads
-      const roomId = typeof data === 'object' ? data.roomId : data;
-      logger.log('[Socket] Room created:', roomId, typeof data === 'object' ? `(${data.occupancy}/${data.capacity})` : '');
+      const roomId = data.roomId;
+      logger.log('[Socket] Room created:', roomId, `(${data.occupancy}/${data.capacity})`);
       resolve(data);
     };
 
@@ -243,10 +246,9 @@ export function joinRoom(roomId) {
     const onRoomJoined = (data) => {
       cleanup();
       isJoining = false;
-      // Support both old (string) and new (object) payloads
-      const joinedRoomId = typeof data === 'object' ? data.roomId : data;
+      const joinedRoomId = data.roomId;
       currentRoom = joinedRoomId;
-      logger.log('[Socket] Joined room:', joinedRoomId, typeof data === 'object' ? `(${data.occupancy}/${data.capacity})` : '');
+      logger.log('[Socket] Joined room:', joinedRoomId, `(${data.occupancy}/${data.capacity})`);
       resolve(data);
     };
 
@@ -307,8 +309,7 @@ export function setupSignalingListeners(handlers) {
 
   if (handlers.onUserJoined) {
     socket.on('user-joined', (data) => {
-      // Support both old (string peerId) and new (object) payloads
-      const userId = typeof data === 'object' ? data.userId : data;
+      const userId = data.userId;
       logger.log('[Socket] User joined:', userId);
       handlers.onUserJoined(data);
     });

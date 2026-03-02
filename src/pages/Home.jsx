@@ -5,6 +5,7 @@ import { initSocket, waitForConnection, createRoom } from '../utils/signaling';
 import { createTOFUSetup } from '../utils/tofuSecurity';
 import FileDropZone from '../components/FileDropZone';
 import logger from '../utils/logger.js';
+import { formatBytes } from '../lib/formatters';
 import {
   listTransfers,
   deleteTransfer,
@@ -13,6 +14,10 @@ import {
 import {
   deleteChunksByTransfer,
 } from '../infrastructure/database/chunks.repository.js';
+import {
+  deserializeBitmap,
+  getCompletedCount,
+} from '../infrastructure/database/chunkBitmap.js';
 
 export default function Home() {
   const navigate = useNavigate();
@@ -56,30 +61,89 @@ export default function Home() {
 
         const transfers = await listTransfers();
         const incomplete = transfers.filter(
-          (t) => t.status === 'active' || t.status === 'paused' || t.status === 'interrupted'
+          (t) => (t.status === 'interrupted' || t.status === 'paused') &&
+            t.direction !== 'receiving' // Only show sender-side transfers — receivers can't resume from Home
         );
         if (cancelled) return;
 
         // Build UI-friendly list with progress info
         const items = [];
+        const seenFiles = new Set(); // Track unique file names to prevent duplicates
+        
         for (const t of incomplete) {
           // Only surface transfers with real progress
-          if (t.lastChunkIndex > 0 || t.lastProgress > 0) {
+          if (t.lastChunkIndex > 0 || t.lastProgress > 0 || t.chunkBitmap || t.fileBitmaps) {
             if (cancelled) return;
-            const progress = t.lastProgress || 0;
-            items.push({
-              transferId: t.transferId,
-              fileName: t.fileName,
-              fileSize: t.fileSize,
-              direction: t.direction,
-              progress,
-              totalChunks: t.totalChunks,
-              chunkBitmap: t.chunkBitmap || null,
-              fileManifest: t.fileManifest || null,
-              fileHash: t.fileHash || null,
-              createdAt: t.createdAt,
-              roomId: t.roomId,
-            });
+
+            // For multi-file transfers, show each file separately
+            if (t.fileManifest && Array.isArray(t.fileManifest)) {
+              for (const fileInfo of t.fileManifest) {
+                // Use only fileName to deduplicate (not transferId)
+                if (seenFiles.has(fileInfo.fileName)) continue; // Skip duplicates
+                
+                // Calculate progress for this specific file
+                let fileProgress = 0;
+                if (t.fileBitmaps && t.fileBitmaps[fileInfo.fileName]) {
+                  try {
+                    const bitmap = deserializeBitmap(t.fileBitmaps[fileInfo.fileName]);
+                    const completedChunks = getCompletedCount(bitmap);
+                    fileProgress = Math.round((completedChunks / (fileInfo.totalChunks || 1)) * 100);
+                  } catch (err) {
+                    logger.warn('Failed to deserialize file bitmap:', err.message);
+                  }
+                }
+                
+                seenFiles.add(fileInfo.fileName);
+                items.push({
+                  transferId: t.transferId,
+                  fileName: fileInfo.fileName,
+                  fileSize: fileInfo.fileSize,
+                  direction: t.direction,
+                  progress: fileProgress,
+                  totalChunks: fileInfo.totalChunks,
+                  chunkBitmap: null,
+                  fileManifest: t.fileManifest,
+                  fileHash: t.fileHash || null,
+                  createdAt: t.createdAt,
+                  roomId: t.roomId,
+                });
+              }
+            } else {
+              // Single-file transfer - deduplicate by fileName only
+              if (seenFiles.has(t.fileName)) continue; // Skip duplicates
+
+              // Calculate progress from bitmap when lastProgress is stale/missing
+              let progress = t.lastProgress || 0;
+
+              if (t.chunkBitmap && t.totalChunks > 0) {
+                try {
+                  const bitmap = deserializeBitmap(t.chunkBitmap);
+                  const completedChunks = getCompletedCount(bitmap);
+                  const bitmapProgress = Math.round((completedChunks / t.totalChunks) * 100);
+                  // Use the higher of the two — bitmap is more accurate
+                  if (bitmapProgress > progress) {
+                    progress = bitmapProgress;
+                  }
+                } catch (err) {
+                  logger.warn('Failed to deserialize chunkBitmap:', err.message);
+                }
+              }
+
+              seenFiles.add(t.fileName);
+              items.push({
+                transferId: t.transferId,
+                fileName: t.fileName,
+                fileSize: t.fileSize,
+                direction: t.direction,
+                progress,
+                totalChunks: t.totalChunks,
+                chunkBitmap: t.chunkBitmap || null,
+                fileManifest: t.fileManifest || null,
+                fileHash: t.fileHash || null,
+                createdAt: t.createdAt,
+                roomId: t.roomId,
+              });
+            }
           }
         }
         setIncompleteTransfers(items);
@@ -138,6 +202,12 @@ export default function Home() {
     const transfer = pendingResumeTransfer;
 
     // Validate file matches saved metadata
+    if (file.name !== transfer.fileName) {
+      setResumeError(`File name mismatch: expected "${transfer.fileName}", got "${file.name}". Please select the original file.`);
+      setPendingResumeTransfer(null);
+      return;
+    }
+
     if (file.size !== transfer.fileSize) {
       setResumeError(`File size mismatch: expected ${formatFileSize(transfer.fileSize)}, got ${formatFileSize(file.size)}. Please select the original file.`);
       setPendingResumeTransfer(null);
@@ -385,7 +455,7 @@ export default function Home() {
           <div className="order-1 lg:order-2 w-full lg:flex-1 lg:max-w-2xl">
             <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 overflow-hidden">
 
-          {/* Incomplete Transfers Recovery */}
+          {/* Incomplete Files Recovery */}
           {incompleteTransfers.length > 0 && (
             <div className="mb-6 p-4 bg-amber-950/30 border border-amber-800/50 rounded-xl space-y-3">
               <div className="flex items-center justify-between">
@@ -395,7 +465,7 @@ export default function Home() {
                           d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                   </svg>
                   <h3 className="text-sm font-semibold text-amber-200">
-                    {incompleteTransfers.length} Incomplete Transfer{incompleteTransfers.length > 1 ? 's' : ''}
+                    {incompleteTransfers.length} Incomplete File{incompleteTransfers.length > 1 ? 's' : ''}
                   </h3>
                 </div>
                 {incompleteTransfers.length > 1 && (
@@ -408,7 +478,7 @@ export default function Home() {
                 )}
               </div>
               <p className="text-xs text-zinc-400">
-                These transfers were interrupted. Click Resume to continue, or Discard to remove.
+                These files were interrupted. Click Resume to continue, or Discard to remove.
               </p>
               {resumeError && (
                 <div className="p-2 bg-red-950/50 border border-red-900/50 rounded-lg">
@@ -552,26 +622,18 @@ export default function Home() {
   );
 }
 
+function formatNumber(num) {
+  if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
+  if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
+  return num.toString();
+}
+
 function formatFileSize(bytes) {
   if (bytes === 0) return '0 B';
   const k = 1024;
   const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
-
-function formatBytes(bytes) {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-}
-
-function formatNumber(num) {
-  if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
-  if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
-  return num.toString();
 }
 
 function calculateTotal(dailyStats, field) {

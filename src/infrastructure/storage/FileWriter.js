@@ -171,16 +171,74 @@ export async function createFileHandle(fileName, fileSize) {
  * @param {string} transferId - Transfer ID
  * @param {string} fileName - File name
  * @param {number} fileSize - File size in bytes
+ * @param {Object} [options] - Additional options
+ * @param {boolean} [options.resume=false] - Whether this is resuming an existing transfer
+ * @param {File} [options.existingFile] - Existing file to resume writing to
+ * @param {number} [options.resumeFromChunk=0] - Chunk index to resume from
  * @returns {Promise<Object>} Writer info
  */
-export async function initFileWriter(transferId, fileName, fileSize) {
+export async function initFileWriter(transferId, fileName, fileSize, options = {}) {
+  const { resume = false, existingFile = null, resumeFromChunk = 0 } = options;
+  
   try {
-    const handle = await createFileHandle(fileName, fileSize);
+    let handle;
+    let writable;
     
-    // Create writable stream - start fresh
-    const writable = await handle.createWritable({ 
-      keepExistingData: false 
-    });
+    if (resume) {
+      // Resume mode: prompt user to select the existing file
+      // Browser security requires user to manually select the file to get writable access
+      if (!supportsOpenFilePicker()) {
+        throw new StorageError('Resume not supported in this browser (File System Access API required)');
+      }
+      
+      logger.info(`[FileWriter] Resuming transfer for ${fileName} from chunk ${resumeFromChunk}`);
+      
+      // Prompt user to re-select the same file
+      const handles = await window.showOpenFilePicker({ 
+        multiple: false,
+        types: [{
+          description: 'Select the file to resume',
+          accept: { '*/*': [] }
+        }]
+      });
+      
+      if (handles.length === 0) {
+        throw new StorageError('No file selected for resume');
+      }
+      
+      handle = handles[0];
+      const selectedFile = await handle.getFile();
+      
+      // Validate selected file
+      if (selectedFile.name !== fileName) {
+        throw new StorageError(`File name mismatch: expected "${fileName}", got "${selectedFile.name}"`);
+      }
+      
+      // Allow partial file (might be incomplete transfer)
+      const expectedMinSize = resumeFromChunk * STORAGE_CHUNK_SIZE;
+      if (selectedFile.size < expectedMinSize) {
+        throw new StorageError(`File too small: expected at least ${expectedMinSize} bytes, got ${selectedFile.size} bytes`);
+      }
+      
+      // Create writable stream with existing data preserved
+      writable = await handle.createWritable({ 
+        keepExistingData: true 
+      });
+      
+      // Seek to resume position
+      const seekPosition = resumeFromChunk * STORAGE_CHUNK_SIZE;
+      await writable.seek(seekPosition);
+      logger.info(`[FileWriter] Seeked to position ${seekPosition} (chunk ${resumeFromChunk})`);
+      
+    } else {
+      // Normal mode: create new file
+      handle = await createFileHandle(fileName, fileSize);
+      
+      // Create writable stream - start fresh
+      writable = await handle.createWritable({ 
+        keepExistingData: false 
+      });
+    }
     
     // Validate writable stream
     if (!writable || typeof writable.write !== 'function') {
@@ -198,15 +256,19 @@ export async function initFileWriter(transferId, fileName, fileSize) {
       fileName,
       fileSize,
       startTime: Date.now(),
+      resumedFrom: resume ? resumeFromChunk : 0,
     });
     
-    logger.info(`[FileWriter] Initialized for ${fileName} (${totalChunks} chunks)`);
+    const action = resume ? `Resumed (from chunk ${resumeFromChunk})` : 'Initialized';
+    logger.info(`[FileWriter] ${action} for ${fileName} (${totalChunks} chunks)`);
     
     return {
       transferId,
       fileName,
       fileSize,
       totalChunks,
+      resumed: resume,
+      resumedFromChunk: resumeFromChunk,
     };
   } catch (error) {
     // Clean up on error
