@@ -28,20 +28,12 @@ The codebase follows a **layered architecture** from UI → Services → Domain 
 └──────────────────────────────────────────────────────┘
                         ↓ uses
 ┌──────────────────────────────────────────────────────┐
-│  SERVICE LAYER                                        │
-│  services/ - Stateless orchestration                 │
-│  ├── ConnectionService - WebRTC connection           │
-│  ├── SecurityService - TOFU verification             │
-│  ├── TransferOrchestrator - File transfer logic      │
-│  └── MessageService - Protocol messages              │
-└──────────────────────────────────────────────────────┘
-                        ↓ uses
-┌──────────────────────────────────────────────────────┐
 │  TRANSFER LAYER                                       │
 │  transfer/ - Transfer engine modules                 │
-│  ├── sending/ - ChunkingEngine, BufferManager        │
-│  ├── receiving/ - AssemblyEngine, FileReceiver       │
+│  ├── sending/ - ChunkingEngine                       │
+│  ├── receiving/ - AssemblyEngine, ChunkValidator      │
 │  ├── resumption/ - ResumableTransferManager          │
+│  ├── multifile/ - MultiFileTransferManager           │
 │  └── shared/ - ProgressTracker (single source!)      │
 └──────────────────────────────────────────────────────┘
                         ↓ uses
@@ -53,7 +45,7 @@ The codebase follows a **layered architecture** from UI → Services → Domain 
 └──────────────────────────────────────────────────────┘
 ```
 
-**Key Principle:** Upper layers depend on lower layers, never the reverse. No circular dependencies!
+**Key Principle:** Upper layers depend on lower layers, never the reverse. Hooks orchestrate business logic directly — no intermediate service layer.
 
 ### Step 2: Trace a File Transfer (10 minutes)
 
@@ -64,16 +56,10 @@ Let's follow what happens when a user sends a file:
    - Calls `handleSendFile()` from `useFileTransfer` hook
 
 2. **Hook Layer** ([Room/hooks/useFileTransfer.js](../src/pages/Room/hooks/useFileTransfer.js))
-   - Hook calls `TransferOrchestrator.startSending(file)`
+   - Hook initialises `ChunkingEngine` with the file and data channel
    - Returns progress callbacks and control functions
 
-3. **Service Layer** ([services/TransferOrchestrator.js](../src/services/TransferOrchestrator.js))
-   - Initializes transfer ID, metadata
-   - Creates `ChunkingEngine` instance
-   - Coordinates with `MessageService` to send metadata
-   - Starts chunking process
-
-4. **Transfer Layer** ([transfer/sending/ChunkingEngine.js](../src/transfer/sending/ChunkingEngine.js))
+3. **Transfer Layer** ([transfer/sending/ChunkingEngine.js](../src/transfer/sending/ChunkingEngine.js))
    - Reads file in 16KB chunks (WebRTC DataChannel limit)
    - Accumulates chunks into 64KB storage buffers
    - Calculates SHA-256 checksums
@@ -86,11 +72,10 @@ Let's follow what happens when a user sends a file:
 
 **On the receiving side:**
 
-1. **MessageService** receives file metadata message
-2. **TransferOrchestrator** creates `FileReceiver` instance
-3. **AssemblyEngine** validates chunks, checks checksums
-4. **FileWriter** writes validated chunks to disk via File System API
-5. **ProgressTracker** updates receive progress
+1. **Hook Layer** receives file metadata message via data channel
+2. **AssemblyEngine** validates chunks, checks checksums
+3. **FileWriter** writes validated chunks to disk via File System API
+4. **ProgressTracker** updates receive progress
 
 **📖 See [TRANSFER_FLOW.md](TRANSFER_FLOW.md) for detailed sequence diagrams**
 
@@ -105,16 +90,16 @@ Start with these files to understand the system:
 - **Read this first** to see how everything connects
 
 #### **Connection Management**
-[services/ConnectionService.js](../src/services/ConnectionService.js)
-- WebRTC lifecycle management
+[pages/Room/hooks/useRoomConnection.js](../src/pages/Room/hooks/useRoomConnection.js)
+- WebRTC lifecycle management (via utils/p2pManager.js)
 - Signaling and ICE candidate exchange
-- Event-based API: `onConnected`, `onDisconnected`
+- Socket connection and room joining
 
 #### **Transfer Orchestration**
-[services/TransferOrchestrator.js](../src/services/TransferOrchestrator.js)
-- **The most important service for transfers**
-- Coordinates sending and receiving
-- Exposes: `startSending()`, `startReceiving()`, `pause()`, `resume()`
+[pages/Room/hooks/useFileTransfer.js](../src/pages/Room/hooks/useFileTransfer.js)
+- **The main hook for transfers**
+- Coordinates sending (ChunkingEngine) and receiving (AssemblyEngine)
+- Exposes: `handleSendFile()`, `pauseTransfer()`, `resumeTransfer()`
 
 #### **Progress Tracking**
 [transfer/shared/ProgressTracker.js](../src/transfer/shared/ProgressTracker.js)
@@ -126,7 +111,7 @@ Start with these files to understand the system:
 [stores/roomStore.js](../src/stores/roomStore.js) - Room metadata only
 [stores/transferStore.js](../src/stores/transferStore.js) - Transfer history only
 - Zustand stores for cross-page UI state
-- **NOT for business logic** (that's in hooks/services)
+- **NOT for business logic** (that's in hooks)
 - See [stores/README.md](../src/stores/README.md) for store vs hook guidelines
 
 ### Step 4: Run the Application (5 minutes)
@@ -158,8 +143,6 @@ npm run dev
 ```
 UI (pages/, components/)
   ↓ can import
-Services (services/)
-  ↓ can import
 Transfer Modules (transfer/)
   ↓ can import
 Infrastructure (infrastructure/)
@@ -169,7 +152,7 @@ Library (lib/)
 Constants (constants/)
 ```
 
-**❌ NEVER import upward** (e.g., service importing from UI)
+**❌ NEVER import upward** (e.g., infrastructure importing from transfer)
 
 ### State Management Guidelines
 
@@ -180,14 +163,12 @@ Constants (constants/)
 
 **Custom Hooks** (`pages/Room/hooks/`) - For:
 - ✅ Component-specific business logic
-- ✅ Service integration
-- ✅ Real-time state (connection, progress, TOFU)
+- ✅ Transfer engine integration
+- ✅ Real-time state (connection, progress, identity verification)
 
-**Services** (`services/`) - For:
-- ✅ Stateless orchestration
-- ✅ Coordinating multiple modules
-- ❌ NO React dependencies
-- ❌ NO component state
+**Custom Hooks** orchestrate all business logic directly:
+- ✅ Direct use of transfer engines and utilities
+- ❌ NO React dependencies in transfer/infrastructure layers
 
 **📖 See [stores/README.md](../src/stores/README.md) for detailed guidelines**
 
@@ -228,31 +209,25 @@ npm test -- --watch
 
 ## Architecture Decisions
 
-### Why Services Instead of Direct Utils?
+### Why Custom Hooks Instead of Services?
 
-**Before (❌ Problems):**
-```javascript
-// Room.jsx directly using 15+ utility files
-import { chunkFile } from '@/utils/chunkingSystem';
-import { receiveFile } from '@/utils/fileReceiver';
-import { setupWebRTC } from '@/utils/p2pManager';
-// ... 12 more imports
-// 1,401 lines of tangled logic
-```
+**The Service Layer** (ConnectionService, SecurityService, TransferOrchestrator, MessageService)
+was planned but never adopted by the actual UI code. All business logic lives directly in
+custom React hooks (`pages/Room/hooks/`) that use transfer engines and utilities.
 
-**After (✅ Solution):**
+**Current approach (✅):**
 ```javascript
-// Room.jsx using clean services
+// Room.jsx using clean hooks
 const connection = useRoomConnection();    // Wraps all connection logic
 const transfer = useFileTransfer();        // Wraps all transfer logic
-const security = useSecurity();            // Wraps all TOFU logic
+const security = useSecurity();            // Wraps identity verification
 // ~200 lines, easy to understand
 ```
 
 **Benefits:**
-- New developers learn 3 services, not 15+ utils
-- Services can be unit tested without React
-- Clear separation: UI → Services → Utils
+- New developers learn 3 hooks, not 15+ files
+- Custom hooks encapsulate business logic cleanly
+- Clear separation: UI → Hooks → Transfer/Utils
 - Easier to refactor internal implementation
 
 ### Why No Circular Dependencies?
@@ -355,11 +330,11 @@ Now that you understand the basics:
 
 | Feature | Key Files |
 |---------|-----------|
-| **Room Creation** | `pages/Room/hooks/useRoomConnection.js`, `services/ConnectionService.js` |
-| **WebRTC Connection** | `services/ConnectionService.js`, `utils/p2pManager.js`, `utils/signaling.js` |
-| **TOFU Security** | `services/SecurityService.js`, `utils/tofuSecurity.js` |
-| **File Sending** | `transfer/sending/ChunkingEngine.js`, `transfer/sending/BufferManager.js` |
-| **File Receiving** | `transfer/receiving/FileReceiver.js`, `transfer/receiving/AssemblyEngine.js` |
+| **Room Creation** | `pages/Room/hooks/useRoomConnection.js`, `utils/p2pManager.js` |
+| **WebRTC Connection** | `pages/Room/hooks/useRoomConnection.js`, `utils/p2pManager.js`, `utils/signaling.js` |
+| **Identity Verification** | `pages/Room/hooks/useSecurity.js`, `utils/tofuSecurity.js`, `utils/identityManager.js` |
+| **File Sending** | `pages/Room/hooks/useFileTransfer.js`, `transfer/sending/ChunkingEngine.js` |
+| **File Receiving** | `pages/Room/hooks/useFileTransfer.js`, `transfer/receiving/AssemblyEngine.js` |
 | **Progress Tracking** | `transfer/shared/ProgressTracker.js` |
 | **Pause/Resume** | `transfer/resumption/ResumableTransferManager.js` |
 | **Data Persistence** | `infrastructure/database/`, `infrastructure/storage/` |

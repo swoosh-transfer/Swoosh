@@ -10,6 +10,7 @@ let isJoining = false; // Track if currently joining to prevent duplicates
 let currentRoom = null; // Track current room
 let reconnectCallbacks = []; // Callbacks to call on reconnection
 let encryptionKey = null; // AES-GCM key for signaling encryption
+let lifecycleListenersAttached = false;
 
 /**
  * Register a callback to be called when socket reconnects
@@ -59,6 +60,7 @@ export function initSocket() {
     if (currentRoom) {
       logger.log('[Socket] Reconnected, rejoining room:', currentRoom);
       const roomToRejoin = currentRoom;
+      const backupRoom = roomToRejoin; // Backup in case rejoin fails
       currentRoom = null; // Reset so joinRoom doesn't short-circuit
       isJoining = false;
       
@@ -75,6 +77,9 @@ export function initSocket() {
         });
       }).catch(err => {
         logger.error('[Socket] Failed to rejoin room:', err);
+        // Restore currentRoom so user can manually rejoin
+        currentRoom = backupRoom;
+        logger.log('[Socket] Room ID preserved for manual rejoin:', backupRoom);
       });
     }
   });
@@ -89,30 +94,74 @@ export function initSocket() {
     logger.error('[Socket] Connection error:', error);
   });
 
-  // Handle visibility change for mobile browsers
-  if (typeof document !== 'undefined') {
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-  }
+  // Handle lifecycle changes for mobile browsers
+  attachLifecycleListeners();
 
   return socket;
+}
+
+function attachLifecycleListeners() {
+  if (lifecycleListenersAttached || typeof document === 'undefined') {
+    return;
+  }
+
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('pageshow', handlePageShow);
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('online', handlePageShow);
+  }
+
+  lifecycleListenersAttached = true;
+}
+
+function detachLifecycleListeners() {
+  if (!lifecycleListenersAttached || typeof document === 'undefined') {
+    return;
+  }
+
+  document.removeEventListener('visibilitychange', handleVisibilityChange);
+
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('pageshow', handlePageShow);
+    window.removeEventListener('pagehide', handlePageHide);
+    window.removeEventListener('online', handlePageShow);
+  }
+
+  lifecycleListenersAttached = false;
+}
+
+function recoverSocketConnection(source) {
+  if (!socket) return;
+
+  logger.log(`[Socket] Lifecycle recovery trigger: ${source}`);
+  if (!socket.connected) {
+    socket.connect();
+    return;
+  }
+
+  if (currentRoom) {
+    socket.emit('verify-room', currentRoom);
+  }
 }
 
 /**
  * Handle page visibility changes (mobile tab switching)
  */
 function handleVisibilityChange() {
-  if (document.visibilityState === 'visible' && socket) {
-    logger.log('[Socket] Page became visible, checking connection...');
-    
-    if (!socket.connected) {
-      logger.log('[Socket] Socket disconnected, attempting reconnect...');
-      socket.connect();
-    } else if (currentRoom) {
-      // Verify we're still in the room by re-emitting join
-      logger.log('[Socket] Verifying room membership...');
-      socket.emit('verify-room', currentRoom);
-    }
+  if (document.visibilityState === 'visible') {
+    recoverSocketConnection('visibilitychange');
   }
+}
+
+function handlePageShow() {
+  recoverSocketConnection('pageshow/online');
+}
+
+function handlePageHide() {
+  if (!socket) return;
+  logger.log('[Socket] Page hidden/backgrounded');
 }
 
 /**
@@ -178,9 +227,8 @@ export function createRoom() {
 
     const onRoomCreated = (data) => {
       cleanup();
-      // Support both old (string) and new (object) payloads
-      const roomId = typeof data === 'object' ? data.roomId : data;
-      logger.log('[Socket] Room created:', roomId, typeof data === 'object' ? `(${data.occupancy}/${data.capacity})` : '');
+      const roomId = data.roomId;
+      logger.log('[Socket] Room created:', roomId, `(${data.occupancy}/${data.capacity})`);
       resolve(data);
     };
 
@@ -243,10 +291,9 @@ export function joinRoom(roomId) {
     const onRoomJoined = (data) => {
       cleanup();
       isJoining = false;
-      // Support both old (string) and new (object) payloads
-      const joinedRoomId = typeof data === 'object' ? data.roomId : data;
+      const joinedRoomId = data.roomId;
       currentRoom = joinedRoomId;
-      logger.log('[Socket] Joined room:', joinedRoomId, typeof data === 'object' ? `(${data.occupancy}/${data.capacity})` : '');
+      logger.log('[Socket] Joined room:', joinedRoomId, `(${data.occupancy}/${data.capacity})`);
       resolve(data);
     };
 
@@ -307,8 +354,7 @@ export function setupSignalingListeners(handlers) {
 
   if (handlers.onUserJoined) {
     socket.on('user-joined', (data) => {
-      // Support both old (string peerId) and new (object) payloads
-      const userId = typeof data === 'object' ? data.userId : data;
+      const userId = data.userId;
       logger.log('[Socket] User joined:', userId);
       handlers.onUserJoined(data);
     });
@@ -475,6 +521,7 @@ export function disconnectSocket() {
     socket.disconnect();
     socket = null;
   }
+  detachLifecycleListeners();
 }
 
 export default {

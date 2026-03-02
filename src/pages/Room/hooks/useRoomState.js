@@ -6,7 +6,6 @@
  * - Pending file information
  * - Awaiting save location state
  * - Download results
- * - Recoverable transfers
  */
 import { useState, useCallback } from 'react';
 import logger from '../../../utils/logger.js';
@@ -22,9 +21,6 @@ export function useRoomState() {
   const [pendingFile, setPendingFile] = useState(null);
   const [awaitingSaveLocation, setAwaitingSaveLocation] = useState(false);
   const [downloadResult, setDownloadResult] = useState(null);
-  
-  // Crash recovery
-  const [recoverableTransfers, setRecoverableTransfers] = useState([]);
 
   /**
    * Add a log entry to the activity feed
@@ -84,22 +80,6 @@ export function useRoomState() {
     setDownloadResult(result);
   }, []);
 
-  /**
-   * Add a recoverable transfer to the list
-   * @param {Object} transfer - Transfer data
-   */
-  const addRecoverableTransfer = useCallback((transfer) => {
-    setRecoverableTransfers(prev => [...prev, transfer]);
-  }, []);
-
-  /**
-   * Remove a recoverable transfer from the list
-   * @param {string} transferId - Transfer ID to remove
-   */
-  const removeRecoverableTransfer = useCallback((transferId) => {
-    setRecoverableTransfers(prev => prev.filter(t => t.transferId !== transferId));
-  }, []);
-
   return {
     // Activity logs
     logs,
@@ -119,10 +99,5 @@ export function useRoomState() {
     // Download results
     downloadResult,
     setDownloadResultData,
-    
-    // Crash recovery
-    recoverableTransfers,
-    addRecoverableTransfer,
-    removeRecoverableTransfer,
   };
 }

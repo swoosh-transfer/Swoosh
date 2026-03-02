@@ -60,13 +60,27 @@ export async function getChunksByTransfer(transferId) {
 /**
  * Get chunks by status
  * 
+ * Uses the status index with a cursor, then filters by transferId.
+ * For transfers with many chunks, this is more efficient than fetching
+ * all chunks for a transfer and filtering in JS.
+ * 
  * @param {string} transferId - Transfer ID
  * @param {string} status - Chunk status ('pending', 'received', 'validated', 'written')
  * @returns {Promise<Object[]>} Array of matching chunks
  */
 export async function getChunksByStatus(transferId, status) {
-  const allChunks = await getChunksByTransfer(transferId);
-  return allChunks.filter(c => c.status === status);
+  const db = await getDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAMES.CHUNKS, 'readonly');
+    const store = tx.objectStore(STORE_NAMES.CHUNKS);
+    const index = store.index('status');
+    const req = index.getAll(status);
+    req.onsuccess = () => {
+      // Filter by transferId since the status index doesn't include it
+      resolve(req.result.filter(c => c.transferId === transferId));
+    };
+    req.onerror = () => reject(req.error);
+  });
 }
 
 /**
@@ -188,3 +202,19 @@ export async function getChunkStats(transferId, totalChunks) {
     byStatus,
   };
 }
+
+/**
+ * Namespace adapter object for consumers that import { chunksRepository }
+ * Maps method names used in transfer layer to repository functions.
+ */
+export const chunksRepository = {
+  save: saveChunk,
+  get: getChunk,
+  findByTransferId: getChunksByTransfer,
+  getByStatus: getChunksByStatus,
+  getMissing: getMissingChunks,
+  updateStatus: updateChunkStatus,
+  saveBatch: saveChunksBatch,
+  deleteByTransferId: deleteChunksByTransfer,
+  getStats: getChunkStats,
+};

@@ -65,3 +65,16 @@ export async function listFiles() {
     req.onerror = () => reject(req.error);
   });
 }
+
+/**
+ * Namespace adapter for object-style access.
+ * Maps method names expected by consumers to actual functions.
+ */
+export const metadataRepository = {
+  saveFile: saveFileMetadata,
+  saveFileMetadata,
+  getFile: getFileMetadata,
+  getFileMetadata,
+  deleteFileMetadata,
+  listFiles,
+};

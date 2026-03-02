@@ -78,7 +78,7 @@ export const INITIAL_CHANNELS = 1;
 export const CHANNEL_SCALE_UP_THRESHOLD = 1.5 * 1024 * 1024;   // 1.5 MB/s
 export const CHANNEL_SCALE_DOWN_THRESHOLD = 500 * 1024;         // 500 KB/s
 export const CHANNEL_SCALE_INTERVAL = 3000;                     // 3 seconds
-export const CHANNEL_SCALE_SUSTAIN_COUNT = 1;                   // consecutive intervals
+export const CHANNEL_SCALE_SUSTAIN_COUNT = 3;                   // consecutive intervals
 
 /** Prefix for data channel labels: file-transfer-0, file-transfer-1, etc. */
 export const CHANNEL_LABEL_PREFIX = 'file-transfer-';
@@ -88,6 +88,61 @@ export const CHANNEL_BUFFER_LOW_WATERMARK = 64 * 1024;  // 64KB
 
 /** High watermark — pause sending on a channel when bufferedAmount exceeds this */
 export const CHANNEL_BUFFER_HIGH_WATERMARK = 256 * 1024; // 256KB
+
+/**
+ * Mobile/constrained-network reliability profile.
+ * Keeps throughput balanced while reducing stalls on weaker devices/networks.
+ */
+export const MOBILE_MAX_CHANNELS = 3;
+export const MOBILE_MIN_PARALLEL_WORKERS = 2;
+export const MOBILE_CHANNEL_SCALE_INTERVAL = 5000;
+export const MOBILE_CHANNEL_BUFFER_LOW_WATERMARK = 48 * 1024;
+export const DESKTOP_CHANNEL_BUFFER_LOW_WATERMARK = 256 * 1024;
+
+/**
+ * Detect likely mobile/constrained environment.
+ * Uses userAgentData when available, with UA and Network Information API fallback.
+ *
+ * @returns {boolean}
+ */
+export function isConstrainedMobileEnvironment() {
+  if (typeof navigator === 'undefined') {
+    return false;
+  }
+
+  // Check for localStorage override (for testing desktop on mobile emulation)
+  if (typeof localStorage !== 'undefined' && localStorage.getItem('forceDesktopProfile') === 'true') {
+    return false;
+  }
+
+  const userAgentDataMobile = Boolean(navigator.userAgentData?.mobile);
+  const userAgent = navigator.userAgent || '';
+  const isMobileUa = /Android|iPhone|iPad|iPod|Mobile|IEMobile|Opera Mini/i.test(userAgent);
+
+  const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+  const saveData = Boolean(connection?.saveData);
+  const effectiveType = String(connection?.effectiveType || '').toLowerCase();
+  const slowNetwork = effectiveType === 'slow-2g' || effectiveType === '2g' || effectiveType === '3g';
+
+  return userAgentDataMobile || isMobileUa || saveData || slowNetwork;
+}
+
+/**
+ * Runtime transfer profile tuned for current device/network conditions.
+ */
+export function getTransferReliabilityProfile() {
+  const constrained = isConstrainedMobileEnvironment();
+
+  return {
+    constrained,
+    maxChannels: constrained ? MOBILE_MAX_CHANNELS : MAX_CHANNELS,
+    minParallelWorkers: constrained ? MOBILE_MIN_PARALLEL_WORKERS : 3,
+    channelScaleInterval: constrained ? MOBILE_CHANNEL_SCALE_INTERVAL : CHANNEL_SCALE_INTERVAL,
+    channelBufferLowWatermark: constrained
+      ? MOBILE_CHANNEL_BUFFER_LOW_WATERMARK
+      : DESKTOP_CHANNEL_BUFFER_LOW_WATERMARK,
+  };
+}
 
 // ============ TRANSFER MODE ============
 

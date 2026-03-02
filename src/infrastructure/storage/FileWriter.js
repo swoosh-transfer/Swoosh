@@ -28,6 +28,83 @@ export function supportsFileSystemAccess() {
 }
 
 /**
+ * Check if file-open picker (showOpenFilePicker) is supported
+ * 
+ * @returns {boolean}
+ */
+export function supportsOpenFilePicker() {
+  return typeof window.showOpenFilePicker === 'function';
+}
+
+/**
+ * Open a file picker dialog for re-selecting files (e.g. during resume).
+ * Uses the File System Access API's showOpenFilePicker.
+ * 
+ * Falls back to a hidden <input type="file"> on browsers without FSAPI.
+ * 
+ * @param {Object} [options]
+ * @param {boolean} [options.multiple=false] - Allow multiple file selection
+ * @param {Array<{description: string, accept: Object}>} [options.types] - File type filters
+ * @param {string} [options.startIn] - Start directory hint ('desktop', 'documents', etc.)
+ * @returns {Promise<File[]>} Array of selected File objects
+ * @throws {StorageError} On cancellation or permission error
+ */
+export async function openFilePicker(options = {}) {
+  const { multiple = false, types, startIn } = options;
+
+  // Try File System Access API first
+  if (supportsOpenFilePicker()) {
+    try {
+      const pickerOpts = { multiple };
+      if (types) pickerOpts.types = types;
+      if (startIn) pickerOpts.startIn = startIn;
+
+      const handles = await window.showOpenFilePicker(pickerOpts);
+      const files = await Promise.all(handles.map((h) => h.getFile()));
+      return files;
+    } catch (error) {
+      if (error.name === 'AbortError') {
+        throw new StorageError('File selection cancelled by user');
+      }
+      throw error;
+    }
+  }
+
+  // Fallback: hidden <input type="file">
+  return new Promise((resolve, reject) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = multiple;
+    if (types && types.length > 0) {
+      // Build accept attribute from types, e.g. ".jpg,.png"
+      const accept = types
+        .flatMap((t) => Object.values(t.accept || {}).flat())
+        .join(',');
+      if (accept) input.accept = accept;
+    }
+    input.style.display = 'none';
+
+    input.addEventListener('change', () => {
+      const files = Array.from(input.files || []);
+      document.body.removeChild(input);
+      if (files.length === 0) {
+        reject(new StorageError('No files selected'));
+      } else {
+        resolve(files);
+      }
+    });
+
+    input.addEventListener('cancel', () => {
+      document.body.removeChild(input);
+      reject(new StorageError('File selection cancelled by user'));
+    });
+
+    document.body.appendChild(input);
+    input.click();
+  });
+}
+
+/**
  * Check browser support and throw if not available
  * 
  * @throws {StorageError} If required APIs are not supported
@@ -94,16 +171,74 @@ export async function createFileHandle(fileName, fileSize) {
  * @param {string} transferId - Transfer ID
  * @param {string} fileName - File name
  * @param {number} fileSize - File size in bytes
+ * @param {Object} [options] - Additional options
+ * @param {boolean} [options.resume=false] - Whether this is resuming an existing transfer
+ * @param {File} [options.existingFile] - Existing file to resume writing to
+ * @param {number} [options.resumeFromChunk=0] - Chunk index to resume from
  * @returns {Promise<Object>} Writer info
  */
-export async function initFileWriter(transferId, fileName, fileSize) {
+export async function initFileWriter(transferId, fileName, fileSize, options = {}) {
+  const { resume = false, existingFile = null, resumeFromChunk = 0 } = options;
+  
   try {
-    const handle = await createFileHandle(fileName, fileSize);
+    let handle;
+    let writable;
     
-    // Create writable stream - start fresh
-    const writable = await handle.createWritable({ 
-      keepExistingData: false 
-    });
+    if (resume) {
+      // Resume mode: prompt user to select the existing file
+      // Browser security requires user to manually select the file to get writable access
+      if (!supportsOpenFilePicker()) {
+        throw new StorageError('Resume not supported in this browser (File System Access API required)');
+      }
+      
+      logger.info(`[FileWriter] Resuming transfer for ${fileName} from chunk ${resumeFromChunk}`);
+      
+      // Prompt user to re-select the same file
+      const handles = await window.showOpenFilePicker({ 
+        multiple: false,
+        types: [{
+          description: 'Select the file to resume',
+          accept: { '*/*': [] }
+        }]
+      });
+      
+      if (handles.length === 0) {
+        throw new StorageError('No file selected for resume');
+      }
+      
+      handle = handles[0];
+      const selectedFile = await handle.getFile();
+      
+      // Validate selected file
+      if (selectedFile.name !== fileName) {
+        throw new StorageError(`File name mismatch: expected "${fileName}", got "${selectedFile.name}"`);
+      }
+      
+      // Allow partial file (might be incomplete transfer)
+      const expectedMinSize = resumeFromChunk * STORAGE_CHUNK_SIZE;
+      if (selectedFile.size < expectedMinSize) {
+        throw new StorageError(`File too small: expected at least ${expectedMinSize} bytes, got ${selectedFile.size} bytes`);
+      }
+      
+      // Create writable stream with existing data preserved
+      writable = await handle.createWritable({ 
+        keepExistingData: true 
+      });
+      
+      // Seek to resume position
+      const seekPosition = resumeFromChunk * STORAGE_CHUNK_SIZE;
+      await writable.seek(seekPosition);
+      logger.info(`[FileWriter] Seeked to position ${seekPosition} (chunk ${resumeFromChunk})`);
+      
+    } else {
+      // Normal mode: create new file
+      handle = await createFileHandle(fileName, fileSize);
+      
+      // Create writable stream - start fresh
+      writable = await handle.createWritable({ 
+        keepExistingData: false 
+      });
+    }
     
     // Validate writable stream
     if (!writable || typeof writable.write !== 'function') {
@@ -121,15 +256,19 @@ export async function initFileWriter(transferId, fileName, fileSize) {
       fileName,
       fileSize,
       startTime: Date.now(),
+      resumedFrom: resume ? resumeFromChunk : 0,
     });
     
-    logger.info(`[FileWriter] Initialized for ${fileName} (${totalChunks} chunks)`);
+    const action = resume ? `Resumed (from chunk ${resumeFromChunk})` : 'Initialized';
+    logger.info(`[FileWriter] ${action} for ${fileName} (${totalChunks} chunks)`);
     
     return {
       transferId,
       fileName,
       fileSize,
       totalChunks,
+      resumed: resume,
+      resumedFromChunk: resumeFromChunk,
     };
   } catch (error) {
     // Clean up on error

@@ -12,7 +12,27 @@
 import { useEffect, useCallback, useRef } from 'react';
 import { MESSAGE_TYPE } from '../../../constants/messages.constants.js';
 import { getChannelPool } from '../../../utils/p2pManager.js';
+import {
+  deserializeBitmap,
+  getFirstMissingChunk,
+  createBitmap,
+  markChunk,
+  serializeBitmap,
+  getMissingChunks,
+} from '../../../infrastructure/database/chunkBitmap.js';
+import { updateTransfer } from '../../../infrastructure/database/transfers.repository.js';
 import logger from '../../../utils/logger.js';
+import { heartbeatMonitor } from '../../../utils/heartbeatMonitor.js';
+import { 
+  notifyPeerJoined, 
+  notifyPeerDisconnected,
+  notifyPeerReconnected,
+  notifyResumeSuccess,
+  notifyResumeFailed,
+  notifySessionMismatch,
+} from '../../../utils/transferNotifications.js';
+import { verifyPeer, getPeerSessionMetadata, isNewSession } from '../../../utils/identityManager.js';
+import { resumeEventBus } from './resumeEventBus.js';
 
 /**
  * Hook for managing message protocol handling
@@ -24,6 +44,11 @@ import logger from '../../../utils/logger.js';
  * @param {Object} multiTransfer - Multi-file transfer hook return value
  * @param {Object} uiState - UI state hook return value
  * @param {Function} addLog - Logging function
+ * @param {Function} sendJSON - JSON message sender
+ * @param {string} roomId - Room identifier
+ * @param {string} localUuid - Local UUID
+ * @param {Object} sessionToken - Ref to local session token
+ * @param {Object} peerSessionToken - Ref to peer's session token
  * @returns {Object} Message handlers
  */
 export function useMessages(
@@ -34,7 +59,12 @@ export function useMessages(
   transfer,
   multiTransfer,
   uiState,
-  addLog
+  addLog,
+  sendJSON,
+  roomId,
+  localUuid,
+  sessionToken,
+  peerSessionToken
 ) {
   const {
     handleHandshake,
@@ -79,6 +109,58 @@ export function useMessages(
   /** Message processing serialization */
   const messageQueueRef = useRef([]);
   const isProcessingRef = useRef(false);
+  const pendingResumeRequestRef = useRef(null);
+  const resumeWaitLoggedRef = useRef(false);
+  
+  /** Sender-side chunk tracking: transferId → bitmap of chunks receiver has acknowledged */
+  const senderChunkBitmapsRef = useRef(new Map());
+  const lastSenderFlushRef = useRef(new Map()); // transferId → last chunk count when flushed
+  const SENDER_BITMAP_FLUSH_INTERVAL = 50; // Flush sender bitmap every 50 ACKs
+
+  /**
+   * Dispatch a resume request immediately, or queue it until peer handshake/session token exists.
+   * @param {Object} transferInfo
+   * @param {{ fromQueue?: boolean }} [options]
+   * @returns {boolean}
+   */
+  const dispatchResumeRequest = useCallback((transferInfo, options = {}) => {
+    const { fromQueue = false } = options;
+
+    if (!sendJSON) {
+      logger.warn('[Room] Cannot send resume request — sendJSON not available');
+      return false;
+    }
+
+    if (!peerSessionToken?.current) {
+      pendingResumeRequestRef.current = transferInfo;
+      if (!resumeWaitLoggedRef.current) {
+        addLog('Resume waiting for peer handshake...', 'warning');
+        resumeWaitLoggedRef.current = true;
+      }
+      return false;
+    }
+
+    sendJSON({
+      type: MESSAGE_TYPE.RESUME_TRANSFER,
+      transferId: transferInfo.transferId,
+      fileName: transferInfo.fileName,
+      fileSize: transferInfo.fileSize,
+      fileHash: transferInfo.fileHash || null,
+      totalChunks: transferInfo.totalChunks,
+      chunkBitmap: transferInfo.chunkBitmap || null,
+      requesterUuid: localUuid || null,
+      sessionToken: peerSessionToken.current,
+    });
+
+    pendingResumeRequestRef.current = null;
+    if (resumeWaitLoggedRef.current || fromQueue) {
+      addLog('Resume request sent after peer handshake', 'info');
+    } else {
+      addLog(`Sent resume request for: ${transferInfo.fileName}`, 'info');
+    }
+    resumeWaitLoggedRef.current = false;
+    return true;
+  }, [sendJSON, addLog, localUuid, peerSessionToken]);
 
   /**
    * Mark that we're in multi-file transfer mode (called by sender before sending manifest)
@@ -101,9 +183,8 @@ export function useMessages(
       const meta = queue?.length > 0 ? queue.shift() : null;
       
       if (meta) {
-        // Metadata found — process immediately
-        const fileIndex = meta.fileIndex;
-        await handleMultiBinaryChunk(data, fileIndex);
+        // Metadata found — pass it directly to avoid cross-channel mismatch
+        await handleMultiBinaryChunk(data, meta.fileIndex, meta);
       } else {
         // No metadata yet — this should rarely happen due to message serialization,
         // but queue the binary just in case of out-of-order network delivery
@@ -147,6 +228,10 @@ export function useMessages(
       switch (msg.type) {
         case 'handshake':
           await handleHandshake(msg);
+          if (pendingResumeRequestRef.current && peerSessionToken?.current) {
+            const pendingRequest = pendingResumeRequestRef.current;
+            dispatchResumeRequest(pendingRequest, { fromQueue: true });
+          }
           break;
 
         // ─── Multi-file messages ──────────────────────────────
@@ -252,6 +337,238 @@ export function useMessages(
           }
           break;
 
+        // ─── Chunk Acknowledgment (Sender-side tracking) ──────
+        case MESSAGE_TYPE.CHUNK_RECEIVED_ACK: {
+          // Receiver acknowledges received chunks so sender can track resume state
+          const { transferId, chunkIndices } = msg;
+          if (!transferId || !Array.isArray(chunkIndices)) {
+            logger.warn('[Room] Invalid CHUNK_RECEIVED_ACK:', msg);
+            break;
+          }
+
+          // Get or create sender bitmap for this transfer
+          let senderBitmap = senderChunkBitmapsRef.current.get(transferId);
+          if (!senderBitmap && msg.totalChunks) {
+            senderBitmap = createBitmap(msg.totalChunks);
+            senderChunkBitmapsRef.current.set(transferId, senderBitmap);
+          }
+
+          if (senderBitmap) {
+            // Mark chunks as acknowledged by receiver
+            chunkIndices.forEach(idx => markChunk(senderBitmap, idx));
+
+            // Periodically flush sender bitmap to IndexedDB
+            const lastFlush = lastSenderFlushRef.current.get(transferId) || 0;
+            const currentCount = chunkIndices.length;
+            
+            if (currentCount - lastFlush >= SENDER_BITMAP_FLUSH_INTERVAL) {
+              try {
+                const serialized = serializeBitmap(senderBitmap);
+                await updateTransfer(transferId, {
+                  senderChunkBitmap: serialized,
+                  updatedAt: Date.now(),
+                });
+                lastSenderFlushRef.current.set(transferId, currentCount);
+                logger.log(`[Room] Sender bitmap flushed for ${transferId}: ${currentCount} ACKs`);
+              } catch (error) {
+                logger.warn('[Room] Failed to flush sender bitmap:', error);
+              }
+            }
+          }
+          break;
+        }
+
+        // ─── Heartbeat ────────────────────────────────────────
+        case MESSAGE_TYPE.HEARTBEAT:
+          // Respond to heartbeat
+          sendJSON({ type: MESSAGE_TYPE.HEARTBEAT_ACK, timestamp: Date.now() });
+          // Record that we received a heartbeat from peer
+          if (roomId) {
+            heartbeatMonitor.recordHeartbeat(roomId);
+          }
+          break;
+
+        case MESSAGE_TYPE.HEARTBEAT_ACK:
+          // Heartbeat acknowledged - record successful heartbeat for monitor
+          if (roomId) {
+            heartbeatMonitor.recordHeartbeat(roomId);
+          }
+          break;
+
+        // ─── Resume protocol ─────────────────────────────────
+        case MESSAGE_TYPE.RESUME_TRANSFER: {
+          addLog(`Peer requests resume: ${msg.fileName || msg.transferId}`, 'info');
+          logger.log('[Room] Resume request received:', msg);
+
+          // ★ CRITICAL: Verify session token FIRST for replay protection
+          if (!msg.sessionToken || msg.sessionToken !== sessionToken?.current) {
+            sendJSON({
+              type: MESSAGE_TYPE.RESUME_REJECTED,
+              transferId: msg.transferId,
+              reason: 'Invalid or missing session token (replay protection)',
+            });
+            addLog('Resume rejected: invalid session token', 'warning');
+            logger.warn('[Room] Resume rejected: session token mismatch');
+            break;
+          }
+
+          // ★ CRITICAL: Verify peer identity BEFORE accepting resume
+          // This prevents a different peer from hijacking the transfer
+          if (!roomId || !msg.requesterUuid) {
+            sendJSON({
+              type: MESSAGE_TYPE.RESUME_REJECTED,
+              transferId: msg.transferId,
+              reason: 'Peer identity not provided for resume verification',
+            });
+            addLog('Resume rejected: missing peer identity for verification', 'warning');
+            break;
+          }
+
+          let isPeerVerified = true;
+          let verificationReason = '';
+          
+          // Check if this is the same peer from the original transfer
+          const isKnownPeer = await verifyPeer(msg.requesterUuid, roomId);
+          if (!isKnownPeer) {
+            isPeerVerified = false;
+            const peerSession = await getPeerSessionMetadata(roomId);
+            const expectedPeer = peerSession?.peerUuid || 'unknown';
+            verificationReason = `Different peer detected - expected ${expectedPeer}, got ${msg.requesterUuid}`;
+            if (peerSession?.peerUuid) {
+              notifySessionMismatch(peerSession.peerUuid, msg.requesterUuid);
+            }
+            logger.warn(`[Room] Session mismatch: ${verificationReason}`);
+          } else {
+            notifyPeerReconnected(msg.requesterUuid, true);
+          }
+
+          // Reject immediately if peer verification fails
+          if (!isPeerVerified) {
+            sendJSON({
+              type: MESSAGE_TYPE.RESUME_REJECTED,
+              transferId: msg.transferId,
+              reason: verificationReason,
+            });
+            addLog(`Resume rejected: ${verificationReason}`, 'warning');
+            notifyResumeFailed(msg.fileName, verificationReason);
+            break;
+          }
+
+          // Sender-side: validate the file the receiver wants to resume
+          const currentFile = transfer.currentFile || (transfer.selectedFile);
+          let accepted = false;
+          let reason = '';
+
+          if (!currentFile) {
+            reason = 'No file currently selected to resume';
+          } else if (msg.fileSize !== undefined && currentFile.size !== msg.fileSize) {
+            reason = `File size mismatch: expected ${msg.fileSize}, got ${currentFile.size}`;
+          } else if (!msg.fileHash) {
+            reason = 'Resume rejected: missing file hash in resume request';
+          } else {
+            const localHash = transfer.fileHash || await transfer.ensureFileHash?.(currentFile);
+            if (!localHash) {
+              reason = 'Resume rejected: unable to verify file hash';
+            } else if (msg.fileHash !== localHash) {
+              reason = 'File hash mismatch — file may have changed';
+            } else {
+              accepted = true;
+            }
+          }
+
+          if (accepted) {
+            // Determine where to resume from using the receiver's bitmap
+            let startFromChunk = 0;
+            let missingChunks = [];
+            
+            if (msg.chunkBitmap && msg.totalChunks) {
+              const receiverBitmap = deserializeBitmap(msg.chunkBitmap);
+              startFromChunk = getFirstMissingChunk(receiverBitmap, msg.totalChunks);
+              missingChunks = getMissingChunks(receiverBitmap, msg.totalChunks);
+              
+              if (startFromChunk === -1) {
+                startFromChunk = msg.totalChunks; // All complete
+                missingChunks = [];
+              }
+            }
+
+            // Get sender bitmap if available (tracks which chunks were already sent)
+            let senderBitmapSerialized = null;
+            try {
+              const transferRecord = await transfer.getTransferRecord?.(msg.transferId);
+              if (transferRecord?.chunkBitmap) {
+                senderBitmapSerialized = transferRecord.chunkBitmap;
+              }
+            } catch (error) {
+              logger.warn('[Room] Failed to load sender bitmap:', error);
+            }
+
+            sendJSON({
+              type: MESSAGE_TYPE.RESUME_ACCEPTED,
+              transferId: msg.transferId,
+              startFromChunk,
+              totalChunks: msg.totalChunks,
+              missingChunks: missingChunks.length > 100 ? [] : missingChunks, // Send list if reasonable size
+              senderBitmap: senderBitmapSerialized,
+            });
+            
+            const chunkCount = missingChunks.length || (msg.totalChunks - startFromChunk);
+            addLog(`Resume accepted — ${chunkCount} chunks to send from ${startFromChunk}`, 'success');
+            notifyResumeSuccess(msg.fileName, chunkCount);
+          } else {
+            sendJSON({
+              type: MESSAGE_TYPE.RESUME_REJECTED,
+              transferId: msg.transferId,
+              reason,
+            });
+            addLog(`Resume rejected: ${reason}`, 'warning');
+            notifyResumeFailed(msg.fileName, reason);
+          }
+          break;
+        }
+
+        case MESSAGE_TYPE.RESUME_ACCEPTED: {
+          addLog(`Resume accepted, starting from chunk ${msg.startFromChunk}`, 'success');
+          logger.log('[Room] Resume accepted:', msg);
+
+          // Store sender's bitmap if provided — helps sender track which chunks we already have
+          if (msg.senderBitmap && msg.transferId) {
+            try {
+              await updateTransfer(msg.transferId, {
+                senderChunkBitmap: msg.senderBitmap,
+              });
+              logger.log('[Room] Stored sender bitmap for transfer:', msg.transferId);
+            } catch (error) {
+              logger.warn('[Room] Failed to store sender bitmap:', error);
+            }
+          }
+
+          // Extract missing chunks list if provided
+          let missingChunksList = msg.missingChunks || [];
+          
+          // Emit resume accepted event (consumed by useResumeTransfer)
+          resumeEventBus.emit('resumeAccepted', {
+            transferId: msg.transferId,
+            startFromChunk: msg.startFromChunk,
+            totalChunks: msg.totalChunks,
+            missingChunks: missingChunksList,
+            senderBitmap: msg.senderBitmap,
+          });
+          break;
+        }
+
+        case MESSAGE_TYPE.RESUME_REJECTED: {
+          addLog(`Resume rejected: ${msg.reason || 'file mismatch'}`, 'warning');
+          logger.log('[Room] Resume rejected:', msg);
+
+          // Emit resume rejected event (consumed by useResumeTransfer)
+          resumeEventBus.emit('resumeRejected', {
+            transferId: msg.transferId,
+            reason: msg.reason,
+          });
+          break;
+        }
+
         default:
           logger.log('[Room] Unknown message:', msg.type);
       }
@@ -279,6 +596,10 @@ export function useMessages(
     setPendingFileData,
     setDownloadResultData,
     addLog,
+    sendJSON,
+    roomId,
+    peerSessionToken,
+    dispatchResumeRequest,
   ]);
 
   /**
@@ -338,6 +659,35 @@ export function useMessages(
     pool.on('channel-message', onPoolMessage);
     return () => pool.off('channel-message', onPoolMessage);
   }, [handleMessage, dataChannelReady]);
+
+  /**
+   * Send a resume request to the peer.
+   * Called when entering a room with resume context.
+   * Includes session token for replay protection.
+   * 
+   * @param {Object} transferInfo - Resume context
+   * @param {string} transferInfo.transferId - Original transfer ID
+   * @param {string} transferInfo.fileName - File name
+   * @param {number} transferInfo.fileSize - File size in bytes
+   * @param {string} [transferInfo.fileHash] - SHA-256 hash of first N bytes
+   * @param {number} transferInfo.totalChunks - Total chunk count
+   * @param {string} [transferInfo.chunkBitmap] - Base64 bitmap of completed chunks
+   */
+  const sendResumeRequest = useCallback((transferInfo) => {
+    dispatchResumeRequest(transferInfo);
+  }, [dispatchResumeRequest]);
+
+  /**
+   * Subscribe to resume request events from useResumeTransfer.
+   * When resume hook emits 'resumeRequest', send the actual RESUME_TRANSFER message.
+   */
+  useEffect(() => {
+    const unsubscribe = resumeEventBus.on('resumeRequest', (transferInfo) => {
+      sendResumeRequest(transferInfo);
+    });
+
+    return unsubscribe;
+  }, [sendResumeRequest]);
 
   return {
     handleMessage,

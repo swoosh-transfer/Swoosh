@@ -20,6 +20,3 @@ export * from './database/index.js';
 
 // Storage
 export * as storage from './storage/index.js';
-
-// Metadata
-export * as metadata from './metadata/index.js';

@@ -10,8 +10,6 @@ The application follows a **layered architecture** with clear separation of conc
 ┌─────────────────────────────────────┐
 │         UI Layer (React)             │  Pages, Components, Hooks
 ├─────────────────────────────────────┤
-│    Service/Orchestration Layer       │  Business Logic Services
-├─────────────────────────────────────┤
 │   Domain/Transfer Layer              │  Transfer Engines, Protocols
 ├─────────────────────────────────────┤
 │         Utility Layer                │  Helpers, Adapters
@@ -88,9 +86,8 @@ export function formatBytes(bytes) {
 
 Handles persistence, storage, and external system interactions.
 
-- `database/` - IndexedDB repositories (transfers, chunks, metadata)
+- `database/` - IndexedDB repositories (transfers, chunks, files, sessions)
 - `storage/` - File system operations (write queue, file writer)
-- `metadata/` - File metadata management
 
 **Rules:**
 - ✅ Repository pattern for data access
@@ -98,7 +95,6 @@ Handles persistence, storage, and external system interactions.
 - ✅ Return result objects (success/failure)
 - ✅ Handle errors gracefully
 - ❌ No business logic (just data CRUD)
-- ❌ No direct imports in UI layer (use through services)
 
 ---
 
@@ -107,10 +103,13 @@ Handles persistence, storage, and external system interactions.
 
 Core file transfer logic: chunking, assembly, validation, resumption.
 
-- `sending/` - ChunkingEngine, BufferManager
-- `receiving/` - AssemblyEngine, FileReceiver, ChunkValidator
-- `resumption/` - ResumableTransferManager, TransferStateManager
+- `sending/` - ChunkingEngine
+- `receiving/` - AssemblyEngine, ChunkValidator
+- `resumption/` - ResumableTransferManager
 - `shared/` - ProgressTracker (single source of truth)
+- `multichannel/` - ChannelPool, BandwidthMonitor
+- `multifile/` - MultiFileTransferManager, MultiFileReceiver, FileQueue
+- `metadata/` - fileMetadata (canonical metadata utilities)
 
 **Rules:**
 - ✅ Single responsibility per module
@@ -122,43 +121,6 @@ Core file transfer logic: chunking, assembly, validation, resumption.
 
 ---
 
-### `/src/services/`
-**Business logic orchestration**
-
-High-level services that coordinate multiple modules and expose APIs to UI.
-
-- `connection/` - ConnectionService (WebRTC lifecycle)
-- `security/` - SecurityService (TOFU verification)
-- `transfer/` - TransferOrchestrator (file transfer coordination)
-- `messaging/` - MessageService (protocol handling)
-
-**Rules:**
-- ✅ Event-based APIs (emit events, not callbacks)
-- ✅ Dependency injection for testability
-- ✅ Orchestrate, don't implement (delegate to utilities/infrastructure)
-- ✅ Unit testable without UI
-- ❌ No React imports (services are UI-agnostic)
-- ❌ No direct database/storage access (use infrastructure)
-
-**Example:**
-```javascript
-class TransferOrchestrator {
-  constructor(chunkingEngine, fileReceiver, progressTracker) {
-    this.chunkingEngine = chunkingEngine;
-    this.fileReceiver = fileReceiver;
-    this.progressTracker = progressTracker;
-  }
-  
-  startSending(file) {
-    // Coordinates chunking, progress, pause/resume
-  }
-  
-  // Emits: 'progress', 'complete', 'error', 'paused'
-}
-```
-
----
-
 ### `/src/utils/`
 **Helper utilities**
 
@@ -166,8 +128,10 @@ Single-purpose helper modules that don't fit infrastructure or lib.
 
 - `signaling.js` - WebSocket signaling client
 - `p2pManager.js` - WebRTC connection setup
-- `tofuSecurity.js` - TOFU cryptographic operations
-- `identityManager.js` - Device identity
+- `tofuSecurity.js` - Encrypted signaling (AES-GCM key derivation)
+- `identityManager.js` - Device identity & session verification
+- `connectionMonitor.js` - Connection health monitoring
+- `bandwidthTester.js` - Network bandwidth testing
 - `logger.js` - Logging utility
 - `qrCode.js` - QR code generation
 
@@ -189,14 +153,13 @@ Global state for cross-component data sharing.
 
 **Rules:**
 - ✅ Store ONLY UI-relevant, cross-page state
-- ✅ Use for: history, preferences, UI state
-- ❌ NO business logic (delegate to services)
-- ❌ NO duplicate state from services
-- ❌ NO progress/transfer state (managed by services)
+- ✅ Use for: history, preferences, UI state, resume context
+- ❌ NO duplicate state from transfer layer
+- ❌ NO progress/transfer state (managed by hooks/transfer engines)
 
 **State Ownership:**
-- **Services:** Active transfer state, connection status, progress
-- **Stores:** Transfer history, room list, settings
+- **Custom Hooks:** Active transfer state, connection status, progress
+- **Stores:** Transfer history, room metadata, resume context
 - **Components:** Local UI state (modals, forms, tabs)
 
 ---
@@ -216,8 +179,8 @@ Top-level route components.
 - ✅ Composition over complexity (< 200 lines main component)
 - ✅ Extract logic into custom hooks
 - ✅ Extract UI into sub-components
-- ✅ Use services for business logic
-- ❌ NO business logic in components (call services)
+- ✅ Use custom hooks for business logic
+- ❌ NO business logic in components (use hooks)
 - ❌ NO direct database/WebRTC access
 
 ---
@@ -243,8 +206,6 @@ Shared components used across multiple pages.
 ```
 UI Layer
   ↓ (can import)
-Services
-  ↓ (can import)
 Transfer / Utils
   ↓ (can import)
 Infrastructure
@@ -254,11 +215,11 @@ Lib / Constants
 
 **Allowed:**
 ```javascript
-// ✅ UI imports services
-import { TransferOrchestrator } from '@/services';
-
-// ✅ Service imports transfer engine
+// ✅ UI imports transfer engine
 import { ChunkingEngine } from '@/transfer';
+
+// ✅ Hooks orchestrate transfer logic
+import { useFileTransfer } from '@/pages/Room/hooks';
 
 // ✅ Transfer imports infrastructure
 import { saveChunk } from '@/infrastructure';
@@ -270,15 +231,12 @@ import { STORAGE_CHUNK_SIZE } from '@/constants';
 
 **Forbidden:**
 ```javascript
-// ❌ Service imports React
-import { useState } from 'react';
-
-// ❌ Infrastructure imports service
-import { TransferOrchestrator } from '@/services';
+// ❌ Infrastructure imports transfer
+import { ChunkingEngine } from '@/transfer';
 
 // ❌ Circular dependencies
-// chunkingSystem.js imports resumableTransfer.js
-// resumableTransfer.js imports chunkingSystem.js
+// moduleA.js imports moduleB.js
+// moduleB.js imports moduleA.js
 ```
 
 ---
@@ -418,10 +376,11 @@ Each piece of state should have ONE owner:
 
 | State | Owner | Accessed By |
 |-------|-------|-------------|
-| Active transfer progress | ProgressTracker (transfer/) | Services, UI via events |
-| Connection status | ConnectionService | UI via service API |
+| Active transfer progress | ProgressTracker (transfer/) | Hooks, UI via callbacks |
+| Connection status | Custom hooks (Room/hooks/) | UI components |
 | Transfer history | transferStore (Zustand) | UI components |
 | Room participants | roomStore (Zustand) | UI components |
+| Resume context | roomStore (Zustand) | Room hooks |
 | UI modals/tabs | Component local state | N/A |
 
 ### Anti-Pattern: Duplicate State
@@ -446,10 +405,10 @@ Each piece of state should have ONE owner:
 - **lib/**: Test all pure functions
 - **infrastructure/**: Mock IndexedDB, test repositories
 - **transfer/**: Test chunking logic, validation
-- **services/**: Test with mocked dependencies
+- **hooks/**: Test with mocked dependencies
 
 ### Integration Tests
-- Test service → transfer → infrastructure flow
+- Test hook → transfer → infrastructure flow
 - Test full transfer lifecycle
 - Test pause/resume scenarios
 
@@ -478,27 +437,19 @@ Each piece of state should have ONE owner:
 
 ---
 
-## Migration Notes
+## Architecture Notes
 
-This architecture is being implemented in phases:
-
-- **Phase 1** (Current): Foundation - constants, lib, enhanced utils
-- **Phase 2**: Infrastructure refactoring
-- **Phase 3**: Break circular dependencies in transfer/
-- **Phase 4**: Create service layer
-- **Phase 5**: Decompose Room.jsx
-- **Phase 6**: Clean up Zustand stores
-- **Phase 7**: Documentation and polish
-- **Phase 8**: Testing infrastructure
-
-Each phase maintains working code and can be deployed independently.
+The Service Layer (ConnectionService, SecurityService, TransferOrchestrator, MessageService)
+was planned but never adopted by the UI. All business logic lives in custom React hooks
+(`pages/Room/hooks/`) that directly use the transfer layer and utilities. This keeps the
+codebase simpler with fewer abstraction layers.
 
 ---
 
 ## Questions or Issues?
 
 When adding new features:
-1. Identify the correct layer (infrastructure, transfer, service, UI)
+1. Identify the correct layer (infrastructure, transfer, hooks, UI)
 2. Follow the import rules (no upward dependencies)
 3. Use constants instead of magic numbers
 4. Add JSDoc documentation

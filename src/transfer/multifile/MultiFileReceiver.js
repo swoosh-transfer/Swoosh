@@ -10,10 +10,18 @@
  */
 import { MESSAGE_TYPE } from '../../constants/messages.constants.js';
 import { STORAGE_CHUNK_SIZE } from '../../constants/transfer.constants.js';
+import { WriteQueue } from '../../infrastructure/storage/WriteQueue.js';
 import logger from '../../utils/logger.js';
 
 export class MultiFileReceiver {
-  constructor() {
+  /**
+   * @param {Object} options
+   * @param {Function} [options.trackChunkProgress] — track chunk completion in bitmap
+   */
+  constructor(options = {}) {
+    this._trackChunkProgress = options.trackChunkProgress || (() => {});
+    this._transferIdsByFileIndex = new Map(); // fileIndex → transferId for tracking
+
     /** @type {Object|null} parsed manifest */
     this._manifest = null;
 
@@ -22,6 +30,9 @@ export class MultiFileReceiver {
 
     /** Per-file state: Map<fileIndex, { writable, handle, receivedChunks, totalChunks, bytesReceived, completed }> */
     this._files = new Map();
+
+    /** Map of fileIndex -> Promise that resolves when WriteQueue for that file is ready */
+    this._writeQueueReady = new Map();
 
     /** Pending binary data keyed by fileIndex (when metadata arrives before binary) */
     this._pendingBinary = new Map();
@@ -63,8 +74,16 @@ export class MultiFileReceiver {
 
     logger.log('[MultiFileReceiver] Received manifest:', manifest.totalFiles, 'files,', manifest.totalSize, 'bytes');
 
-    // Initialize per-file state
+    // Initialize per-file state and generate transfer IDs for tracking
     for (const f of manifest.files) {
+      const transferId = `multi-recv-${Date.now()}-${f.index}`;
+      this._transferIdsByFileIndex.set(f.index, transferId);
+      
+      // Create a promise that will resolve when WriteQueue is ready
+      let resolveWriteQueue;
+      const writeQueuePromise = new Promise(resolve => { resolveWriteQueue = resolve; });
+      this._writeQueueReady.set(f.index, { promise: writeQueuePromise, resolve: resolveWriteQueue });
+      
       this._files.set(f.index, {
         name: f.name,
         size: f.size,
@@ -74,7 +93,9 @@ export class MultiFileReceiver {
         receivedChunks: new Set(),
         bytesReceived: 0,
         completed: false,
+        fileCompleteSent: false,  // Set to true when FILE_COMPLETE message received
         writable: null,
+        writeQueue: null,  // WriteQueue to handle out-of-order chunks
         handle: null,
         blobParts: [],  // fallback when no directory handle
       });
@@ -102,7 +123,16 @@ export class MultiFileReceiver {
           state.name
         );
         state.handle = fileHandle;
-        state.writable = await fileHandle.createWritable();
+        const writable = await fileHandle.createWritable();
+        state.writable = writable;
+        state.writeQueue = new WriteQueue(writable);  // Wrap in WriteQueue for out-of-order chunk handling
+        
+        // Resolve the writeQueueReady promise for this file
+        const readyInfo = this._writeQueueReady.get(idx);
+        if (readyInfo) {
+          readyInfo.resolve();
+          logger.log(`[MultiFileReceiver] WriteQueue ready for file ${idx}`);
+        }
       } catch (err) {
         // Sanitized name still rejected by FSAPI — try a safe fallback name
         logger.warn(`[MultiFileReceiver] Name rejected for file ${idx} ("${state.name}"), trying fallback...`);
@@ -115,7 +145,17 @@ export class MultiFileReceiver {
             fallbackName
           );
           state.handle = fileHandle;
-          state.writable = await fileHandle.createWritable();
+          const writable = await fileHandle.createWritable();
+          state.writable = writable;
+          state.writeQueue = new WriteQueue(writable);  // Wrap in WriteQueue for out-of-order chunk handling
+          
+          // Resolve the writeQueueReady promise for this file
+          const readyInfo = this._writeQueueReady.get(idx);
+          if (readyInfo) {
+            readyInfo.resolve();
+            logger.log(`[MultiFileReceiver] WriteQueue ready for file ${idx} (fallback name)`);
+          }
+          
           logger.log(`[MultiFileReceiver] Using fallback name: ${fallbackName}`);
         } catch (err2) {
           logger.error(`[MultiFileReceiver] Fallback also failed for file ${idx}:`, err2);
@@ -133,7 +173,16 @@ export class MultiFileReceiver {
     const state = this._files.get(0);
     if (state) {
       state.handle = fileHandle;
-      state.writable = await fileHandle.createWritable();
+      const writable = await fileHandle.createWritable();
+      state.writable = writable;
+      state.writeQueue = new WriteQueue(writable);  // Wrap in WriteQueue for out-of-order chunk handling
+      
+      // Resolve the writeQueueReady promise for this file
+      const readyInfo = this._writeQueueReady.get(0);
+      if (readyInfo) {
+        readyInfo.resolve();
+        logger.log(`[MultiFileReceiver] WriteQueue ready for single file`);
+      }
     }
   }
 
@@ -243,60 +292,67 @@ export class MultiFileReceiver {
 
   /**
    * Handle incoming binary data.
-   * Matches with pending metadata using the arrival order.
+   * Uses the pre-matched metadata from per-channel queue (matched in useMessages.js)
+   * to ensure correct chunkIndex even with multi-channel delivery.
    * @param {ArrayBuffer} data
    * @param {number} [fileIndex] — if known from the channel/context
+   * @param {Object} [matchedMeta] — pre-matched metadata from per-channel queue
    */
-  async handleBinaryChunk(data, fileIndex) {
-    // If fileIndex not provided, match with the oldest pending metadata
-    if (fileIndex === undefined) {
-      if (this._metaOrder && this._metaOrder.length > 0) {
-        fileIndex = this._metaOrder.shift();
-      } else if (this._pendingMeta.size > 0) {
-        const [fIdx] = this._pendingMeta.keys();
-        fileIndex = fIdx;
-      } else {
-        logger.warn('[MultiFileReceiver] Binary chunk with no pending metadata, dropping');
-        return;
-      }
-    }
+  async handleBinaryChunk(data, fileIndex, matchedMeta) {
+    // Use pre-matched metadata if provided (preferred — avoids cross-channel mismatch)
+    let meta = matchedMeta || null;
 
-    // Safeguard: verify fileIndex has pending metadata
-    if (!this._pendingMeta.has(fileIndex) && 
-        (!this._pendingMetaQueues?.has(fileIndex) || this._pendingMetaQueues.get(fileIndex).length === 0)) {
-      logger.error(`[MultiFileReceiver] Binary for file ${fileIndex} has no pending metadata, data mismatch!`);
-      return;
-    }
-
-    // Get metadata from per-file queue
-    let meta = null;
-    if (this._pendingMetaQueues?.has(fileIndex)) {
-      const queue = this._pendingMetaQueues.get(fileIndex);
-      if (queue.length > 0) {
-        meta = queue.shift();
-      }
-      if (queue.length === 0) {
-        this._pendingMetaQueues.delete(fileIndex);
-      }
-    }
-
-    // Fallback to flat map
+    // If no pre-matched metadata, try to determine fileIndex and metadata
     if (!meta) {
-      meta = this._pendingMeta.get(fileIndex);
-      if (meta) {
-        this._pendingMeta.delete(fileIndex);
+      if (fileIndex === undefined) {
+        if (this._metaOrder && this._metaOrder.length > 0) {
+          fileIndex = this._metaOrder.shift();
+        } else if (this._pendingMeta.size > 0) {
+          const [fIdx] = this._pendingMeta.keys();
+          fileIndex = fIdx;
+        } else {
+          logger.warn('[MultiFileReceiver] Binary chunk with no pending metadata, dropping');
+          return;
+        }
+      }
+
+      // Get metadata from per-file queue (fallback for non-channel-matched calls)
+      if (this._pendingMetaQueues?.has(fileIndex)) {
+        const queue = this._pendingMetaQueues.get(fileIndex);
+        if (queue.length > 0) {
+          meta = queue.shift();
+        }
+        if (queue.length === 0) {
+          this._pendingMetaQueues.delete(fileIndex);
+        }
+      }
+
+      // Fallback to flat map
+      if (!meta) {
+        meta = this._pendingMeta.get(fileIndex);
+        if (meta) {
+          this._pendingMeta.delete(fileIndex);
+        }
+      }
+
+      if (!meta) {
+        logger.warn(`[MultiFileReceiver] No pending metadata for file ${fileIndex}, using generic chunk index`);
+        meta = { fileIndex, chunkIndex: undefined };
       }
     } else {
-      // Clean up flat map too if we got metadata from the queue
-      if (!this._pendingMetaQueues?.has(fileIndex)) {
+      // Pre-matched metadata provided — also drain it from the internal queues
+      // so they don't accumulate stale entries
+      if (this._pendingMetaQueues?.has(fileIndex)) {
+        const queue = this._pendingMetaQueues.get(fileIndex);
+        // Remove the matching entry (by chunkIndex) from the queue
+        const idx = queue.findIndex(m => m.chunkIndex === meta.chunkIndex);
+        if (idx !== -1) queue.splice(idx, 1);
+        if (queue.length === 0) this._pendingMetaQueues.delete(fileIndex);
+      }
+      // Clean up flat map
+      if (this._pendingMeta.has(fileIndex) && this._pendingMeta.get(fileIndex)?.chunkIndex === meta.chunkIndex) {
         this._pendingMeta.delete(fileIndex);
       }
-    }
-
-    // Warn if no metadata found, but still try to process (with generic metadata)
-    if (!meta) {
-      logger.warn(`[MultiFileReceiver] No pending metadata for file ${fileIndex}, using generic chunk index`);
-      meta = { fileIndex, chunkIndex: undefined };
     }
 
     const fileState = this._files.get(fileIndex);
@@ -313,44 +369,125 @@ export class MultiFileReceiver {
       return;
     }
     
+    // Track early/late arrivals for diagnostics
+    const earlyChunks = chunkIndex < 10;
+    if (earlyChunks) {
+      logger.log(`[MultiFileReceiver] Early chunk ${chunkIndex} arrived (data: ${data.byteLength} bytes)`);
+    }
+    
     fileState.receivedChunks.add(chunkIndex);
     fileState.bytesReceived += data.byteLength;
     this._totalBytesReceived += data.byteLength;
 
+    // Track chunk completion in per-file bitmap (if tracking callback provided)
+    const transferId = this._transferIdsByFileIndex.get(fileIndex);
+    if (transferId && this._trackChunkProgress) {
+      this._trackChunkProgress(transferId, chunkIndex, fileIndex);
+    }
+
     // Write to disk or accumulate in memory
-    if (fileState.writable) {
+    // First, wait for WriteQueue to be ready (avoids early chunks going to blobParts)
+    const readyInfo = this._writeQueueReady.get(fileIndex);
+    if (readyInfo) {
+      await Promise.race([
+        readyInfo.promise,
+        new Promise(resolve => setTimeout(resolve, 5000)) // 5 second timeout
+      ]);
+    }
+    
+    if (fileState.writeQueue) {
       try {
+        // Use WriteQueue to handle out-of-order chunk arrival
+        // WriteQueue buffers chunks and writes them sequentially, even if they arrive out of order
+        await fileState.writeQueue.add(chunkIndex, data);
+      } catch (err) {
+        logger.error(`[MultiFileReceiver] Write error for file ${fileIndex}:`, err);
+        // Fallback to blob
+        logger.warn(`[MultiFileReceiver] File ${fileIndex} chunk ${chunkIndex} falling back to memory (WriteQueue error)`);
+        fileState.blobParts.push(new Uint8Array(data));
+      }
+    } else if (fileState.writable) {
+      logger.warn(`[MultiFileReceiver] File ${fileIndex} chunk ${chunkIndex} using direct write (no WriteQueue)`);
+      try {
+        // Fallback: direct write (for cases where WriteQueue wasn't initialized)
         await fileState.writable.write(new Uint8Array(data));
       } catch (err) {
         logger.error(`[MultiFileReceiver] Write error for file ${fileIndex}:`, err);
         // Fallback to blob
+        logger.warn(`[MultiFileReceiver] File ${fileIndex} chunk ${chunkIndex} falling back to memory`);
         fileState.blobParts.push(new Uint8Array(data));
       }
     } else {
+      logger.warn(`[MultiFileReceiver] File ${fileIndex} chunk ${chunkIndex} buffering in memory - WriteQueue not ready yet (${fileState.blobParts.length} chunks in memory)`);
       fileState.blobParts.push(new Uint8Array(data));
     }
 
     // Progress
     this._emitProgress();
 
-    // Check if this file is complete
-    const isComplete = fileState.receivedChunks.size >= fileState.totalChunks;
-    if (isComplete) {
-      // Sanity check: verify byte count matches expected total
-      if (fileState.bytesReceived !== fileState.totalBytes) {
-        logger.warn(`[MultiFileReceiver] File ${fileIndex}: chunk count complete but byte mismatch! ` +
-                   `Expected ${fileState.totalBytes}, got ${fileState.bytesReceived}`);
+    // Check if this file is complete: all chunks received AND all written to disk
+    // This handles late arrivals after FILE_COMPLETE was already sent
+    const allChunksReceived = fileState.receivedChunks.size >= fileState.totalChunks;
+    
+    if (allChunksReceived && fileState.fileCompleteSent && !fileState.completed && fileState.writeQueue) {
+      // FILE_COMPLETE already sent and now all chunks have finally arrived
+      // Flush and complete the file
+      const timeoutMs = 1000;
+      await fileState.writeQueue.flush(timeoutMs);
+      
+      const queueProgress = fileState.writeQueue.getProgress();
+      const allChunksWritten = queueProgress.written >= fileState.totalChunks && queueProgress.pending === 0;
+      
+      if (allChunksWritten && queueProgress.bytesWritten === fileState.size) {
+        // All late chunks written successfully
+        await this._completeFile(fileIndex);
       }
-      await this._completeFile(fileIndex);
     }
   }
 
   /**
    * Handle FILE_COMPLETE message from sender.
+   * Signals that sender has finished sending chunks.
+   * Checks if all chunks have arrived and completes the file.
    * @param {number} fileIndex
    */
   async handleFileComplete(fileIndex) {
-    await this._completeFile(fileIndex);
+    const state = this._files.get(fileIndex);
+    if (!state || state.completed) return;
+    
+    // Mark that sender has finished (may have late-arriving chunks)
+    state.fileCompleteSent = true;
+    
+    const missingCount = state.totalChunks - state.receivedChunks.size;
+    if (missingCount > 0) {
+      logger.log(`[MultiFileReceiver] FILE_COMPLETE for file ${fileIndex}: waiting for ${missingCount} late chunks`);
+      return; // Wait for late chunks to arrive
+    }
+    
+    logger.log(`[MultiFileReceiver] FILE_COMPLETE for file ${fileIndex}: all chunks present`);
+    
+    // All chunks have arrived - complete the file
+    if (state.writeQueue) {
+      // Flush writeQueue with generous timeout
+      const timeoutMs = 1000;
+      await state.writeQueue.flush(timeoutMs);
+      
+      const queueProgress = state.writeQueue.getProgress();
+      
+      // Log final state for debugging
+      if (queueProgress.pending > 0) {
+        logger.warn(`[MultiFileReceiver] File ${fileIndex}: ${queueProgress.pending} chunks still in WriteQueue after flush timeout`);
+        logger.warn(`[MultiFileReceiver] Written: ${queueProgress.written}/${state.totalChunks}, Bytes: ${queueProgress.bytesWritten}/${state.size}`);
+      }
+      
+      // Check if all chunks were successfully written
+      const allChunksWritten = queueProgress.written >= state.totalChunks && queueProgress.pending === 0;
+      
+      if (allChunksWritten && queueProgress.bytesWritten === state.size) {
+        // All chunks written successfully
+        await this._completeFile(fileIndex);
+      }
+    }
   }
 
   // ─── File completion ──────────────────────────────────────────────
@@ -364,15 +501,20 @@ export class MultiFileReceiver {
     }
 
     // Log completion with diagnostic info for sequential debugging
-    logger.log(`[MultiFileReceiver] File ${fileIndex} complete: ${state.bytesReceived}/${state.totalBytes} bytes, ` +
+    logger.log(`[MultiFileReceiver] File ${fileIndex} complete: ${state.bytesReceived}/${state.size} bytes, ` +
               `${state.receivedChunks.size}/${state.totalChunks} chunks`);
     state.completed = true;
 
     // Close writable stream if using File System API
     if (state.writable) {
       try {
+        // Flush any pending writes in WriteQueue before closing
+        if (state.writeQueue) {
+          await state.writeQueue.flush();
+        }
         await state.writable.close();
         state.writable = null; // Prevent double-close
+        state.writeQueue = null; // Clear write queue
       } catch (err) {
         logger.warn(`[MultiFileReceiver] Error closing writable for file ${fileIndex}:`, err);
         // If writable close fails but we have blob data, fall back to download
@@ -545,5 +687,103 @@ export class MultiFileReceiver {
     if (this._metaOrder) this._metaOrder.length = 0;
     this._manifest = null;
     this._dirHandle = null;
+  }
+
+  // ─── Resume manifest handling ─────────────────────────────────────
+
+  /**
+   * Handle a resume manifest — a manifest with isResume: true.
+   * Skips completed files, re-opens writable streams for partial files
+   * at the correct byte offset, and initializes pending files normally.
+   * 
+   * @param {Object} manifest - Manifest with isResume flag and perFileStartChunks
+   */
+  async handleResumeManifest(manifest) {
+    this._manifest = manifest;
+    this._startTime = Date.now();
+    this._totalBytesReceived = 0;
+
+    const perFileStartChunks = manifest.perFileStartChunks || {};
+
+    logger.log('[MultiFileReceiver] Received resume manifest:', manifest.totalFiles, 'files');
+
+    for (const f of manifest.files) {
+      const startChunk = perFileStartChunks[f.index] || 0;
+      const alreadyReceivedBytes = startChunk * STORAGE_CHUNK_SIZE;
+
+      // Pre-populate receivedChunks set for chunks already received
+      const receivedChunks = new Set();
+      for (let i = 0; i < startChunk; i++) {
+        receivedChunks.add(i);
+      }
+
+      // Create a promise that will resolve when WriteQueue is ready
+      let resolveWriteQueue;
+      const writeQueuePromise = new Promise(resolve => { resolveWriteQueue = resolve; });
+      this._writeQueueReady.set(f.index, { promise: writeQueuePromise, resolve: resolveWriteQueue });
+
+      this._files.set(f.index, {
+        name: f.name,
+        size: f.size,
+        mimeType: f.mimeType,
+        relativePath: f.relativePath,
+        totalChunks: f.totalChunks,
+        receivedChunks,
+        bytesReceived: alreadyReceivedBytes,
+        completed: startChunk >= f.totalChunks, // Already fully received
+        fileCompleteSent: false,  // Set to true when FILE_COMPLETE message received
+        writable: null,
+        writeQueue: null,  // WriteQueue to handle out-of-order chunks
+        handle: null,
+        blobParts: [],
+        resumeOffset: alreadyReceivedBytes,
+      });
+
+      this._totalBytesReceived += alreadyReceivedBytes;
+    }
+
+    if (this._onManifest) this._onManifest(manifest);
+  }
+
+  /**
+   * Set directory handle for resume — opens writable streams at correct offsets
+   * for partially received files using seek().
+   * 
+   * @param {FileSystemDirectoryHandle} dirHandle
+   */
+  async setDirectoryHandleForResume(dirHandle) {
+    this._dirHandle = dirHandle;
+
+    for (const [idx, state] of this._files) {
+      if (state.completed) continue; // Skip fully completed files
+
+      try {
+        const fileHandle = await this._getOrCreateFileHandle(
+          dirHandle,
+          state.relativePath,
+          state.name
+        );
+        state.handle = fileHandle;
+        state.writable = await fileHandle.createWritable({ keepExistingData: true });
+        
+        // Create WriteQueue for this file
+        state.writeQueue = new WriteQueue(state.writable);
+
+        // Seek to the resume offset so we write after existing data
+        if (state.resumeOffset > 0) {
+          await state.writable.seek(state.resumeOffset);
+          logger.log(`[MultiFileReceiver] File ${idx} resumed at byte offset ${state.resumeOffset}`);
+        }
+        
+        // Resolve the writeQueueReady promise for this file
+        const readyInfo = this._writeQueueReady.get(idx);
+        if (readyInfo) {
+          readyInfo.resolve();
+          logger.log(`[MultiFileReceiver] WriteQueue ready for resume file ${idx}`);
+        }
+      } catch (err) {
+        logger.error(`[MultiFileReceiver] Failed to open writable for resume file ${idx}:`, err);
+      }
+    }
   }
 }

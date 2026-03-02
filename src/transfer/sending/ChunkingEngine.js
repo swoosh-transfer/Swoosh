@@ -7,8 +7,7 @@
  * Supports pause/resume and adaptive chunking.
  */
 
-import { saveChunkMeta } from '../../infrastructure/database/chunks.repository.js';
-import { createFileMetadata, saveFileMetadata, createTransferRecord, updateTransferProgress } from '../metadata/fileMetadata.js';
+import { createFileMetadata, saveFileMetadata, createTransferRecord } from '../metadata/fileMetadata.js';
 import { resumableTransferManager, TransferState, TransferRole } from '../resumption/ResumableTransferManager.js';
 import logger from '../../utils/logger.js';
 import { progressTracker } from '../shared/ProgressTracker.js';
@@ -19,8 +18,11 @@ import {
   MIN_CHUNK_SIZE,
   SPEED_HIGH_THRESHOLD,
   SPEED_LOW_THRESHOLD,
-  SPEED_ADJUSTMENT_INCREMENT
+  SPEED_ADJUSTMENT_INCREMENT,
+  getTransferReliabilityProfile,
 } from '../../constants/transfer.constants.js';
+import { createBitmap, markChunk, serializeBitmap, deserializeBitmap, getCompletedCount } from '../../infrastructure/database/chunkBitmap.js';
+import { updateTransfer, saveTransfer } from '../../infrastructure/database/transfers.repository.js';
 
 export class ChunkingEngine {
   constructor() {
@@ -30,6 +32,12 @@ export class ChunkingEngine {
     this.performanceMetrics = new Map(); // transferId -> metrics
     this.pauseControllers = new Map(); // transferId -> { isPaused, resumeResolve }
     this.fileReaders = new Map(); // transferId -> reader (for resume)
+    this.chunkBitmaps = new Map(); // transferId -> Uint8Array bitmap (tracks sent chunks)
+    this.lastFlushCount = new Map(); // transferId -> last chunk count when bitmap was flushed
+    
+    // Bitmap persistence settings
+    this.BITMAP_FLUSH_INTERVAL = 50; // Flush bitmap every 50 chunks
+    this.transferProfile = getTransferReliabilityProfile();
   }
 
   /**
@@ -39,7 +47,22 @@ export class ChunkingEngine {
     const controller = this.pauseControllers.get(transferId);
     if (controller && !controller.isPaused) {
       controller.isPaused = true;
+      
+      // Flush bitmap to IndexedDB before pausing
+      await this._flushBitmap(transferId);
+      
       await resumableTransferManager.pauseTransfer(transferId);
+      
+      // Update transfer status
+      try {
+        await updateTransfer(transferId, {
+          status: 'paused',
+          pausedAt: Date.now(),
+        });
+      } catch (error) {
+        logger.warn(`[ChunkingEngine] Failed to update pause status:`, error);
+      }
+      
       progressTracker.updateStatus(transferId, 'paused');
       logger.log(`[ChunkingEngine] Paused transfer: ${transferId}`);
       return true;
@@ -60,6 +83,17 @@ export class ChunkingEngine {
       }
       await resumableTransferManager.resumeTransfer(transferId);
       resumableTransferManager.signalResume(transferId);
+      
+      // Update transfer status
+      try {
+        await updateTransfer(transferId, {
+          status: 'active',
+          resumedAt: Date.now(),
+        });
+      } catch (error) {
+        logger.warn(`[ChunkingEngine] Failed to update resume status:`, error);
+      }
+      
       progressTracker.updateStatus(transferId, 'active');
       logger.log(`[ChunkingEngine] Resumed transfer: ${transferId}`);
       return true;
@@ -101,11 +135,12 @@ export class ChunkingEngine {
    * @param {string} transferId - Unique transfer identifier
    * @param {File} file - File object to send
    * @param {string} peerId - Receiver peer ID
-   * @param {Function} onChunkReady - Callback when chunk is ready
-   * @param {number} resumeFromChunk - Resume from specific chunk (default: 0)
-   * @param {number} initialChunkSize - Initial chunk size from bandwidth test (optional)
+   * @param {Function} onChunkReady - Callback when chunk is ready: ({ metadata, binaryData }) => void
+   * @param {Function} [onProgress] - Progress callback: (bytesRead, totalSize) => void
+   * @param {number} [resumeFromChunk=0] - Resume from specific chunk
+   * @param {number} [initialChunkSize] - Initial chunk size from bandwidth test
    */
-  async startChunking(transferId, file, peerId, onChunkReady, resumeFromChunk = 0, initialChunkSize = NETWORK_CHUNK_SIZE) {
+  async startChunking(transferId, file, peerId, onChunkReady, onProgress = null, resumeFromChunk = 0, initialChunkSize = NETWORK_CHUNK_SIZE) {
     // Create file metadata and transfer record
     const fileMetadata = createFileMetadata({
       name: file.name,
@@ -119,16 +154,23 @@ export class ChunkingEngine {
     const totalChunks = Math.ceil(file.size / STORAGE_CHUNK_SIZE);
     
     // Set initial chunk size from bandwidth test result (per-transfer tracking)
-    const chunkSize = initialChunkSize || NETWORK_CHUNK_SIZE;
+    const chunkSize = this.transferProfile.constrained
+      ? (initialChunkSize || NETWORK_CHUNK_SIZE)
+      : STORAGE_CHUNK_SIZE;
     this.chunkSizes.set(transferId, chunkSize);
     logger.log(`[ChunkingEngine] Starting with chunk size: ${chunkSize / 1024}KB`);
+    
+    // Initialize chunk bitmap for resume capability (sender tracks which chunks were sent)
+    const chunkBitmap = createBitmap(totalChunks);
+    this.chunkBitmaps.set(transferId, chunkBitmap);
+    this.lastFlushCount.set(transferId, 0);
     
     // Initialize progress tracking with initial chunk size
     progressTracker.initialize(transferId, {
       totalChunks,
       fileSize: file.size,
       fileName: file.name,
-      direction: 'send',
+      direction: 'sending',
       initialChunkSize: chunkSize
     });
 
@@ -142,6 +184,29 @@ export class ChunkingEngine {
       peerId,
       file
     });
+    
+    // Save initial transfer metadata to IndexedDB (for resume support)
+    try {
+      await saveTransfer({
+        transferId,
+        fileName: file.name,
+        fileSize: file.size,
+        mimeType: file.type,
+        totalChunks,
+        direction: 'sending',
+        status: 'active',
+        chunkBitmap: serializeBitmap(chunkBitmap),
+        lastProgress: 0,
+        lastChunkIndex: resumeFromChunk - 1,
+        peerId,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      logger.log(`[ChunkingEngine] Transfer metadata saved to IndexedDB for ${transferId}`);
+    } catch (error) {
+      logger.warn(`[ChunkingEngine] Failed to save transfer metadata:`, error);
+      // Continue even if IndexedDB save fails (non-critical for active transfer)
+    }
 
     // Initialize pause controller
     this.pauseControllers.set(transferId, {
@@ -191,6 +256,7 @@ export class ChunkingEngine {
     this.performanceMetrics.set(transferId, {
       startTime: Date.now(),
       chunksProcessed: storageChunkIndex,
+      bytesProcessedWindow: 0,
       bytesPerSecond: 0,
       adaptiveChunkSize: chunkSize
     });
@@ -219,6 +285,11 @@ export class ChunkingEngine {
         bytesRead += chunk.length;
         this.activeChunkings.get(transferId).bytesRead = bytesRead;
 
+        // Notify caller of progress
+        if (onProgress) {
+          onProgress(bytesRead, totalSize);
+        }
+
         // Update resumable transfer progress
         const chunkingState = this.activeChunkings.get(transferId);
         await resumableTransferManager.updateProgress(transferId, {
@@ -234,6 +305,21 @@ export class ChunkingEngine {
       const chunkingState = this.activeChunkings.get(transferId);
       if (chunkingState) {
         chunkingState.isComplete = true;
+        
+        // Flush final bitmap state to IndexedDB
+        await this._flushBitmap(transferId);
+        
+        // Update transfer status
+        try {
+          await updateTransfer(transferId, {
+            status: 'completed',
+            completedAt: Date.now(),
+            lastProgress: 100,
+          });
+        } catch (error) {
+          logger.warn(`[ChunkingEngine] Failed to update completion status:`, error);
+        }
+        
         await resumableTransferManager.completeTransfer(transferId);
         progressTracker.updateStatus(transferId, 'completed');
       }
@@ -301,7 +387,7 @@ export class ChunkingEngine {
     // Calculate SHA-256 checksum
     const checksum = await this._calculateChecksum(chunkData);
     
-    // Store metadata in IndexedDB
+    // Build chunk metadata
     const chunkMetadata = {
       transferId,
       chunkIndex: chunkingState.storageChunkIndex,
@@ -312,14 +398,25 @@ export class ChunkingEngine {
       fileOffset: chunkingState.bytesRead - bufferState.currentSize
     };
 
-    await this._storeChunkMetadata(chunkMetadata);
-
-    // Send chunk metadata and binary data
+    // Send chunk metadata and binary data (bitmap tracking is handled by useTransferTracking)
     if (onChunkReady) {
       await onChunkReady({
         metadata: chunkMetadata,
         binaryData: chunkData
       });
+    }
+
+    // Mark chunk as sent in bitmap
+    const bitmap = this.chunkBitmaps.get(transferId);
+    if (bitmap) {
+      markChunk(bitmap, chunkingState.storageChunkIndex);
+      
+      // Periodically flush bitmap to IndexedDB (every N chunks)
+      const sentChunks = chunkingState.storageChunkIndex + 1;
+      const lastFlush = this.lastFlushCount.get(transferId) || 0;
+      if (sentChunks - lastFlush >= this.BITMAP_FLUSH_INTERVAL) {
+        await this._flushBitmap(transferId);
+      }
     }
 
     // Update progress tracker
@@ -344,20 +441,34 @@ export class ChunkingEngine {
   }
 
   /**
-   * Store chunk metadata in IndexedDB
+   * Flush bitmap to IndexedDB
+   * Persists current chunk sending state for resume capability
    * @private
    */
-  async _storeChunkMetadata(metadata) {
-    await saveChunkMeta({
-      transferId: metadata.transferId,
-      chunkIndex: metadata.chunkIndex,
-      size: metadata.size,
-      checksum: metadata.checksum,
-      timestamp: metadata.timestamp,
-      isFinal: metadata.isFinal,
-      fileOffset: metadata.fileOffset,
-      status: 'sent'
-    });
+  async _flushBitmap(transferId) {
+    const bitmap = this.chunkBitmaps.get(transferId);
+    const chunkingState = this.activeChunkings.get(transferId);
+    if (!bitmap || !chunkingState) return;
+
+    try {
+      const serialized = serializeBitmap(bitmap);
+      const completedCount = getCompletedCount(bitmap);
+      const totalChunks = Math.ceil(chunkingState.totalSize / STORAGE_CHUNK_SIZE);
+      const progress = (completedCount / totalChunks) * 100;
+
+      await updateTransfer(transferId, {
+        chunkBitmap: serialized,
+        lastProgress: progress,
+        lastChunkIndex: chunkingState.storageChunkIndex,
+        status: 'active',
+      });
+
+      this.lastFlushCount.set(transferId, chunkingState.storageChunkIndex + 1);
+      logger.log(`[ChunkingEngine] Bitmap flushed for ${transferId}: ${completedCount}/${totalChunks} chunks (${progress.toFixed(1)}%)`);
+    } catch (error) {
+      logger.warn(`[ChunkingEngine] Failed to flush bitmap for ${transferId}:`, error);
+      // Non-critical - continue transfer
+    }
   }
 
   /**
@@ -372,6 +483,10 @@ export class ChunkingEngine {
    * @private
    */
   _adaptChunkSize(transferId) {
+    if (!this.transferProfile.constrained) {
+      return;
+    }
+
     const metrics = this.performanceMetrics.get(transferId);
     if (!metrics) return;
 
@@ -381,7 +496,7 @@ export class ChunkingEngine {
     // Adjust every 1-2 seconds for stability
     if (timeDiff > 1000) {
       let chunkSize = this.chunkSizes.get(transferId) || NETWORK_CHUNK_SIZE;
-      const bytesPerSecond = (metrics.chunksProcessed * chunkSize * 1000) / timeDiff;
+      const bytesPerSecond = (metrics.bytesProcessedWindow * 1000) / timeDiff;
       metrics.bytesPerSecond = bytesPerSecond;
 
       const oldChunkSize = chunkSize;
@@ -431,6 +546,7 @@ export class ChunkingEngine {
       metrics.adaptiveChunkSize = chunkSize;
       metrics.startTime = currentTime;
       metrics.chunksProcessed = 0;
+      metrics.bytesProcessedWindow = 0;
     }
   }
 
@@ -442,6 +558,7 @@ export class ChunkingEngine {
     const metrics = this.performanceMetrics.get(transferId);
     if (metrics) {
       metrics.chunksProcessed++;
+      metrics.bytesProcessedWindow += bytesProcessed;
     }
   }
 
@@ -532,6 +649,46 @@ export class ChunkingEngine {
   }
 
   /**
+   * Apply receiver's bitmap to skip already-received chunks during resume
+   * Called when RESUME_ACCEPTED arrives with receiver's chunk status
+   * @param {string} transferId
+   * @param {string} receiverBitmap - Base64 encoded bitmap from receiver
+   * @param {number} totalChunks - Total number of chunks in file
+   */
+  async applyReceiverBitmap(transferId, receiverBitmap, totalChunks) {
+    if (!receiverBitmap || !transferId) return;
+
+    try {
+      const decodedBitmap = deserializeBitmap(receiverBitmap);
+      logger.log(`[ChunkingEngine] Applying receiver bitmap: ${totalChunks} chunks`);
+
+      // Mark all chunks the receiver has as "sent" to skip them
+      // This uses the same bitmap, so we just need to ensure we skip them in _processStorageBuffer
+      const senderBitmap = this.chunkBitmaps.get(transferId);
+      if (senderBitmap && decodedBitmap) {
+        // Import the receiver's progress into sender bitmap
+        // Copy completed chunks from receiver bitmap
+        for (let i = 0; i < Math.min(decodedBitmap.length, senderBitmap.length); i++) {
+          // Copy all bytes from receiver bitmap (marking what they have)
+          // We'll use this to skip sending those chunks
+          if (decodedBitmap[i] !== 0) {
+            // Receiver has some chunks in this byte - we could theoretically skip them
+            // but that requires more complex bit-level tracking here
+            // For now, we mark them as "sent" so chunking can skip them
+            senderBitmap[i] = decodedBitmap[i];
+          }
+        }
+
+        // Persist the updated bitmap
+        await this._flushBitmap(transferId);
+        logger.log(`[ChunkingEngine] Receiver bitmap applied to sender tracker`);
+      }
+    } catch (error) {
+      logger.warn(`[ChunkingEngine] Failed to apply receiver bitmap:`, error);
+    }
+  }
+
+  /**
    * Cleanup chunking state
    */
   cleanup(transferId) {
@@ -541,6 +698,8 @@ export class ChunkingEngine {
     this.performanceMetrics.delete(transferId);
     this.pauseControllers.delete(transferId);
     this.fileReaders.delete(transferId);
+    this.chunkBitmaps.delete(transferId);
+    this.lastFlushCount.delete(transferId);
     progressTracker.clear(transferId);
   }
 }

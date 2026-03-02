@@ -15,6 +15,7 @@ import {
   CHANNEL_BUFFER_LOW_WATERMARK,
   CHANNEL_BUFFER_HIGH_WATERMARK,
   MAX_CHANNELS,
+  getTransferReliabilityProfile,
 } from '../../constants/transfer.constants.js';
 import logger from '../../utils/logger.js';
 
@@ -32,6 +33,9 @@ export class ChannelPool {
 
     /** Round-robin pointer */
     this._rrIndex = 0;
+
+    this._profile = getTransferReliabilityProfile();
+    this._channelBufferLowWatermark = this._profile.channelBufferLowWatermark || CHANNEL_BUFFER_LOW_WATERMARK;
   }
 
   // ─── Channel lifecycle ────────────────────────────────────────────
@@ -55,16 +59,28 @@ export class ChannelPool {
       return null;
     }
 
+    // Check if peer connection is in valid state for creating data channels
+    if (!this._pc || this._pc.signalingState === 'closed' || this._pc.connectionState === 'closed') {
+      logger.warn(`[ChannelPool] Cannot create channel — peer connection state: signalingState=${this._pc?.signalingState}, connectionState=${this._pc?.connectionState}`);
+      return null;
+    }
+
     const label = `${CHANNEL_LABEL_PREFIX}${index}`;
-    const channel = this._pc.createDataChannel(label, {
-      ordered: true,
-      // Let the browser handle its own buffering
-    });
-    channel.binaryType = 'arraybuffer';
-    this._wire(index, channel);
-    this._channels.set(index, channel);
-    logger.log(`[ChannelPool] Created outgoing channel ${label}`);
-    return channel;
+    try {
+      const channel = this._pc.createDataChannel(label, {
+        ordered: true,
+        // Let the browser handle its own buffering
+      });
+      channel.binaryType = 'arraybuffer';
+      this._wire(index, channel);
+      this._channels.set(index, channel);
+      logger.log(`[ChannelPool] Created outgoing channel ${label}`);
+      return channel;
+    } catch (error) {
+      // Catch any errors from createDataChannel (e.g., InvalidStateError)
+      logger.warn(`[ChannelPool] Failed to create channel ${label}:`, error.message);
+      return null;
+    }
   }
 
   /**
@@ -163,12 +179,12 @@ export class ChannelPool {
   waitForDrain(channelIndex) {
     const ch = this._channels.get(channelIndex);
     if (!ch) return Promise.resolve();
-    if (ch.bufferedAmount <= CHANNEL_BUFFER_LOW_WATERMARK) return Promise.resolve();
+    if (ch.bufferedAmount <= this._channelBufferLowWatermark) return Promise.resolve();
 
     return new Promise((resolve) => {
       // Use bufferedamountlow event if supported
       if (typeof ch.bufferedAmountLowThreshold === 'number') {
-        ch.bufferedAmountLowThreshold = CHANNEL_BUFFER_LOW_WATERMARK;
+        ch.bufferedAmountLowThreshold = this._channelBufferLowWatermark;
         const handler = () => {
           ch.removeEventListener('bufferedamountlow', handler);
           resolve();
@@ -177,7 +193,7 @@ export class ChannelPool {
       } else {
         // Poll fallback
         const poll = setInterval(() => {
-          if (!ch || ch.readyState !== 'open' || ch.bufferedAmount <= CHANNEL_BUFFER_LOW_WATERMARK) {
+          if (!ch || ch.readyState !== 'open' || ch.bufferedAmount <= this._channelBufferLowWatermark) {
             clearInterval(poll);
             resolve();
           }

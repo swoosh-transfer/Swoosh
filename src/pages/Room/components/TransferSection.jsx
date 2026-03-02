@@ -2,6 +2,14 @@
  * TransferSection Component
  * Displays file transfer UI - file info, progress, controls
  * Supports both single-file and multi-file modes.
+ * 
+ * Layout priority (top to bottom):
+ *  1. File selection (drop zone)
+ *  2. Send button (immediately after files, easy to reach on mobile)
+ *  3. Transfer mode toggle
+ *  4. Warnings / info
+ *  5. Incoming file prompts
+ *  6. Progress / completion
  */
 import React from 'react';
 import {
@@ -13,14 +21,7 @@ import {
 } from '../../../components/RoomUI.jsx';
 import FileDropZone from '../../../components/FileDropZone.jsx';
 import { TRANSFER_MODE } from '../../../constants/transfer.constants.js';
-
-function formatFileSize(bytes) {
-  if (!bytes || bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-}
+import { formatBytes as formatFileSize } from '../../../lib/formatters.js';
 
 export function TransferSection({
   isHost,
@@ -61,6 +62,9 @@ export function TransferSection({
   const isIdle = transferState === 'idle';
   const isCompleted = transferState === 'completed';
   const isError = transferState === 'error';
+  const supportsResumePicker = typeof window !== 'undefined' && typeof window.showOpenFilePicker === 'function';
+  const hasFiles = selectedFiles.length > 0 || selectedFile;
+  const canSend = hasFiles && tofuVerified && dataChannelReady && isIdle;
 
   const transferInfo = {
     fileName: pendingFile?.name || selectedFile?.name,
@@ -72,8 +76,8 @@ export function TransferSection({
   };
 
   return (
-    <div className="space-y-4">
-      {/* FileDropZone for adding files in-room — shown when idle for both sender and receiver */}
+    <div className="space-y-3">
+      {/* ─── 1. File Selection ──────────────────────────────────────── */}
       {isIdle && !awaitingDirectory && !incomingManifest && (
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 overflow-hidden">
           <h2 className="text-sm font-medium text-zinc-400 mb-3">
@@ -95,10 +99,25 @@ export function TransferSection({
         </div>
       )}
 
-      {/* Transfer mode toggle — shown when files are selected (all transfers use multi-file path) */}
-      {isIdle && selectedFiles.length >= 1 && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-          <h2 className="text-sm font-medium text-zinc-400 mb-3">Transfer Mode</h2>
+      {/* ─── 2. Send Button (right after file info for quick access) ── */}
+      {canSend && (
+        <button
+          onClick={onStartTransfer}
+          className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white rounded-xl font-semibold transition-colors shadow-lg shadow-emerald-900/30 flex items-center justify-center gap-2"
+        >
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 19V5m0 0l-4 4m4-4l4 4" />
+          </svg>
+          {selectedFiles.length > 1 ? `Send ${selectedFiles.length} Files` : 'Send File'}
+        </button>
+      )}
+
+      {/* ─── 3. Transfer Mode Toggle ───────────────────────────────── */}
+      {isIdle && selectedFiles.length >= 2 && (
+        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-medium text-zinc-500 uppercase tracking-wide">Transfer Mode</span>
+          </div>
           <div className="flex rounded-lg overflow-hidden border border-zinc-700">
             <button
               onClick={() => onTransferModeChange?.(TRANSFER_MODE.SEQUENTIAL)}
@@ -121,59 +140,73 @@ export function TransferSection({
               Parallel
             </button>
           </div>
-          <p className="text-xs text-zinc-500 mt-2">
+          <p className="text-xs text-zinc-600 mt-1.5">
             {transferMode === TRANSFER_MODE.SEQUENTIAL
-              ? 'Files sent one at a time (more reliable)'
-              : 'Multiple files sent simultaneously (faster)'}
+              ? 'One at a time — more reliable'
+              : 'Simultaneous — faster'}
           </p>
         </div>
       )}
 
-      {/* Large file / folder warning */}
+      {/* ─── 4. Warnings ───────────────────────────────────────────── */}
       {isIdle && selectedFiles.length > 0 && (selectedFiles.some(f => f.file.size > 100 * 1024 * 1024) || selectedFiles.length > 5) && (
         <div className="bg-amber-950/40 border border-amber-700/50 rounded-xl p-3">
-          <p className="text-sm text-amber-300">
-            ⚠️ <strong>Recommendation:</strong> For {selectedFiles.length > 5 ? 'many files or folders' : 'large files'}, compress them into a ZIP/RAR archive before sending.
-            This significantly reduces transfer time, improves reliability, and keeps folder structure intact.
+          <p className="text-xs text-amber-300/90">
+            ⚠️ For {selectedFiles.length > 5 ? 'many files' : 'large files'}, compressing into a ZIP first can improve speed & reliability.
           </p>
         </div>
       )}
 
-      {/* Host: Single-file info (legacy, shown when just one file) */}
+      {!isHost && !supportsResumePicker && (
+        <div className="bg-zinc-900/60 border border-zinc-800 rounded-xl p-2.5">
+          <p className="text-xs text-zinc-500">
+            Limited resume support in this browser. Connection drops may require restarting the transfer.
+          </p>
+        </div>
+      )}
+
+      {/* Host: Single-file info (legacy) */}
       {isHost && !isMultiFile && selectedFile && isIdle && !onAddFiles && (
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
           <FileInfo file={selectedFile} />
         </div>
       )}
 
-      {/* Receiver: Waiting for file loading state — only when no files selected to send */}
+      {/* ─── 5. Receiver: Waiting / Incoming Prompts ───────────────── */}
       {!isHost && selectedFiles.length === 0 && !pendingFile && !incomingManifest && dataChannelReady && !isTransferring && !isCompleted && !isError && (
-        <div className="bg-zinc-900 border border-emerald-800 rounded-xl p-8">
+        <div className="bg-zinc-900 border border-emerald-900/50 rounded-xl p-6">
           <div className="flex flex-col items-center justify-center">
-            <div className="mb-6">
-              <div className="flex gap-2">
-                <div className="w-3 h-3 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                <div className="w-3 h-3 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                <div className="w-3 h-3 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+            <div className="mb-4">
+              <div className="flex gap-1.5">
+                <div className="w-2.5 h-2.5 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                <div className="w-2.5 h-2.5 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                <div className="w-2.5 h-2.5 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
               </div>
             </div>
-            <h2 className="text-lg font-medium text-emerald-400 mb-2">Waiting for file...</h2>
-            <p className="text-sm text-zinc-500 text-center">Connected and ready. Sender can now share files.</p>
+            <h2 className="text-base font-medium text-emerald-400 mb-1">Waiting for file...</h2>
+            <p className="text-xs text-zinc-500 text-center">Connected and ready. Sender can now share files.</p>
           </div>
         </div>
       )}
 
-      {/* Receiver: Incoming multi-file manifest prompt */}
+      {/* Receiver: Incoming multi-file manifest */}
       {awaitingDirectory && incomingManifest && (
         <div className="bg-zinc-900 border border-emerald-800 rounded-xl p-4">
-          <h2 className="text-base font-medium text-emerald-400 mb-3">
-            Incoming: {incomingManifest.totalFiles} file{incomingManifest.totalFiles > 1 ? 's' : ''}
-          </h2>
-          <p className="text-sm text-zinc-400 mb-3">
-            Total size: {formatFileSize(incomingManifest.totalSize)}
-          </p>
+          <div className="flex items-center gap-2 mb-3">
+            <div className="w-8 h-8 rounded-lg bg-emerald-900/50 flex items-center justify-center">
+              <svg className="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M9 19l3 3m0 0l3-3m-3 3V10" />
+              </svg>
+            </div>
+            <div>
+              <h2 className="text-sm font-semibold text-emerald-400">
+                Incoming: {incomingManifest.totalFiles} file{incomingManifest.totalFiles > 1 ? 's' : ''}
+              </h2>
+              <p className="text-xs text-zinc-500">{formatFileSize(incomingManifest.totalSize)}</p>
+            </div>
+          </div>
           {/* File list preview */}
-          <div className="max-h-40 overflow-y-auto space-y-1 mb-4">
+          <div className="max-h-32 overflow-y-auto space-y-0.5 mb-3">
             {incomingManifest.files.map((f, i) => (
               <div key={i} className="flex items-center justify-between text-xs py-1 px-2 bg-zinc-800/50 rounded">
                 <span className="text-zinc-300 truncate flex-1 mr-2">
@@ -185,7 +218,7 @@ export function TransferSection({
           </div>
           <button
             onClick={onAcceptMultiFile}
-            className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-medium transition-colors"
+            className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white rounded-xl font-semibold transition-colors"
           >
             Accept & Choose Save Location
           </button>
@@ -199,18 +232,18 @@ export function TransferSection({
         </div>
       )}
 
-      {/* Progress with Controls */}
+      {/* ─── 6. Progress / Completion ──────────────────────────────── */}
       {isTransferring && (
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-          {/* Channel count & mode indicator for multi-file */}
+          {/* Channel & mode badges */}
           {isMultiFile && (
-            <div className="flex items-center gap-3 mb-3">
+            <div className="flex items-center gap-2 mb-3">
               {channelCount > 1 && (
-                <span className="text-xs px-2 py-1 bg-zinc-800 rounded text-zinc-400">
-                  {channelCount} channels
+                <span className="text-xs px-2 py-0.5 bg-zinc-800 rounded-full text-zinc-400">
+                  {channelCount} ch
                 </span>
               )}
-              <span className="text-xs px-2 py-1 bg-zinc-800 rounded text-zinc-400">
+              <span className="text-xs px-2 py-0.5 bg-zinc-800 rounded-full text-zinc-400">
                 {transferMode === TRANSFER_MODE.PARALLEL ? 'Parallel' : 'Sequential'}
               </span>
             </div>
@@ -228,9 +261,9 @@ export function TransferSection({
             onCancel={onCancel}
           />
 
-          {/* Per-file progress list */}
+          {/* Per-file progress */}
           {perFileProgress.length >= 1 && (
-            <div className="mt-3 space-y-1 max-h-40 overflow-y-auto">
+            <div className="mt-3 space-y-1 max-h-36 overflow-y-auto">
               {perFileProgress.map((f) => {
                 const done = f.completed || f.state === 'completed';
                 const active = f.progress > 0 || f.state === 'sending';
@@ -254,35 +287,34 @@ export function TransferSection({
 
       {/* Transfer Complete */}
       {isCompleted && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
+        <div className="bg-zinc-900 border border-emerald-900/50 rounded-xl p-4">
           <TransferComplete
             isHost={isHost}
             savedToFileSystem={downloadResult?.savedToFileSystem}
             fileName={pendingFile?.name}
             fileCount={isMultiFile ? (incomingManifest?.totalFiles || selectedFiles.length || 1) : 1}
           />
-          {/* Reset button to allow re-transfer */}
           {dataChannelReady && onReset && (
             <button
               onClick={onReset}
-              className="w-full mt-3 py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-medium transition-colors"
+              className="w-full mt-3 py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl font-medium transition-colors"
             >
-              {isHost ? 'Send More Files' : 'Receive More Files / Send Files'}
+              {isHost ? 'Send More Files' : 'Receive More / Send Files'}
             </button>
           )}
         </div>
       )}
 
-      {/* Transfer Error — with reset */}
+      {/* Transfer Error */}
       {isError && (
-        <div className="bg-zinc-900 border border-red-800 rounded-xl p-4">
+        <div className="bg-zinc-900 border border-red-800/50 rounded-xl p-4">
           <div className="text-center">
-            <p className="text-red-400 font-medium mb-2">Transfer Failed</p>
-            <p className="text-sm text-zinc-500 mb-3">Something went wrong during the transfer.</p>
+            <p className="text-red-400 font-medium mb-1">Transfer Failed</p>
+            <p className="text-xs text-zinc-500 mb-3">Something went wrong during the transfer.</p>
             {dataChannelReady && onReset && (
               <button
                 onClick={onReset}
-                className="w-full py-3 bg-zinc-700 hover:bg-zinc-600 text-white rounded-xl font-medium transition-colors"
+                className="w-full py-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-xl font-medium transition-colors"
               >
                 Try Again
               </button>
@@ -290,24 +322,7 @@ export function TransferSection({
           </div>
         </div>
       )}
-
-      {/* Transfer Info Panel */}
-      {transferInfo.fileName && !isMultiFile && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
-          <h2 className="text-sm font-medium text-zinc-400 mb-3">Transfer</h2>
-          <TransferInfoPanel info={transferInfo} />
-        </div>
-      )}
-
-      {/* Send Button — shown for anyone with files when idle and connected */}
-      {(selectedFiles.length > 0 || selectedFile) && tofuVerified && dataChannelReady && isIdle && (
-        <button
-          onClick={onStartTransfer}
-          className="w-full py-3 bg-zinc-100 text-zinc-900 hover:bg-white rounded-xl font-medium transition-colors"
-        >
-          {selectedFiles.length > 1 ? `Send ${selectedFiles.length} Files` : 'Send File'}
-        </button>
-      )}
     </div>
   );
 }
+

@@ -60,7 +60,7 @@ The P2P file transfer follows a multi-phase process:
 ### Sequence Diagram
 
 ```
-Host                ConnectionService       SignalingServer        Peer
+Host                useRoomConnection       SignalingServer        Peer
  │                         │                      │                 │
  │ 1. createRoom()         │                      │                 │
  ├────────────────────────►│                      │                 │
@@ -87,14 +87,14 @@ Host                ConnectionService       SignalingServer        Peer
 
 #### Step 1: Host Creates Room
 
-**File:** [services/ConnectionService.js](../src/services/ConnectionService.js)
+**File:** [pages/Room/hooks/useRoomConnection.js](../src/pages/Room/hooks/useRoomConnection.js)
 
 ```javascript
 async createRoom() {
-  // 1. Generate unique room ID
-  const roomId = identityManager.generateRoomId();
+  // 1. Generate unique room ID via signaling server
+  const roomId = await signaling.createRoom();
   
-  // 2. Initialize WebRTC peer connection
+  // 2. Initialize WebRTC peer connection (via p2pManager)
   const peerConnection = new RTCPeerConnection(ICE_SERVERS_CONFIG);
   
   // 3. Create data channel for file transfer
@@ -115,13 +115,12 @@ async createRoom() {
 
 #### Step 2: Peer Joins Room
 
-**File:** [services/ConnectionService.js](../src/services/ConnectionService.js)
+**File:** [pages/Room/hooks/useRoomConnection.js](../src/pages/Room/hooks/useRoomConnection.js)
 
 ```javascript
 async joinRoom(roomId) {
-  // 1. Validate room exists
-  const roomExists = await signaling.checkRoom(roomId);
-  if (!roomExists) throw new ConnectionError('Room not found');
+  // 1. Connect to signaling server
+  const socket = initSocket();
   
   // 2. Initialize peer connection
   const peerConnection = new RTCPeerConnection(ICE_SERVERS_CONFIG);
@@ -133,7 +132,7 @@ async joinRoom(roomId) {
   };
   
   // 4. Join signaling room
-  await signaling.joinRoom(roomId);
+  socket.emit('join-room', roomId);
   
   // 5. Store in room store
   roomStore.setRoom({ roomId, isHost: false });
@@ -162,7 +161,7 @@ signaling.on('iceCandidate', (candidate) => {
 
 ```javascript
 dataChannel.onopen = () => {
-  logger.log('[ConnectionService] Data channel open');
+  logger.log('[p2pManager] Data channel open');
   this.emit('dataChannelReady');
   
   // Enable file transfer UI
@@ -179,21 +178,22 @@ dataChannel.onopen = () => {
 ### Sequence Diagram
 
 ```
-Host                SecurityService         MessageService         Peer
+Host                useSecurity             tofuSecurity           Peer
  │                         │                      │                 │
  │ 1. Connection ready     │                      │                 │
  ├────────────────────────►│                      │                 │
- │                         │ 2. Generate fingerprint                │
- │                         │      (SHA-256 hash)   │                 │
+ │                         │ 2. Derive AES-GCM key                 │
+ │                         │    from URL secret    │                 │
  │                         │                      │                 │
- │                         │ 3. Send fingerprint  │                 │
+ │                         │ 3. Exchange encrypted identity (UUID)  │
  │                         ├─────────────────────►│                 │
  │                         │                      ├────────────────►│
  │                         │                      │                 │
- │                         │                      │ 4. Display verification UI
+ │                         │                      │ 4. Verify peer UUID
+ │                         │                      │    against IndexedDB
  │                         │                      │◄────────────────┤
  │                         │                      │                 │
- │                         │ 5. User verifies both sides            │
+ │                         │ 5. isReturningPeer?  │                 │
  │                         │◄────────────────────────────────────────┤
  │                         │                      │                 │
  │ 6. onVerified event     │                      │ 7. onVerified   │
@@ -202,94 +202,54 @@ Host                SecurityService         MessageService         Peer
 
 ### Detailed Steps
 
-#### Step 1: Generate Security Payload
+#### Step 1: Derive Encryption Key
 
-**File:** [services/SecurityService.js](../src/services/SecurityService.js)
-
-```javascript
-async generateSecurityPayload() {
-  // 1. Get or create identity fingerprint
-  const fingerprint = await identityManager.getFingerprint();
-  
-  // 2. Create verification payload
-  const payload = {
-    fingerprint,
-    timestamp: Date.now(),
-    deviceId: identityManager.getDeviceId(),
-    version: APP_VERSION,
-  };
-  
-  // 3. Store in room store
-  roomStore.setSecurityPayload(payload);
-  
-  return payload;
-}
-```
-
-#### Step 2: Exchange Fingerprints
-
-**File:** [services/MessageService.js](../src/services/MessageService.js)
+**File:** [utils/tofuSecurity.js](../src/utils/tofuSecurity.js)
 
 ```javascript
-// Host sends fingerprint
-const message = {
-  type: MESSAGE_TYPE_SECURITY_PAYLOAD,
-  payload: securityPayload,
-};
-dataChannel.send(JSON.stringify(message));
-
-// Peer receives and stores
-handleSecurityPayload(payload) {
-  this.peerFingerprint = payload.fingerprint;
-  this.emit('fingerprintReceived', payload);
-}
-```
-
-#### Step 3: Display Verification UI
-
-**File:** [pages/Room/components/SecuritySection.jsx](../src/pages/Room/components/SecuritySection.jsx)
-
-```jsx
-export function SecuritySection({ myFingerprint, peerFingerprint }) {
-  return (
-    <div className="security-verification">
-      <h3>Verify Connection Security</h3>
-      
-      <div className="fingerprint-comparison">
-        <div>
-          <label>Your Code:</label>
-          <code>{formatFingerprint(myFingerprint)}</code>
-        </div>
-        
-        <div>
-          <label>Peer Code:</label>
-          <code>{formatFingerprint(peerFingerprint)}</code>
-        </div>
-      </div>
-      
-      <p>Both users should verbally confirm these codes match</p>
-      <button onClick={handleVerify}>Codes Match - Verify</button>
-    </div>
+async deriveKey(secret) {
+  // 1. Derive AES-GCM-256 key from shared secret via PBKDF2
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw', secret, 'PBKDF2', false, ['deriveKey']
+  );
+  
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 100000, hash: 'SHA-256' },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
   );
 }
 ```
 
-#### Step 4: User Verification
+#### Step 2: Exchange Identity
+
+**File:** [pages/Room/hooks/useSecurity.js](../src/pages/Room/hooks/useSecurity.js)
 
 ```javascript
-handleVerify() {
-  // User confirms codes match
-  securityService.verifyPeer(peerFingerprint);
+// Exchange UUID over encrypted channel
+const handleHandshake = async (peerUUID) => {
+  // 1. Verify peer against IndexedDB sessions
+  const isReturning = await verifyPeer(peerUUID, roomId);
+  setIsReturningPeer(isReturning);
   
-  // Store in TOFU database
-  tofuSecurity.trustPeer(peerFingerprint);
+  // 2. If returning, look for interrupted transfer
+  if (isReturning) {
+    const transfers = await listTransfers();
+    const interrupted = transfers.find(t => 
+      t.roomId === roomId && 
+      ['interrupted', 'paused', 'active'].includes(t.status)
+    );
+    setInterruptedTransfer(interrupted || null);
+  }
   
-  // Enable file transfer
-  this.emit('verified');
-}
+  // 3. Save/update peer session
+  await savePeerSession(peerUUID, roomId);
+};
 ```
 
-**Result:** Secure connection established, ready for file transfer
+**Result:** Secure encrypted connection established, returning peers identified, ready for file transfer
 
 ---
 
@@ -298,7 +258,7 @@ handleVerify() {
 ### Sequence Diagram
 
 ```
-Sender              TransferOrchestrator    MessageService       Receiver
+Sender              useFileTransfer         DataChannel          Receiver
   │                         │                      │                 │
   │ 1. Select file          │                      │                 │
   ├────────────────────────►│                      │                 │
@@ -342,13 +302,13 @@ const handleSendFile = async () => {
   const file = await fileHandle.getFile();
   
   // 3. Start transfer
-  await transferOrchestrator.startSending(file, dataChannel);
+  await handleSendFile(file, dataChannel);
 };
 ```
 
 #### Step 2: Generate File Metadata
 
-**File:** [services/TransferOrchestrator.js](../src/services/TransferOrchestrator.js)
+**File:** [pages/Room/hooks/useFileTransfer.js](../src/pages/Room/hooks/useFileTransfer.js)
 
 ```javascript
 async startSending(file, dataChannel) {
@@ -382,7 +342,7 @@ async startSending(file, dataChannel) {
 
 #### Step 3: Send Metadata to Peer
 
-**File:** [services/MessageService.js](../src/services/MessageService.js)
+**File:** [pages/Room/hooks/useFileTransfer.js](../src/pages/Room/hooks/useFileTransfer.js)
 
 ```javascript
 sendFileMetadata(metadata) {
@@ -391,8 +351,8 @@ sendFileMetadata(metadata) {
     payload: metadata,
   };
   
-  this.dataChannel.send(JSON.stringify(message));
-  logger.log('[MessageService] Sent file metadata:', metadata.fileName);
+  dataChannel.send(JSON.stringify(message));
+  logger.log('[useFileTransfer] Sent file metadata:', metadata.fileName);
 }
 ```
 
@@ -408,13 +368,13 @@ const handleAcceptFile = async (transferId) => {
   });
   
   // 2. Send acceptance
-  messageService.send({
+  dataChannel.send(JSON.stringify({
     type: MESSAGE_TYPE_TRANSFER_ACCEPT,
     payload: { transferId },
-  });
+  }));
   
-  // 3. Start receiver
-  await transferOrchestrator.startReceiving(metadata, fileHandle, dataChannel);
+  // 3. Start AssemblyEngine for receiving
+  await startReceiving(metadata, fileHandle, dataChannel);
 };
 ```
 
@@ -699,7 +659,7 @@ async writeChunk(chunk) {
 ### Sequence Diagram
 
 ```
-Receiver          AssemblyEngine      FileWriter      MessageService      Sender
+Receiver          AssemblyEngine      FileWriter      useFileTransfer     Sender
    │                     │                 │                 │                │
    │ 1. All chunks received                │                 │                │
    ├────────────────────►│                 │                 │                │
@@ -746,7 +706,7 @@ async completeTransfer() {
   logger.log('[AssemblyEngine] Transfer complete, hash verified ✓');
   
   // 5. Send completion message
-  this.messageService.send({
+  dataChannel.send(JSON.stringify({
     type: MESSAGE_TYPE_TRANSFER_COMPLETE,
     payload: {
       transferId: this.metadata.transferId,
@@ -791,11 +751,8 @@ useEffect(() => {
     });
   };
   
-  transferOrchestrator.on('transferComplete', handleComplete);
-  
-  return () => {
-    transferOrchestrator.off('transferComplete', handleComplete);
-  };
+  // Subscribe to completion events
+  // ... event listener setup
 }, []);
 ```
 
@@ -819,11 +776,11 @@ async pauseTransfer(transferId) {
     chunksCompleted: this.receivedChunks,
   });
   
-  // 3. Notify peer
-  messageService.send({
+  // 3. Notify peer via data channel
+  dataChannel.send(JSON.stringify({
     type: MESSAGE_TYPE_TRANSFER_PAUSE,
     payload: { transferId },
-  });
+  }));
 }
 ```
 
@@ -840,11 +797,11 @@ async resumeTransfer(transferId) {
   // 3. Clear pause flag
   this.pausedTransfers.delete(transferId);
   
-  // 4. Notify peer
-  messageService.send({
+  // 4. Notify peer via data channel
+  dataChannel.send(JSON.stringify({
     type: MESSAGE_TYPE_TRANSFER_RESUME,
     payload: { transferId, resumeFrom: state.chunksCompleted },
-  });
+  }));
 }
 ```
 
@@ -854,32 +811,13 @@ On page reload:
 
 ```javascript
 async recoverTransfers() {
-  // 1. Load active transfers from IndexedDB
+  // 1. Load active/interrupted transfers from IndexedDB
   const activeTransfers = await transfersRepository.getActiveTransfers();
   
   // 2. For each active transfer
   for (const transfer of activeTransfers) {
     // 3. Check if peer still connected
-    if (!connectionService.isConnected()) {
-      // Mark as failed
-      await transfersRepository.updateTransfer(transfer.id, {
-        status: 'failed',
-        error: 'Connection lost',
-      });
-      continue;
-    }
-    
-    // 4. Resume transfer
-    await resumableTransferManager.resume(transfer);
-  }
-}
-```
-
-### Error Handling
-
-```javascript
-try {
-  await transferOrchestrator.startSending(file, dataChannel);
+    if (!peerConnection || peerConnection.connectionState !== 'connected') {
 } catch (error) {
   if (error instanceof ConnectionError) {
     // Peer disconnected
