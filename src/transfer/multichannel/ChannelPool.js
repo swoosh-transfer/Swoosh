@@ -149,16 +149,20 @@ export class ChannelPool {
   /**
    * Pick the "best" open data channel (channels >= 1) using least-buffered strategy.
    * Falls back to round-robin when buffers are equal.
-   * @returns {number|null} channel index, or null if none available
+   * 
+   * IMPORTANT: Never returns channel-0 (control channel). 
+   * Channel-0 is reserved for JSON control messages only, not binary chunk data.
+   * 
+   * @returns {number|null} channel index (>= 1), or null if none available
    */
   getAvailableChannel() {
     const dataChannels = [...this._channels.entries()]
       .filter(([idx, ch]) => idx >= 1 && ch.readyState === 'open');
 
     if (dataChannels.length === 0) {
-      // Fallback: use channel 0 if it's the only one
-      const ch0 = this._channels.get(0);
-      return ch0 && ch0.readyState === 'open' ? 0 : null;
+      // NO data channels available - return null to signal sender to wait/retry
+      // Do NOT fall back to channel-0 (it's for control messages only)
+      return null;
     }
 
     // Find least-buffered

@@ -41,6 +41,16 @@ export class ChunkingEngine {
   }
 
   /**
+   * Get the effective chunk size for a given transfer.
+   * On mobile/constrained: uses the per-transfer chunk size (default NETWORK_CHUNK_SIZE).
+   * On desktop: uses STORAGE_CHUNK_SIZE.
+   * @private
+   */
+  _getChunkSize(transferId) {
+    return this.chunkSizes.get(transferId) || STORAGE_CHUNK_SIZE;
+  }
+
+  /**
    * Pause a chunking operation
    */
   async pause(transferId) {
@@ -151,14 +161,14 @@ export class ChunkingEngine {
     
     await saveFileMetadata(fileMetadata);
     const transferRecord = await createTransferRecord({ transferId, fileMeta: fileMetadata, peerId });
-    const totalChunks = Math.ceil(file.size / STORAGE_CHUNK_SIZE);
     
-    // Set initial chunk size from bandwidth test result (per-transfer tracking)
+    // Set chunk size: mobile uses smaller chunks (16KB default), desktop uses 64KB
     const chunkSize = this.transferProfile.constrained
       ? (initialChunkSize || NETWORK_CHUNK_SIZE)
       : STORAGE_CHUNK_SIZE;
     this.chunkSizes.set(transferId, chunkSize);
-    logger.log(`[ChunkingEngine] Starting with chunk size: ${chunkSize / 1024}KB`);
+    const totalChunks = Math.ceil(file.size / chunkSize);
+    logger.log(`[ChunkingEngine] Starting with chunk size: ${chunkSize / 1024}KB, totalChunks: ${totalChunks}`);
     
     // Initialize chunk bitmap for resume capability (sender tracks which chunks were sent)
     const chunkBitmap = createBitmap(totalChunks);
@@ -223,7 +233,7 @@ export class ChunkingEngine {
     
     // If resuming, skip to the correct position
     if (resumeFromChunk > 0) {
-      const skipBytes = resumeFromChunk * STORAGE_CHUNK_SIZE;
+      const skipBytes = resumeFromChunk * chunkSize;
       let skipped = 0;
       while (skipped < skipBytes) {
         const { value: chunk, done } = await reader.read();
@@ -246,6 +256,8 @@ export class ChunkingEngine {
     });
 
     // Initialize storage buffer
+    // Buffer array is always STORAGE_CHUNK_SIZE (64KB) for capacity,
+    // but the fill threshold is determined by the per-transfer chunk size
     this.storageBuffers.set(transferId, {
       buffer: new Uint8Array(STORAGE_CHUNK_SIZE),
       currentSize: 0,
@@ -296,9 +308,8 @@ export class ChunkingEngine {
           chunkIndex: chunkingState.storageChunkIndex,
           bytesProcessed: bytesRead
         });
-
-        // Adapt chunk size based on performance
-        this._adaptChunkSize(transferId);
+        // Note: Bandwidth adaptation is handled by channel auto-scaling
+        // (BandwidthMonitor + ChannelPool). Chunk size is fixed per transfer.
       }
 
       // Mark chunking as complete
@@ -341,6 +352,7 @@ export class ChunkingEngine {
    */
   async _appendToStorageBuffer(transferId, chunk, onChunkReady) {
     const bufferState = this.storageBuffers.get(transferId);
+    const targetChunkSize = this._getChunkSize(transferId);
     
     // Convert to Uint8Array if needed
     const chunkData = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
@@ -349,7 +361,7 @@ export class ChunkingEngine {
     
     // Process the chunk in parts that fit in the buffer
     while (offset < chunkData.length) {
-      const remainingSpace = STORAGE_CHUNK_SIZE - bufferState.currentSize;
+      const remainingSpace = targetChunkSize - bufferState.currentSize;
       const remainingChunk = chunkData.length - offset;
       const bytesToCopy = Math.min(remainingSpace, remainingChunk);
       
@@ -361,8 +373,8 @@ export class ChunkingEngine {
       bufferState.currentSize += bytesToCopy;
       offset += bytesToCopy;
       
-      // Check if storage chunk is full
-      if (bufferState.currentSize >= STORAGE_CHUNK_SIZE) {
+      // Check if storage chunk is full (using per-transfer chunk size, not constant)
+      if (bufferState.currentSize >= targetChunkSize) {
         await this._processStorageBuffer(transferId, onChunkReady, false);
         // Reset buffer after processing
         bufferState.currentSize = 0;
@@ -453,7 +465,8 @@ export class ChunkingEngine {
     try {
       const serialized = serializeBitmap(bitmap);
       const completedCount = getCompletedCount(bitmap);
-      const totalChunks = Math.ceil(chunkingState.totalSize / STORAGE_CHUNK_SIZE);
+      const chunkSize = this._getChunkSize(transferId);
+      const totalChunks = Math.ceil(chunkingState.totalSize / chunkSize);
       const progress = (completedCount / totalChunks) * 100;
 
       await updateTransfer(transferId, {
@@ -472,15 +485,16 @@ export class ChunkingEngine {
   }
 
   /**
-   * Adaptive chunk size monitoring and adjustment
+   * Adaptive chunk size monitoring and adjustment (UNUSED)
    * 
-   * Uses speed bands to adjust chunk size:
-   * - > 1.5 MB/s: increase chunk size by 15% (toward max)
-   * - 750 KB/s - 1.5 MB/s: maintain current size
-   * - 512 KB/s - 750 KB/s: decrease slightly (5%)
-   * - < 512 KB/s: decrease by 15% (toward min)
+   * NOT called during transfer — chunk size is fixed per transfer to maintain
+   * compatibility with bitmap-based resume. Bandwidth adaptation is handled
+   * by channel auto-scaling (BandwidthMonitor + ChannelPool).
+   * 
+   * Kept as reference for potential future sub-chunk adaptation.
    * 
    * @private
+   * @deprecated Use channel auto-scaling instead
    */
   _adaptChunkSize(transferId) {
     if (!this.transferProfile.constrained) {
@@ -573,13 +587,14 @@ export class ChunkingEngine {
     logger.log(`[ChunkingEngine] Retransmitting ${chunkIndices.length} chunks for transfer ${transferId}`);
     
     const results = { success: true, sent: 0, failed: 0, errors: [] };
+    const chunkSize = this._getChunkSize(transferId);
     
     for (const chunkIndex of chunkIndices) {
       try {
         // Calculate file offset for this chunk
-        const fileOffset = chunkIndex * STORAGE_CHUNK_SIZE;
-        const endOffset = Math.min(fileOffset + STORAGE_CHUNK_SIZE, file.size);
-        const chunkSize = endOffset - fileOffset;
+        const fileOffset = chunkIndex * chunkSize;
+        const endOffset = Math.min(fileOffset + chunkSize, file.size);
+        const chunkDataSize = endOffset - fileOffset;
         
         if (fileOffset >= file.size) {
           logger.warn(`[ChunkingEngine] Chunk ${chunkIndex} offset ${fileOffset} exceeds file size ${file.size}`);
@@ -601,7 +616,7 @@ export class ChunkingEngine {
         const chunkMetadata = {
           transferId,
           chunkIndex,
-          size: chunkSize,
+          size: chunkDataSize,
           checksum,
           timestamp: Date.now(),
           isFinal,
@@ -644,7 +659,7 @@ export class ChunkingEngine {
       storageChunkIndex: state?.storageChunkIndex || 0,
       currentChunkIndex: state?.storageChunkIndex || 0,
       totalSize: state?.totalSize || 0,
-      totalChunks: state ? Math.ceil(state.totalSize / STORAGE_CHUNK_SIZE) : 0
+      totalChunks: state ? Math.ceil(state.totalSize / this._getChunkSize(transferId)) : 0
     };
   }
 

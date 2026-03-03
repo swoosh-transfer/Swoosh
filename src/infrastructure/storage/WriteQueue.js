@@ -146,16 +146,17 @@ export class WriteQueue {
    * @param {number} timeoutMs - Max time to wait for missing chunks (default 500ms)
    * @returns {Promise<void>}
    */
-  async flush(timeoutMs = 500) {
+  async flush(timeoutMs = 5000) {
     const startTime = Date.now();
     let lastProgressTime = startTime;
     let lastProgress = this.nextExpected;
 
     while (this.queue.size > 0 || this.processing) {
-      // Check timeout
+      // Check timeout — BUT keep going if we're still making progress (active writes)
       const elapsed = Date.now() - startTime;
-      if (elapsed > timeoutMs) {
-        // Timeout occurred - log stuck chunks and give up
+      const stalled = elapsed > timeoutMs && (Date.now() - lastProgressTime > Math.min(timeoutMs, 3000));
+      if (stalled) {
+        // True stall: no progress for the timeout duration or 3s
         const stuckChunks = this.getPendingChunks();
         if (stuckChunks.length > 0) {
           logger.warn(`[WriteQueue] Flush timeout after ${elapsed}ms: ${stuckChunks.length} chunks stuck in buffer`);

@@ -148,9 +148,10 @@ export class FileQueue {
 
   /**
    * Generate a manifest suitable for the MULTI_FILE_MANIFEST message.
+   * @param {number} [chunkSize=STORAGE_CHUNK_SIZE] - Chunk size to use for totalChunks calculation
    * @returns {Object}
    */
-  getManifest() {
+  getManifest(chunkSize = STORAGE_CHUNK_SIZE) {
     return {
       totalFiles: this._items.length,
       totalSize: this._items.reduce((sum, it) => sum + it.file.size, 0),
@@ -160,7 +161,7 @@ export class FileQueue {
         size: it.file.size,
         mimeType: it.file.type || 'application/octet-stream',
         relativePath: it.relativePath,
-        totalChunks: Math.ceil(it.file.size / STORAGE_CHUNK_SIZE),
+        totalChunks: Math.ceil(it.file.size / chunkSize),
       })),
     };
   }

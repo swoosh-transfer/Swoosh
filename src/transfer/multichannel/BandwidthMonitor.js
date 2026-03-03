@@ -40,6 +40,7 @@ export class BandwidthMonitor {
     this._sustainUpCount = 0;
     this._sustainDownCount = 0;
     this._history = [];
+    this._lastTickTime = Date.now();
 
     this._intervalId = setInterval(() => this._tick(), CHANNEL_SCALE_INTERVAL);
     logger.log('[BandwidthMonitor] Started');
@@ -119,7 +120,9 @@ export class BandwidthMonitor {
   // ─── Internals ────────────────────────────────────────────────────
 
   _tick() {
-    const elapsed = CHANNEL_SCALE_INTERVAL / 1000; // seconds
+    const now = Date.now();
+    const elapsed = Math.max((now - (this._lastTickTime || now)) / 1000, 0.1); // actual seconds
+    this._lastTickTime = now;
     const instantBps = this._bytesSinceLastTick / elapsed;
 
     // Exponential moving average

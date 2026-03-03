@@ -28,7 +28,7 @@ export class MultiFileReceiver {
     /** @type {FileSystemDirectoryHandle|null} chosen save directory */
     this._dirHandle = null;
 
-    /** Per-file state: Map<fileIndex, { writable, handle, receivedChunks, totalChunks, bytesReceived, completed }> */
+    /** Per-file state: Map<fileIndex, { writable, handle, receivedChunks, totalChunks, bytesReceived, bytesWritten, completed }> */
     this._files = new Map();
 
     /** Map of fileIndex -> Promise that resolves when WriteQueue for that file is ready */
@@ -40,6 +40,9 @@ export class MultiFileReceiver {
     /** Metadata waiting for its binary partner: fileIndex → metadata */
     this._pendingMeta = new Map();
 
+    /** Sender's chunk size (received in manifest, defaults to STORAGE_CHUNK_SIZE for back-compat) */
+    this._senderChunkSize = STORAGE_CHUNK_SIZE;
+
     /** Callbacks */
     this._onManifest = null;           // (manifest) => void
     this._onProgress = null;           // (progressObj) => void
@@ -49,7 +52,12 @@ export class MultiFileReceiver {
     this._onNeedDirectory = null;      // () => Promise — prompt user for directory
 
     this._totalBytesReceived = 0;
+    /** Track total bytes actually written to disk (vs received in buffer) */
+    this._totalBytesWritten = 0;
     this._startTime = 0;
+    
+    // Periodic sync to update bytesWritten from WriteQueues
+    this._progressSyncInterval = null;
   }
 
   // ─── Configuration ────────────────────────────────────────────────
@@ -71,8 +79,14 @@ export class MultiFileReceiver {
     this._manifest = manifest;
     this._startTime = Date.now();
     this._totalBytesReceived = 0;
+    this._totalBytesWritten = 0;
 
-    logger.log('[MultiFileReceiver] Received manifest:', manifest.totalFiles, 'files,', manifest.totalSize, 'bytes');
+    // Use sender's chunk size if provided, otherwise default to STORAGE_CHUNK_SIZE
+    if (manifest.chunkSize) {
+      this._senderChunkSize = manifest.chunkSize;
+    }
+
+    logger.log('[MultiFileReceiver] Received manifest:', manifest.totalFiles, 'files,', manifest.totalSize, 'bytes, chunkSize:', this._senderChunkSize);
 
     // Initialize per-file state and generate transfer IDs for tracking
     for (const f of manifest.files) {
@@ -92,6 +106,7 @@ export class MultiFileReceiver {
         totalChunks: f.totalChunks,
         receivedChunks: new Set(),
         bytesReceived: 0,
+        bytesWritten: 0,
         completed: false,
         fileCompleteSent: false,  // Set to true when FILE_COMPLETE message received
         writable: null,
@@ -102,6 +117,56 @@ export class MultiFileReceiver {
     }
 
     if (this._onManifest) this._onManifest(manifest);
+    
+    // Start periodic progress sync to track actual write progress
+    this._startProgressSync();
+  }
+
+  /**
+   * Start periodic sync of bytesWritten from WriteQueues
+   * This ensures UI progress reflects actual disk writes, not just buffered chunks
+   */
+  _startProgressSync() {
+    if (this._progressSyncInterval) return;
+    
+    this._progressSyncInterval = setInterval(() => {
+      this._syncWriteProgress();
+    }, 200); // Update every 200ms for responsive UI
+  }
+  
+  /**
+   * Sync bytesWritten from all WriteQueues and emit progress
+   */
+  _syncWriteProgress() {
+    let totalWritten = 0;
+    
+    for (const [idx, state] of this._files) {
+      if (state.writeQueue && !state.completed) {
+        const queueProgress = state.writeQueue.getProgress();
+        const newBytesWritten = queueProgress.bytesWritten;
+        
+        // Only update if WriteQueue has made progress
+        if (newBytesWritten > state.bytesWritten) {
+          state.bytesWritten = newBytesWritten;
+        }
+      }
+      totalWritten += state.bytesWritten;
+    }
+    
+    if (totalWritten !== this._totalBytesWritten) {
+      this._totalBytesWritten = totalWritten;
+      this._emitProgress();
+    }
+  }
+
+  /**
+   * Stop periodic progress sync
+   */
+  _stopProgressSync() {
+    if (this._progressSyncInterval) {
+      clearInterval(this._progressSyncInterval);
+      this._progressSyncInterval = null;
+    }
   }
 
   // ─── Directory setup ──────────────────────────────────────────────
@@ -399,31 +464,52 @@ export class MultiFileReceiver {
       try {
         // Use WriteQueue to handle out-of-order chunk arrival
         // WriteQueue buffers chunks and writes them sequentially, even if they arrive out of order
-        await fileState.writeQueue.add(chunkIndex, data);
+        const writeResult = await fileState.writeQueue.add(chunkIndex, data);
+        
+        // Track actual bytes written to disk (not just buffered)
+        const queueProgress = fileState.writeQueue.getProgress();
+        const newBytesWritten = queueProgress.bytesWritten;
+        const deltaWritten = newBytesWritten - fileState.bytesWritten;
+        if (deltaWritten > 0) {
+          fileState.bytesWritten = newBytesWritten;
+          this._totalBytesWritten += deltaWritten;
+        }
       } catch (err) {
-        logger.error(`[MultiFileReceiver] Write error for file ${fileIndex}:`, err);
-        // Fallback to blob
-        logger.warn(`[MultiFileReceiver] File ${fileIndex} chunk ${chunkIndex} falling back to memory (WriteQueue error)`);
-        fileState.blobParts.push(new Uint8Array(data));
+        logger.error(`[MultiFileReceiver] Write error for file ${fileIndex} chunk ${chunkIndex}:`, err);
+        // Re-throw — do NOT silently buffer to blobParts (wastes RAM and corrupts output)
+        throw err;
       }
     } else if (fileState.writable) {
       logger.warn(`[MultiFileReceiver] File ${fileIndex} chunk ${chunkIndex} using direct write (no WriteQueue)`);
       try {
-        // Fallback: direct write (for cases where WriteQueue wasn't initialized)
         await fileState.writable.write(new Uint8Array(data));
       } catch (err) {
-        logger.error(`[MultiFileReceiver] Write error for file ${fileIndex}:`, err);
-        // Fallback to blob
-        logger.warn(`[MultiFileReceiver] File ${fileIndex} chunk ${chunkIndex} falling back to memory`);
-        fileState.blobParts.push(new Uint8Array(data));
+        logger.error(`[MultiFileReceiver] Direct write error for file ${fileIndex} chunk ${chunkIndex}:`, err);
+        throw err;
       }
     } else {
-      logger.warn(`[MultiFileReceiver] File ${fileIndex} chunk ${chunkIndex} buffering in memory - WriteQueue not ready yet (${fileState.blobParts.length} chunks in memory)`);
-      fileState.blobParts.push(new Uint8Array(data));
+      // WriteQueue not ready yet — only accumulate in blobParts as a last resort
+      // (this path is only hit when directory picker wasn't used at all)
+      if (!this._dirHandle) {
+        fileState.blobParts.push(new Uint8Array(data));
+      } else {
+        // We have a directory handle but WriteQueue still isn't ready — something is wrong
+        logger.error(`[MultiFileReceiver] File ${fileIndex} chunk ${chunkIndex}: WriteQueue not ready despite directory handle being set`);
+        throw new Error(`WriteQueue not initialized for file ${fileIndex}`);
+      }
     }
 
     // Progress
     this._emitProgress();
+    
+    // Mobile-specific: Check if WriteQueue is falling behind
+    // If buffered chunks exceed 20 (300KB+ in memory), warn about backpressure
+    if (fileState.writeQueue) {
+      const queueProgress = fileState.writeQueue.getProgress();
+      if (queueProgress.pending > 20) {
+        logger.warn(`[MultiFileReceiver] File ${fileIndex}: WriteQueue backpressure - ${queueProgress.pending} chunks buffered, ${queueProgress.written} written`);
+      }
+    }
 
     // Check if this file is complete: all chunks received AND all written to disk
     // This handles late arrivals after FILE_COMPLETE was already sent
@@ -432,7 +518,7 @@ export class MultiFileReceiver {
     if (allChunksReceived && fileState.fileCompleteSent && !fileState.completed && fileState.writeQueue) {
       // FILE_COMPLETE already sent and now all chunks have finally arrived
       // Flush and complete the file
-      const timeoutMs = 1000;
+      const timeoutMs = 10000;
       await fileState.writeQueue.flush(timeoutMs);
       
       const queueProgress = fileState.writeQueue.getProgress();
@@ -468,8 +554,8 @@ export class MultiFileReceiver {
     
     // All chunks have arrived - complete the file
     if (state.writeQueue) {
-      // Flush writeQueue with generous timeout
-      const timeoutMs = 1000;
+      // Flush writeQueue with generous timeout for mobile
+      const timeoutMs = 10000;
       await state.writeQueue.flush(timeoutMs);
       
       const queueProgress = state.writeQueue.getProgress();
@@ -483,9 +569,21 @@ export class MultiFileReceiver {
       // Check if all chunks were successfully written
       const allChunksWritten = queueProgress.written >= state.totalChunks && queueProgress.pending === 0;
       
-      if (allChunksWritten && queueProgress.bytesWritten === state.size) {
+      if (allChunksWritten) {
         // All chunks written successfully
         await this._completeFile(fileIndex);
+      } else {
+        // Not all chunks written — retry flush once more with extended timeout
+        logger.warn(`[MultiFileReceiver] File ${fileIndex}: retrying flush (${queueProgress.pending} pending)`);
+        await state.writeQueue.flush(15000);
+        const retryProgress = state.writeQueue.getProgress();
+        if (retryProgress.pending === 0) {
+          await this._completeFile(fileIndex);
+        } else {
+          logger.error(`[MultiFileReceiver] File ${fileIndex}: could not flush all chunks, ${retryProgress.pending} lost`);
+          // Complete anyway to avoid zombie files — some data is better than hanging
+          await this._completeFile(fileIndex);
+        }
       }
     }
   }
@@ -508,6 +606,30 @@ export class MultiFileReceiver {
     // Close writable stream if using File System API
     if (state.writable) {
       try {
+        // If some chunks ended up in blobParts before WriteQueue was ready,
+        // write them to the writable stream BEFORE flushing the WriteQueue.
+        // This prevents data loss when WriteQueue initialization was slow.
+        if (state.blobParts.length > 0 && state.writeQueue) {
+          logger.warn(`[MultiFileReceiver] File ${fileIndex}: ${state.blobParts.length} chunks in blobParts + WriteQueue — writing blobParts first`);
+          // BlobParts contain early chunks (indices 0, 1, 2...) that arrived before WriteQueue.
+          // These need to be written at the beginning of the file.
+          // Since WriteQueue writes sequentially from nextExpected, and blobParts chunks
+          // would have been the earliest chunks, the WriteQueue should start after them.
+          // However, we can't insert data before what WriteQueue already wrote.
+          // Best approach: if WriteQueue hasn't written anything yet, write blobParts first.
+          const qp = state.writeQueue.getProgress();
+          if (qp.written === 0) {
+            // WriteQueue hasn't written anything — safe to write blobParts first
+            for (const part of state.blobParts) {
+              await state.writable.write(part);
+            }
+            logger.log(`[MultiFileReceiver] File ${fileIndex}: wrote ${state.blobParts.length} early blobParts before WriteQueue data`);
+          } else {
+            logger.warn(`[MultiFileReceiver] File ${fileIndex}: WriteQueue already started (${qp.written} chunks written), blobParts data may cause corruption — skipping blobParts`);
+          }
+          state.blobParts = [];
+        }
+        
         // Flush any pending writes in WriteQueue before closing
         if (state.writeQueue) {
           await state.writeQueue.flush();
@@ -552,6 +674,7 @@ export class MultiFileReceiver {
 
     // Check if all files done
     if (this._allFilesComplete()) {
+      this._stopProgressSync(); // Stop periodic sync when all complete
       logger.log('[MultiFileReceiver] All files received!');
       if (this._onAllComplete) this._onAllComplete();
     }
@@ -618,18 +741,24 @@ export class MultiFileReceiver {
     if (!this._onProgress || !this._manifest) return;
 
     const elapsed = (Date.now() - this._startTime) / 1000;
-    const speed = elapsed > 0 ? this._totalBytesReceived / elapsed : 0;
-    const remaining = this._manifest.totalSize - this._totalBytesReceived;
+    // Use bytes actually written for speed calculation (more accurate than buffered bytes)
+    const speed = elapsed > 0 ? this._totalBytesWritten / elapsed : 0;
+    const remaining = this._manifest.totalSize - this._totalBytesWritten;
     const eta = speed > 0 ? remaining / speed : null;
 
     const perFile = [];
     for (const [idx, state] of this._files) {
+      // Calculate progress based on WRITTEN bytes, not just received
+      // This ensures UI shows actual disk write progress, not just buffer arrivals
+      const writtenProgress = state.size > 0 ? Math.round((state.bytesWritten / state.size) * 100) : 0;
+      
       perFile.push({
         index: idx,
         name: state.name,
         size: state.size,
-        progress: state.size > 0 ? Math.round((state.bytesReceived / state.size) * 100) : 0,
+        progress: writtenProgress, // 🔧 Changed from bytesReceived to bytesWritten
         bytesReceived: state.bytesReceived,
+        bytesWritten: state.bytesWritten, // Include both for diagnostics
         completed: state.completed,
         relativePath: state.relativePath,
       });
@@ -637,11 +766,12 @@ export class MultiFileReceiver {
 
     this._onProgress({
       overallProgress: this._manifest.totalSize > 0
-        ? Math.round((this._totalBytesReceived / this._manifest.totalSize) * 100)
+        ? Math.round((this._totalBytesWritten / this._manifest.totalSize) * 100) // 🔧 Changed to bytesWritten
         : 0,
       totalBytes: this._manifest.totalSize,
       receivedBytes: this._totalBytesReceived,
-      speed,
+      writtenBytes: this._totalBytesWritten, // Include for diagnostics
+      speed, // Now based on actual disk writes
       eta,
       perFile,
     });
@@ -675,6 +805,9 @@ export class MultiFileReceiver {
   // ─── Cleanup ──────────────────────────────────────────────────────
 
   async destroy() {
+    // Stop progress sync
+    this._stopProgressSync();
+    
     // Close any open writable streams
     for (const [, state] of this._files) {
       if (state.writable) {
@@ -686,6 +819,8 @@ export class MultiFileReceiver {
     if (this._pendingMetaQueues) this._pendingMetaQueues.clear();
     if (this._metaOrder) this._metaOrder.length = 0;
     this._manifest = null;
+    this._totalBytesReceived = 0;
+    this._totalBytesWritten = 0;
     this._dirHandle = null;
   }
 
@@ -702,14 +837,20 @@ export class MultiFileReceiver {
     this._manifest = manifest;
     this._startTime = Date.now();
     this._totalBytesReceived = 0;
+    this._totalBytesWritten = 0;
+
+    // Use sender's chunk size if provided
+    if (manifest.chunkSize) {
+      this._senderChunkSize = manifest.chunkSize;
+    }
 
     const perFileStartChunks = manifest.perFileStartChunks || {};
 
-    logger.log('[MultiFileReceiver] Received resume manifest:', manifest.totalFiles, 'files');
+    logger.log('[MultiFileReceiver] Received resume manifest:', manifest.totalFiles, 'files, chunkSize:', this._senderChunkSize);
 
     for (const f of manifest.files) {
       const startChunk = perFileStartChunks[f.index] || 0;
-      const alreadyReceivedBytes = startChunk * STORAGE_CHUNK_SIZE;
+      const alreadyReceivedBytes = startChunk * this._senderChunkSize;
 
       // Pre-populate receivedChunks set for chunks already received
       const receivedChunks = new Set();
@@ -730,6 +871,7 @@ export class MultiFileReceiver {
         totalChunks: f.totalChunks,
         receivedChunks,
         bytesReceived: alreadyReceivedBytes,
+        bytesWritten: 0, // Will be synced when WriteQueue initializes
         completed: startChunk >= f.totalChunks, // Already fully received
         fileCompleteSent: false,  // Set to true when FILE_COMPLETE message received
         writable: null,
@@ -743,6 +885,9 @@ export class MultiFileReceiver {
     }
 
     if (this._onManifest) this._onManifest(manifest);
+    
+    // Start periodic progress sync
+    this._startProgressSync();
   }
 
   /**

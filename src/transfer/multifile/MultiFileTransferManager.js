@@ -15,6 +15,7 @@ import { formatBytes } from '../../lib/formatters.js';
 import {
   TRANSFER_MODE,
   STORAGE_CHUNK_SIZE,
+  NETWORK_CHUNK_SIZE,
   CHANNEL_SCALE_INTERVAL,
   MAX_CHANNELS,
   MIN_CHANNELS,
@@ -54,6 +55,9 @@ export class MultiFileTransferManager {
     this._maxParallelWorkers = this._profile.minParallelWorkers;
     this._channelScaleInterval = this._profile.channelScaleInterval;
 
+    /** Effective chunk size: 16KB on mobile, 64KB on desktop */
+    this._chunkSize = this._profile.constrained ? NETWORK_CHUNK_SIZE : STORAGE_CHUNK_SIZE;
+
     /** @type {FileQueue|null} */
     this._queue = null;
 
@@ -68,6 +72,9 @@ export class MultiFileTransferManager {
     this._isChannelDead = false;
     this._startTime = 0;
     this._totalBytesSent = 0;
+
+    /** Per-channel send locks — prevents metadata/binary interleaving in parallel mode */
+    this._channelLocks = new Map(); // channelIndex → Promise
 
     /** Resume support: per-file bitmaps of chunks the receiver has */
     this._fileBitmaps = new Map(); // fileIndex → base64 bitmap
@@ -118,10 +125,11 @@ export class MultiFileTransferManager {
     });
 
     // Send manifest
-    const manifest = this._queue.getManifest();
+    const manifest = this._queue.getManifest(this._chunkSize);
     this._sendJSON({
       type: MESSAGE_TYPE.MULTI_FILE_MANIFEST,
       ...manifest,
+      chunkSize: this._chunkSize,
       mode: this._mode,
     });
     this._addLog(`Sending ${manifest.totalFiles} file(s), ${this._formatBytes(manifest.totalSize)} total`, 'info');
@@ -151,8 +159,8 @@ export class MultiFileTransferManager {
         const succeeded = progress.perFile.filter(f => f.state === 'completed').length;
         const failed = progress.perFile.filter(f => f.state === 'failed').length;
 
-        // Only send transfer-complete if channels are still alive
-        if (!this._isChannelDead && this._pool.openCount > 0) {
+        // Only send transfer-complete if at least one file succeeded and channels alive
+        if (succeeded > 0 && !this._isChannelDead && this._pool.openCount > 0) {
           this._sendJSON({ type: MESSAGE_TYPE.TRANSFER_COMPLETE });
         }
 
@@ -168,6 +176,9 @@ export class MultiFileTransferManager {
 
         if (this._isChannelDead) {
           if (this._onError) this._onError(new Error('Peer disconnected during transfer'));
+        } else if (failed > 0 && succeeded === 0) {
+          // All files failed — surface as error, not completion
+          if (this._onError) this._onError(new Error(`All ${failed} file(s) failed to send`));
         } else {
           if (this._onAllComplete) this._onAllComplete();
         }
@@ -245,7 +256,8 @@ export class MultiFileTransferManager {
       size: item.file.size,
       mimeType: item.file.type || 'application/octet-stream',
       relativePath: item.relativePath,
-      totalChunks: Math.ceil(item.file.size / STORAGE_CHUNK_SIZE),
+      totalChunks: Math.ceil(item.file.size / this._chunkSize),
+      chunkSize: this._chunkSize,
     });
 
     const engine = new ChunkingEngine();
@@ -256,14 +268,14 @@ export class MultiFileTransferManager {
     let resumeFromChunk = 0;
     const fileBitmap = this._fileBitmaps.get(fileIndex);
     if (fileBitmap) {
-      const totalChunks = Math.ceil(item.file.size / STORAGE_CHUNK_SIZE);
+      const totalChunks = Math.ceil(item.file.size / this._chunkSize);
       const decodedBitmap = deserializeBitmap(fileBitmap);
       resumeFromChunk = getFirstMissingChunk(decodedBitmap, totalChunks);
       
       if (resumeFromChunk === -1) {
         // All chunks already received — skip this file
         this._addLog(`✓ ${item.file.name}: already complete on receiver`, 'info');
-        this._queue.markComplete(fileIndex);
+        this._queue.markCompleted(fileIndex);
         if (this._onFileComplete) this._onFileComplete(fileIndex);
         return;
       }
@@ -285,30 +297,62 @@ export class MultiFileTransferManager {
           }
           await this._waitIfPaused();
 
-          // Pick best channel
-          const chIdx = this._pool.getAvailableChannel() ?? 0;
-          await this._pool.waitForDrain(chIdx);
+          // Pick best data channel (never use channel-0 for chunks)
+          let chIdx = this._pool.getAvailableChannel();
+          
+          // Wait for data channels to open if needed
+          let retries = 0;
+          while (chIdx === null && retries < 50) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+            chIdx = this._pool.getAvailableChannel();
+            retries++;
+          }
+          
+          if (chIdx === null) {
+            throw new Error('No data channels available — transfer failed');
+          }
 
-          // Send chunk metadata with fileIndex
-          this._pool.send(chIdx, JSON.stringify({
-            type: MESSAGE_TYPE.CHUNK_METADATA,
-            fileIndex,
-            channelIndex: chIdx,
-            ...metadata,
-          }));
+          // Acquire per-channel lock to prevent metadata/binary interleaving
+          // in parallel mode (two workers could pick the same channel)
+          while (this._channelLocks.has(chIdx)) {
+            await this._channelLocks.get(chIdx);
+          }
 
-          await this._pool.waitForDrain(chIdx);
+          // Set lock before sending metadata+binary pair
+          let releaseLock;
+          const lockPromise = new Promise(resolve => { releaseLock = resolve; });
+          this._channelLocks.set(chIdx, lockPromise);
 
-          // Send binary
-          const buffer = binaryData.buffer.slice(
-            binaryData.byteOffset,
-            binaryData.byteOffset + binaryData.byteLength
-          );
-          this._pool.send(chIdx, buffer);
+          let bytesSent = 0;
+          try {
+            await this._pool.waitForDrain(chIdx);
+
+            // Send chunk metadata with fileIndex
+            this._pool.send(chIdx, JSON.stringify({
+              type: MESSAGE_TYPE.CHUNK_METADATA,
+              fileIndex,
+              channelIndex: chIdx,
+              ...metadata,
+            }));
+
+            await this._pool.waitForDrain(chIdx);
+
+            // Send binary
+            const buffer = binaryData.buffer.slice(
+              binaryData.byteOffset,
+              binaryData.byteOffset + binaryData.byteLength
+            );
+            this._pool.send(chIdx, buffer);
+            bytesSent = buffer.byteLength;
+          } finally {
+            // Release the channel lock
+            this._channelLocks.delete(chIdx);
+            releaseLock();
+          }
 
           // Track bandwidth and progress
-          this._bandwidthMonitor.recordBytes(buffer.byteLength);
-          this._totalBytesSent += buffer.byteLength;
+          this._bandwidthMonitor.recordBytes(bytesSent);
+          this._totalBytesSent += bytesSent;
 
           // Track chunk completion in per-file bitmap
           if (this._trackChunkProgress) {
@@ -399,7 +443,7 @@ export class MultiFileTransferManager {
   // ─── Auto-scaling ─────────────────────────────────────────────────
 
   _startAutoScaling() {
-    this._scaleTimerId = setInterval(() => {
+    this._scaleTimerId = setInterval(async () => {
       if (this._isPaused || this._isCancelled) return;
 
       const currentDataCount = Math.max(this._pool.openDataCount, 1);
@@ -412,13 +456,21 @@ export class MultiFileTransferManager {
         this._addLog(`↑ Scaled to ${currentDataCount + 1} channels`, 'info');
         logger.log(`[MultiFileTransferManager] Scaled UP to ${currentDataCount + 1} channels`);
       } else if (recommended < currentDataCount && currentDataCount > MIN_CHANNELS) {
-        // Scale down — remove the highest-indexed data channel
+        // Scale down — remove the highest-indexed data channel ONLY if idle
         const indices = this._pool.indices.filter((i) => i >= 1);
         if (indices.length > 0) {
           const remove = indices[indices.length - 1];
-          this._pool.removeChannel(remove);
-          this._addLog(`↓ Scaled to ${currentDataCount - 1} channels`, 'info');
-          logger.log(`[MultiFileTransferManager] Scaled DOWN to ${currentDataCount - 1} channels`);
+          const ch = this._pool.getChannel(remove);
+          // Only remove if channel has no buffered data and no active lock
+          if (ch && ch.bufferedAmount === 0 && !this._channelLocks.has(remove)) {
+            // Wait for any in-flight drain before removing
+            await this._pool.waitForDrain(remove);
+            this._pool.removeChannel(remove);
+            this._addLog(`↓ Scaled to ${currentDataCount - 1} channels`, 'info');
+            logger.log(`[MultiFileTransferManager] Scaled DOWN to ${currentDataCount - 1} channels`);
+          } else {
+            logger.log(`[MultiFileTransferManager] Skipping scale-down: channel ${remove} still in use`);
+          }
         }
       }
     }, this._channelScaleInterval || CHANNEL_SCALE_INTERVAL);
@@ -472,6 +524,14 @@ export class MultiFileTransferManager {
     if (this._receiverReady) return Promise.resolve();
     return new Promise((resolve) => {
       this._receiverReadyResolve = resolve;
+      // Timeout after 60 seconds to prevent hanging forever
+      setTimeout(() => {
+        if (!this._receiverReady) {
+          logger.warn('[MultiFileTransferManager] Receiver-ready timeout after 60s');
+          this._addLog('Receiver did not respond in time', 'warning');
+          resolve();
+        }
+      }, 60_000);
     });
   }
 
@@ -626,10 +686,11 @@ export class MultiFileTransferManager {
     });
 
     // Send manifest with resume flag
-    const manifest = this._queue.getManifest();
+    const manifest = this._queue.getManifest(this._chunkSize);
     this._sendJSON({
       type: MESSAGE_TYPE.MULTI_FILE_MANIFEST,
       ...manifest,
+      chunkSize: this._chunkSize,
       mode: this._mode,
       isResume: true,
       perFileStartChunks: Object.fromEntries(startFromChunks),
