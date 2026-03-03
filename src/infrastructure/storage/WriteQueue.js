@@ -72,7 +72,9 @@ export class WriteQueue {
         }
 
         // Simple sequential append - no position tracking needed
-        await this.writable.write(new Uint8Array(data));
+        // Data is already a Uint8Array from the DataChannel message handler,
+        // so we can write it directly without copying.
+        await this.writable.write(data);
         this.bytesWritten += data.byteLength;
         this.nextExpected++;
       }

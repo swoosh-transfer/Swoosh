@@ -183,8 +183,13 @@ export function useMessages(
       const meta = queue?.length > 0 ? queue.shift() : null;
       
       if (meta) {
-        // Metadata found — pass it directly to avoid cross-channel mismatch
-        await handleMultiBinaryChunk(data, meta.fileIndex, meta);
+        // Fire-and-forget: DON'T await the disk write.
+        // WriteQueue handles ordering and sequential writes internally.
+        // Awaiting here serialized ALL chunk processing across ALL channels,
+        // which was the #1 receiver-side throughput bottleneck.
+        handleMultiBinaryChunk(data, meta.fileIndex, meta).catch(err => {
+          logger.error(`[Room] Chunk write error file=${meta.fileIndex} chunk=${meta.chunkIndex}:`, err);
+        });
       } else {
         // No metadata yet — this should rarely happen due to message serialization,
         // but queue the binary just in case of out-of-order network delivery

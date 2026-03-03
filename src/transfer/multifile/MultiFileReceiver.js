@@ -740,7 +740,12 @@ export class MultiFileReceiver {
   _emitProgress() {
     if (!this._onProgress || !this._manifest) return;
 
-    const elapsed = (Date.now() - this._startTime) / 1000;
+    // Throttle to max 5 updates/second to avoid flooding the UI with re-renders
+    const now = Date.now();
+    if (now - (this._lastProgressEmit || 0) < 200) return;
+    this._lastProgressEmit = now;
+
+    const elapsed = (now - this._startTime) / 1000;
     // Use bytes actually written for speed calculation (more accurate than buffered bytes)
     const speed = elapsed > 0 ? this._totalBytesWritten / elapsed : 0;
     const remaining = this._manifest.totalSize - this._totalBytesWritten;

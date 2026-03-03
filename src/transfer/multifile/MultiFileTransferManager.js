@@ -71,8 +71,7 @@ export class MultiFileTransferManager {
     this._isCancelled = false;
     this._isChannelDead = false;
     this._startTime = 0;
-    this._totalBytesSent = 0;
-
+    this._totalBytesSent = 0;    this._lastProgressEmit = 0; // Throttle progress emission
     /** Per-channel send locks — prevents metadata/binary interleaving in parallel mode */
     this._channelLocks = new Map(); // channelIndex → Promise
 
@@ -325,6 +324,8 @@ export class MultiFileTransferManager {
 
           let bytesSent = 0;
           try {
+            // Only wait for drain once — before the binary payload.
+            // Metadata JSON is tiny (~200 bytes), no need to wait before it.
             await this._pool.waitForDrain(chIdx);
 
             // Send chunk metadata with fileIndex
@@ -335,15 +336,9 @@ export class MultiFileTransferManager {
               ...metadata,
             }));
 
-            await this._pool.waitForDrain(chIdx);
-
-            // Send binary
-            const buffer = binaryData.buffer.slice(
-              binaryData.byteOffset,
-              binaryData.byteOffset + binaryData.byteLength
-            );
-            this._pool.send(chIdx, buffer);
-            bytesSent = buffer.byteLength;
+            // Send binary — use the Uint8Array directly (avoid copying via .buffer.slice)
+            this._pool.send(chIdx, binaryData);
+            bytesSent = binaryData.byteLength;
           } finally {
             // Release the channel lock
             this._channelLocks.delete(chIdx);
@@ -484,7 +479,9 @@ export class MultiFileTransferManager {
   }
 
   _warmupDataChannels() {
-    const targetDataChannels = this._profile.constrained ? 1 : 2;
+    // Start with enough channels to saturate the link immediately
+    // instead of waiting for auto-scaling (which takes 9+ seconds)
+    const targetDataChannels = this._profile.constrained ? 2 : 3;
 
     for (let i = 1; i <= targetDataChannels; i++) {
       if (!this._pool.getChannel(i)) {
@@ -498,7 +495,12 @@ export class MultiFileTransferManager {
   _emitProgress() {
     if (!this._onProgress || !this._queue) return;
 
-    const elapsed = (Date.now() - this._startTime) / 1000;
+    // Throttle to max 5 updates/second (200ms) — React re-renders per chunk kills mobile perf
+    const now = Date.now();
+    if (now - this._lastProgressEmit < 200) return;
+    this._lastProgressEmit = now;
+
+    const elapsed = (now - this._startTime) / 1000;
     const speed = elapsed > 0 ? this._totalBytesSent / elapsed : 0;
     const queueProgress = this._queue.getProgress();
     const remaining = queueProgress.totalBytes - queueProgress.sentBytes;

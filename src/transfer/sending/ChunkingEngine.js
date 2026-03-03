@@ -270,7 +270,9 @@ export class ChunkingEngine {
       chunksProcessed: storageChunkIndex,
       bytesProcessedWindow: 0,
       bytesPerSecond: 0,
-      adaptiveChunkSize: chunkSize
+      adaptiveChunkSize: chunkSize,
+      lastProgressSave: Date.now(),
+      lastProgressChunk: storageChunkIndex
     });
 
     try {
@@ -302,14 +304,22 @@ export class ChunkingEngine {
           onProgress(bytesRead, totalSize);
         }
 
-        // Update resumable transfer progress
+        // Throttled progress save: only write to IndexedDB every 50 chunks or 2 seconds
+        // (was per-chunk, causing massive IndexedDB overhead that killed throughput)
         const chunkingState = this.activeChunkings.get(transferId);
-        await resumableTransferManager.updateProgress(transferId, {
-          chunkIndex: chunkingState.storageChunkIndex,
-          bytesProcessed: bytesRead
-        });
-        // Note: Bandwidth adaptation is handled by channel auto-scaling
-        // (BandwidthMonitor + ChannelPool). Chunk size is fixed per transfer.
+        const metrics = this.performanceMetrics.get(transferId);
+        const chunksSinceLastSave = chunkingState.storageChunkIndex - (metrics?.lastProgressChunk ?? 0);
+        const timeSinceLastSave = Date.now() - (metrics?.lastProgressSave ?? 0);
+        if (chunksSinceLastSave >= 50 || timeSinceLastSave >= 2000) {
+          await resumableTransferManager.updateProgress(transferId, {
+            chunkIndex: chunkingState.storageChunkIndex,
+            bytesProcessed: bytesRead
+          });
+          if (metrics) {
+            metrics.lastProgressSave = Date.now();
+            metrics.lastProgressChunk = chunkingState.storageChunkIndex;
+          }
+        }
       }
 
       // Mark chunking as complete

@@ -802,18 +802,28 @@ export default function Room() {
               {/* Inline connection details */}
               {connInfo && (
                 <div className="space-y-1.5 text-xs">
-                  {connInfo.candidateType && (
-                    <div className="flex justify-between">
-                      <span className="text-zinc-500">Type</span>
-                      <span className={connInfo.candidateType === 'host' ? 'text-emerald-400' : 'text-yellow-400'}>
-                        {connInfo.candidateType === 'host' ? 'Direct (LAN)' :
-                         connInfo.candidateType === 'srflx' ? 'STUN (NAT)' :
-                         connInfo.candidateType === 'relay' ? 'TURN (Relay)' :
-                         connInfo.candidateType === 'prflx' ? 'Peer Reflexive' :
-                         connInfo.candidateType}
-                      </span>
-                    </div>
-                  )}
+                  {connInfo.candidateType && (() => {
+                    // Derive effective connection type from BOTH local & remote candidates.
+                    // If either side uses relay/srflx/prflx, the connection crosses NAT/relay —
+                    // only show "Direct (LAN)" when BOTH candidates are host type.
+                    const local = connInfo.candidateType;
+                    const remote = connInfo.remoteCandidateType || local;
+                    const either = (t) => local === t || remote === t;
+                    const effectiveType = either('relay') ? 'relay'
+                      : (either('srflx') || either('prflx')) ? 'srflx'
+                      : 'host';
+                    const label = effectiveType === 'host' ? 'Direct (LAN)'
+                      : effectiveType === 'srflx' ? 'STUN (NAT)'
+                      : effectiveType === 'relay' ? 'TURN (Relay)'
+                      : effectiveType;
+                    const color = effectiveType === 'host' ? 'text-emerald-400' : 'text-yellow-400';
+                    return (
+                      <div className="flex justify-between">
+                        <span className="text-zinc-500">Type</span>
+                        <span className={color}>{label}</span>
+                      </div>
+                    );
+                  })()}
                   {connInfo.protocol && (
                     <div className="flex justify-between">
                       <span className="text-zinc-500">Protocol</span>
