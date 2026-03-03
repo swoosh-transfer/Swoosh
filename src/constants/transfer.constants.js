@@ -3,7 +3,66 @@
  * 
  * These constants define chunk sizes and buffer configurations for file transfers.
  * Different chunk sizes are used for different purposes to optimize performance.
+ * 
+ * Users can override any constant via the Settings panel on the Home page.
+ * Overrides are stored in localStorage under 'swoosh-transfer-settings'.
  */
+
+// ── User-overridable settings via localStorage ──────────────────────
+
+/**
+ * Load user-configured setting overrides from localStorage.
+ * Returns an object of { key: value } overrides, or empty object.
+ */
+function _loadUserOverrides() {
+  try {
+    if (typeof localStorage === 'undefined') return {};
+    const raw = localStorage.getItem('swoosh-transfer-settings');
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+}
+
+/**
+ * Save user settings to localStorage.
+ * @param {Object} settings — partial key/value overrides
+ */
+export function saveUserSettings(settings) {
+  try {
+    const current = _loadUserOverrides();
+    localStorage.setItem('swoosh-transfer-settings', JSON.stringify({ ...current, ...settings }));
+  } catch { /* ignore */ }
+}
+
+/**
+ * Load all user settings (with defaults filled in).
+ */
+export function loadUserSettings() {
+  const overrides = _loadUserOverrides();
+  return {
+    chunkSizeKB:                  overrides.chunkSizeKB ?? 64,
+    mobileChunkSizeKB:            overrides.mobileChunkSizeKB ?? 16,
+    maxChannels:                  overrides.maxChannels ?? 8,
+    mobileMaxChannels:            overrides.mobileMaxChannels ?? 4,
+    bufferWatermarkKB:            overrides.bufferWatermarkKB ?? 256,
+    mobileBufferWatermarkKB:      overrides.mobileBufferWatermarkKB ?? 128,
+    scaleUpThresholdKBs:          overrides.scaleUpThresholdKBs ?? 500,
+    scaleIntervalMs:              overrides.scaleIntervalMs ?? 2000,
+    mobileScaleIntervalMs:        overrides.mobileScaleIntervalMs ?? 3000,
+    forceDesktopProfile:          overrides.forceDesktopProfile ?? false,
+  };
+}
+
+/**
+ * Clear all user overrides, reverting to defaults.
+ */
+export function resetUserSettings() {
+  try {
+    localStorage.removeItem('swoosh-transfer-settings');
+  } catch { /* ignore */ }
+}
+
+// Load overrides once at module init
+const _user = loadUserSettings();
 
 /**
  * NETWORK_CHUNK_SIZE: 16KB
@@ -12,7 +71,7 @@
  * Limited by browser DataChannel message size constraints.
  * Smaller chunks enable better real-time progress updates and adaptive bandwidth management.
  */
-export const NETWORK_CHUNK_SIZE = 16 * 1024;
+export const NETWORK_CHUNK_SIZE = _user.mobileChunkSizeKB * 1024;
 
 /**
  * STORAGE_CHUNK_SIZE: 64KB
@@ -21,7 +80,7 @@ export const NETWORK_CHUNK_SIZE = 16 * 1024;
  * Larger chunks reduce storage overhead and improve disk I/O performance.
  * Optimal size for browser IndexedDB and File System Access API.
  */
-export const STORAGE_CHUNK_SIZE = 64 * 1024;
+export const STORAGE_CHUNK_SIZE = _user.chunkSizeKB * 1024;
 
 /**
  * Adaptive Chunk Size Limits
@@ -65,7 +124,7 @@ export const BUFFER_SIZE = 100; // ~6.4MB with 64KB chunks
  * Starts with 1 channel, scales up to MAX_CHANNELS when throughput is high.
  */
 export const MIN_CHANNELS = 1;
-export const MAX_CHANNELS = 8;
+export const MAX_CHANNELS = _user.maxChannels;
 export const INITIAL_CHANNELS = 1;
 
 /**
@@ -75,9 +134,9 @@ export const INITIAL_CHANNELS = 1;
  * CHANNEL_SCALE_INTERVAL: how often (ms) to evaluate scaling decisions
  * CHANNEL_SCALE_SUSTAIN_COUNT: how many consecutive intervals the threshold must be sustained
  */
-export const CHANNEL_SCALE_UP_THRESHOLD = 500 * 1024;            // 500 KB/s
+export const CHANNEL_SCALE_UP_THRESHOLD = _user.scaleUpThresholdKBs * 1024;            // user-configurable
 export const CHANNEL_SCALE_DOWN_THRESHOLD = 100 * 1024;          // 100 KB/s
-export const CHANNEL_SCALE_INTERVAL = 2000;                      // 2 seconds
+export const CHANNEL_SCALE_INTERVAL = _user.scaleIntervalMs;                      // user-configurable
 export const CHANNEL_SCALE_SUSTAIN_COUNT = 2;                    // consecutive intervals
 
 /** Prefix for data channel labels: file-transfer-0, file-transfer-1, etc. */
@@ -93,11 +152,11 @@ export const CHANNEL_BUFFER_HIGH_WATERMARK = 256 * 1024; // 256KB
  * Mobile/constrained-network reliability profile.
  * Keeps throughput balanced while reducing stalls on weaker devices/networks.
  */
-export const MOBILE_MAX_CHANNELS = 3;
+export const MOBILE_MAX_CHANNELS = _user.mobileMaxChannels;
 export const MOBILE_MIN_PARALLEL_WORKERS = 2;
-export const MOBILE_CHANNEL_SCALE_INTERVAL = 5000;
-export const MOBILE_CHANNEL_BUFFER_LOW_WATERMARK = 48 * 1024;
-export const DESKTOP_CHANNEL_BUFFER_LOW_WATERMARK = 256 * 1024;
+export const MOBILE_CHANNEL_SCALE_INTERVAL = _user.mobileScaleIntervalMs;
+export const MOBILE_CHANNEL_BUFFER_LOW_WATERMARK = _user.mobileBufferWatermarkKB * 1024;
+export const DESKTOP_CHANNEL_BUFFER_LOW_WATERMARK = _user.bufferWatermarkKB * 1024;
 
 /**
  * Detect likely mobile/constrained environment.
@@ -110,8 +169,7 @@ export function isConstrainedMobileEnvironment() {
     return false;
   }
 
-  // Check for localStorage override (for testing desktop on mobile emulation)
-  if (typeof localStorage !== 'undefined' && localStorage.getItem('forceDesktopProfile') === 'true') {
+  if (typeof localStorage !== 'undefined' && (_user.forceDesktopProfile || localStorage.getItem('forceDesktopProfile') === 'true')) {
     return false;
   }
 

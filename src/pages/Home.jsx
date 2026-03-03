@@ -18,6 +18,12 @@ import {
   deserializeBitmap,
   getCompletedCount,
 } from '../infrastructure/database/chunkBitmap.js';
+import {
+  loadUserSettings,
+  saveUserSettings,
+  resetUserSettings,
+  isConstrainedMobileEnvironment,
+} from '../constants/transfer.constants.js';
 
 export default function Home() {
   const navigate = useNavigate();
@@ -27,6 +33,24 @@ export default function Home() {
   const [incompleteTransfers, setIncompleteTransfers] = useState([]);
   
   const { selectedFiles, addFiles, removeFile, clearFiles, setSelectedFiles, setIsHost, setSecurityPayload, setRoomId, setResumeContext } = useRoomStore();
+
+  // ── Settings panel state ──────────────────────────────────────────
+  const [showSettings, setShowSettings] = useState(false);
+  const [settings, setSettings] = useState(loadUserSettings);
+  const isMobile = isConstrainedMobileEnvironment();
+
+  const updateSetting = (key, value) => {
+    setSettings(prev => {
+      const next = { ...prev, [key]: value };
+      saveUserSettings({ [key]: value });
+      return next;
+    });
+  };
+
+  const handleResetSettings = () => {
+    resetUserSettings();
+    setSettings(loadUserSettings());
+  };
 
   useEffect(() => {
     // Fetch analytics data
@@ -357,8 +381,19 @@ export default function Home() {
               Peer-to-peer file transfer
             </p>
           </div>
-          <a
-            href="https://github.com/swoosh-transfer/Swoosh"
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setShowSettings(true)}
+              className="p-2 text-zinc-500 hover:text-zinc-300 transition-colors"
+              title="Transfer Settings"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+            </button>
+            <a
+              href="https://github.com/swoosh-transfer/Swoosh"
             target="_blank"
             rel="noopener noreferrer"
             className="p-2 text-zinc-500 hover:text-zinc-300 transition-colors"
@@ -368,6 +403,7 @@ export default function Home() {
               <path fillRule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" clipRule="evenodd" />
             </svg>
           </a>
+          </div>
         </div>
 
         {/* Main Transfer Card */}
@@ -538,6 +574,147 @@ export default function Home() {
           No personal data or file contents are ever stored. Anonymous usage stats only.
         </p>
       </div>
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="bg-zinc-900 border border-zinc-700 rounded-2xl w-full max-w-md max-h-[85vh] overflow-y-auto shadow-2xl">
+            {/* Header */}
+            <div className="flex items-center justify-between p-4 border-b border-zinc-800 sticky top-0 bg-zinc-900 rounded-t-2xl z-10">
+              <div>
+                <h2 className="text-sm font-semibold text-zinc-100">Transfer Settings</h2>
+                <p className="text-[10px] text-zinc-500 mt-0.5">
+                  Device: {isMobile ? 'Mobile' : 'Desktop'} &middot; Changes apply on next transfer
+                </p>
+              </div>
+              <button
+                onClick={() => setShowSettings(false)}
+                className="p-1.5 text-zinc-400 hover:text-zinc-200 transition-colors"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="p-4 space-y-4">
+              {/* Desktop Settings */}
+              <div className="space-y-3">
+                <h3 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Desktop Profile</h3>
+                <SettingSlider
+                  label="Chunk Size"
+                  unit="KB"
+                  value={settings.chunkSizeKB}
+                  min={16} max={256} step={16}
+                  onChange={v => updateSetting('chunkSizeKB', v)}
+                  description="Size of each data chunk sent over the network"
+                />
+                <SettingSlider
+                  label="Max Channels"
+                  unit=""
+                  value={settings.maxChannels}
+                  min={1} max={16} step={1}
+                  onChange={v => updateSetting('maxChannels', v)}
+                  description="Maximum parallel data channels"
+                />
+                <SettingSlider
+                  label="Buffer Watermark"
+                  unit="KB"
+                  value={settings.bufferWatermarkKB}
+                  min={64} max={1024} step={64}
+                  onChange={v => updateSetting('bufferWatermarkKB', v)}
+                  description="Buffer threshold before pausing sends"
+                />
+                <SettingSlider
+                  label="Scale Interval"
+                  unit="ms"
+                  value={settings.scaleIntervalMs}
+                  min={500} max={10000} step={500}
+                  onChange={v => updateSetting('scaleIntervalMs', v)}
+                  description="How often to evaluate adding channels"
+                />
+                <SettingSlider
+                  label="Scale-Up Threshold"
+                  unit="KB/s"
+                  value={settings.scaleUpThresholdKBs}
+                  min={100} max={5000} step={100}
+                  onChange={v => updateSetting('scaleUpThresholdKBs', v)}
+                  description="Minimum throughput to trigger new channel"
+                />
+              </div>
+
+              {/* Mobile Settings */}
+              <div className="space-y-3 pt-2 border-t border-zinc-800">
+                <h3 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider">Mobile Profile</h3>
+                <SettingSlider
+                  label="Chunk Size"
+                  unit="KB"
+                  value={settings.mobileChunkSizeKB}
+                  min={8} max={128} step={8}
+                  onChange={v => updateSetting('mobileChunkSizeKB', v)}
+                  description="Smaller chunks reduce memory pressure on mobile"
+                />
+                <SettingSlider
+                  label="Max Channels"
+                  unit=""
+                  value={settings.mobileMaxChannels}
+                  min={1} max={8} step={1}
+                  onChange={v => updateSetting('mobileMaxChannels', v)}
+                  description="More channels = faster, but uses more memory"
+                />
+                <SettingSlider
+                  label="Buffer Watermark"
+                  unit="KB"
+                  value={settings.mobileBufferWatermarkKB}
+                  min={32} max={512} step={32}
+                  onChange={v => updateSetting('mobileBufferWatermarkKB', v)}
+                  description="Higher = faster but may overwhelm slow devices"
+                />
+                <SettingSlider
+                  label="Scale Interval"
+                  unit="ms"
+                  value={settings.mobileScaleIntervalMs}
+                  min={500} max={10000} step={500}
+                  onChange={v => updateSetting('mobileScaleIntervalMs', v)}
+                  description="How often to evaluate adding channels on mobile"
+                />
+              </div>
+
+              {/* Force Desktop Profile */}
+              <div className="pt-2 border-t border-zinc-800">
+                <label className="flex items-center justify-between cursor-pointer group">
+                  <div>
+                    <span className="text-xs text-zinc-300 group-hover:text-zinc-100 transition-colors">Force Desktop Profile on Mobile</span>
+                    <p className="text-[10px] text-zinc-600 mt-0.5">Use desktop settings even on mobile devices</p>
+                  </div>
+                  <div
+                    onClick={() => updateSetting('forceDesktopProfile', !settings.forceDesktopProfile)}
+                    className={`relative w-9 h-5 rounded-full transition-colors cursor-pointer ${settings.forceDesktopProfile ? 'bg-blue-600' : 'bg-zinc-700'}`}
+                  >
+                    <div className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform ${settings.forceDesktopProfile ? 'translate-x-4' : ''}`} />
+                  </div>
+                </label>
+              </div>
+
+              {/* Actions */}
+              <div className="flex gap-2 pt-2 border-t border-zinc-800">
+                <button
+                  onClick={handleResetSettings}
+                  className="flex-1 px-3 py-2 text-xs font-medium text-zinc-400 bg-zinc-800 hover:bg-zinc-700 rounded-lg transition-colors"
+                >
+                  Reset to Defaults
+                </button>
+                <button
+                  onClick={() => setShowSettings(false)}
+                  className="flex-1 px-3 py-2 text-xs font-medium text-zinc-100 bg-blue-600 hover:bg-blue-500 rounded-lg transition-colors"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -559,4 +736,30 @@ function formatFileSize(bytes) {
 function calculateTotal(dailyStats, field) {
   if (!dailyStats || !Array.isArray(dailyStats)) return 0;
   return dailyStats.reduce((sum, day) => sum + (day[field] || 0), 0);
+}
+
+function SettingSlider({ label, unit, value, min, max, step, onChange, description }) {
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <label className="text-xs text-zinc-300">{label}</label>
+        <span className="text-xs font-mono text-zinc-400">{value}{unit ? ` ${unit}` : ''}</span>
+      </div>
+      <input
+        type="range"
+        min={min} max={max} step={step}
+        value={value}
+        onChange={e => onChange(Number(e.target.value))}
+        className="w-full h-1.5 bg-zinc-700 rounded-full appearance-none cursor-pointer accent-blue-500
+          [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:h-3.5
+          [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-blue-500
+          [&::-webkit-slider-thumb]:hover:bg-blue-400 [&::-webkit-slider-thumb]:transition-colors"
+      />
+      <div className="flex justify-between text-[9px] text-zinc-600">
+        <span>{min}{unit ? ` ${unit}` : ''}</span>
+        <span>{description}</span>
+        <span>{max}{unit ? ` ${unit}` : ''}</span>
+      </div>
+    </div>
+  );
 }
