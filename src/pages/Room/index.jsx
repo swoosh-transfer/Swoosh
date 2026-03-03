@@ -804,14 +804,20 @@ export default function Room() {
                 <div className="space-y-1.5 text-xs">
                   {connInfo.candidateType && (() => {
                     // Derive effective connection type from BOTH local & remote candidates.
-                    // If either side uses relay/srflx/prflx, the connection crosses NAT/relay —
-                    // only show "Direct (LAN)" when BOTH candidates are host type.
+                    // If either side uses relay/srflx/prflx, the connection crosses NAT/relay.
+                    // Also use RTT as a sanity check: >10ms means definitely not LAN,
+                    // even if both candidates report "host" (NAT hairpinning can cause this).
                     const local = connInfo.candidateType;
                     const remote = connInfo.remoteCandidateType || local;
                     const either = (t) => local === t || remote === t;
-                    const effectiveType = either('relay') ? 'relay'
+                    let effectiveType = either('relay') ? 'relay'
                       : (either('srflx') || either('prflx')) ? 'srflx'
                       : 'host';
+                    // RTT-based override: if candidates say "host" but latency > 10ms,
+                    // it's crossing networks (STUN NAT traversal with host candidates)
+                    if (effectiveType === 'host' && connInfo.rtt > 10) {
+                      effectiveType = 'srflx';
+                    }
                     const label = effectiveType === 'host' ? 'Direct (LAN)'
                       : effectiveType === 'srflx' ? 'STUN (NAT)'
                       : effectiveType === 'relay' ? 'TURN (Relay)'

@@ -32,7 +32,7 @@ export const STORAGE_CHUNK_SIZE = 64 * 1024;
  * - Default: INITIAL_CHUNK_SIZE
  */
 export const INITIAL_CHUNK_SIZE = 16 * 1024; // 16KB - starting size
-export const MAX_CHUNK_SIZE = 32 * 1024;     // 32KB - ceiling for good connections
+export const MAX_CHUNK_SIZE = 64 * 1024;     // 64KB - ceiling for good connections
 export const MIN_CHUNK_SIZE = 8 * 1024;      // 8KB - floor for poor connections
 
 /**
@@ -45,7 +45,7 @@ export const MIN_CHUNK_SIZE = 8 * 1024;      // 8KB - floor for poor connections
  */
 export const SPEED_HIGH_THRESHOLD = 1.5 * 1024 * 1024;  // 1.5 MB/s
 export const SPEED_LOW_THRESHOLD = 512 * 1024;          // 512 KB/s
-export const SPEED_ADJUSTMENT_INCREMENT = 0.15;          // 15% adjustment per step
+export const SPEED_ADJUSTMENT_INCREMENT = 0.25;          // 25% adjustment per step
 
 /**
  * BUFFER_SIZE: Maximum buffered chunks in memory

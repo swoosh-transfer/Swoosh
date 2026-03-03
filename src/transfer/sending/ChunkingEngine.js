@@ -271,8 +271,6 @@ export class ChunkingEngine {
       bytesProcessedWindow: 0,
       bytesPerSecond: 0,
       adaptiveChunkSize: chunkSize,
-      lastProgressSave: Date.now(),
-      lastProgressChunk: storageChunkIndex
     });
 
     try {
@@ -304,22 +302,10 @@ export class ChunkingEngine {
           onProgress(bytesRead, totalSize);
         }
 
-        // Throttled progress save: only write to IndexedDB every 50 chunks or 2 seconds
-        // (was per-chunk, causing massive IndexedDB overhead that killed throughput)
-        const chunkingState = this.activeChunkings.get(transferId);
-        const metrics = this.performanceMetrics.get(transferId);
-        const chunksSinceLastSave = chunkingState.storageChunkIndex - (metrics?.lastProgressChunk ?? 0);
-        const timeSinceLastSave = Date.now() - (metrics?.lastProgressSave ?? 0);
-        if (chunksSinceLastSave >= 50 || timeSinceLastSave >= 2000) {
-          await resumableTransferManager.updateProgress(transferId, {
-            chunkIndex: chunkingState.storageChunkIndex,
-            bytesProcessed: bytesRead
-          });
-          if (metrics) {
-            metrics.lastProgressSave = Date.now();
-            metrics.lastProgressChunk = chunkingState.storageChunkIndex;
-          }
-        }
+        // IndexedDB progress persistence is handled by _flushBitmap() inside
+        // _processStorageBuffer (every BITMAP_FLUSH_INTERVAL chunks).
+        // No need for a second IndexedDB write path here — it was doubling
+        // the number of IndexedDB transactions in the hot loop.
       }
 
       // Mark chunking as complete
@@ -403,21 +389,20 @@ export class ChunkingEngine {
     
     if (bufferState.currentSize === 0) return; // Nothing to process
 
-    // Get actual data from buffer
+    // Get actual data from buffer — slice creates a copy because the buffer is reused
     const chunkData = bufferState.buffer.slice(0, bufferState.currentSize);
     
-    // Calculate SHA-256 checksum
+    // SHA-256 checksum for end-to-end integrity verification on receiver.
+    // crypto.subtle.digest is hardware-accelerated (~0.1ms for 64KB).
+    // Encode as base64 instead of hex to avoid GC pressure from 32 intermediate strings.
     const checksum = await this._calculateChecksum(chunkData);
     
-    // Build chunk metadata
     const chunkMetadata = {
       transferId,
       chunkIndex: chunkingState.storageChunkIndex,
       size: bufferState.currentSize,
       checksum,
-      timestamp: Date.now(),
       isFinal,
-      fileOffset: chunkingState.bytesRead - bufferState.currentSize
     };
 
     // Send chunk metadata and binary data (bitmap tracking is handled by useTransferTracking)
@@ -458,8 +443,14 @@ export class ChunkingEngine {
    */
   async _calculateChecksum(data) {
     const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    // Base64 encode instead of hex — avoids creating 32 intermediate strings
+    // per chunk. For 32 bytes, this produces a ~44 char base64 string.
+    const bytes = new Uint8Array(hashBuffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
   }
 
   /**

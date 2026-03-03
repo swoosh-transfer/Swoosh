@@ -67,9 +67,14 @@ export class ChannelPool {
 
     const label = `${CHANNEL_LABEL_PREFIX}${index}`;
     try {
+      // Data channels (index >= 1) use unordered delivery to avoid SCTP
+      // head-of-line blocking — any packet loss on the link stalls ALL ordered
+      // channels since they share one SCTP association. With 85ms+ RTT on
+      // cellular networks, this causes severe throughput collapse (~100 KB/s).
+      // Application-layer ordering is handled by WriteQueue using chunk indices.
+      // Channel-0 (control) stays ordered for reliable JSON message delivery.
       const channel = this._pc.createDataChannel(label, {
-        ordered: true,
-        // Let the browser handle its own buffering
+        ordered: index === 0,
       });
       channel.binaryType = 'arraybuffer';
       this._wire(index, channel);

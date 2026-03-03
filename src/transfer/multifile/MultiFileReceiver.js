@@ -444,6 +444,27 @@ export class MultiFileReceiver {
     fileState.bytesReceived += data.byteLength;
     this._totalBytesReceived += data.byteLength;
 
+    // Verify chunk integrity via SHA-256 checksum (non-blocking).
+    // Runs in parallel with disk write — does NOT stall the receive pipeline.
+    if (meta?.checksum) {
+      crypto.subtle.digest('SHA-256', data).then(hashBuffer => {
+        const bytes = new Uint8Array(hashBuffer);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        const actual = btoa(binary);
+        if (actual !== meta.checksum) {
+          logger.error(
+            `[MultiFileReceiver] CHECKSUM MISMATCH file ${fileIndex} chunk ${chunkIndex}: ` +
+            `expected=${meta.checksum} actual=${actual}`
+          );
+        }
+      }).catch(err => {
+        logger.warn(`[MultiFileReceiver] Checksum verification failed for file ${fileIndex} chunk ${chunkIndex}:`, err);
+      });
+    }
+
     // Track chunk completion in per-file bitmap (if tracking callback provided)
     const transferId = this._transferIdsByFileIndex.get(fileIndex);
     if (transferId && this._trackChunkProgress) {
