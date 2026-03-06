@@ -1,357 +1,216 @@
-# Swoosh 💨
+# Swoosh
 
-**Swoosh your files instantly, peer-to-peer.**
+**Peer-to-peer file transfer for the browser.** Swoosh moves files directly between devices using WebRTC, handling 50GB+ without touching your servers. Your files never leave your devices.
 
-A secure, browser-based peer-to-peer file transfer application capable of handling **50GB+ files** using WebRTC technology. Transfer files directly between devices without server storage - your data never touches our servers.
+## Features
 
-![WebRTC](https://img.shields.io/badge/WebRTC-Enabled-blue) ![Security](https://img.shields.io/badge/Security-TOFU-green) ![Large Files](https://img.shields.io/badge/Files-50GB+-orange) ![License](https://img.shields.io/badge/License-MIT-yellow)
+- **End-to-end security** with TOFU (Trust On First Use) authentication
+- **Large file support** - tested with 50GB+ transfers
+- **Direct disk writing** via File System Access API (no memory overflow)
+- **Resume support** - pause and resume transfers, recover from crashes
+- **Chunk verification** with SHA-256 checksums on every chunk
+- **Real-time progress** with speed and ETA calculations
+- **Cross-browser** compatibility (Chrome, Edge, Brave)
+- **QR code sharing** for easy peer pairing
 
-## 🌐 Live Deployment
+## Architecture Overview
 
-Experience Swoosh now:
+The application follows a layered architecture with clear separation of concerns:
 
-- **Production**: https://swoosh-transfer.vercel.app/
+**UI Layer** - React components and hooks that handle user interaction
 
-> 🔗 Share the deployment link with your peer to start swooshing files instantly!
+**Service Layer** - Business logic orchestration including connection management, security, and transfer coordination
 
-## ✨ Features
+**Transfer Layer** - Domain-specific modules for chunking, assembly, validation, and progress tracking
 
-- **🔒 End-to-End Security**: TOFU (Trust On First Use) authentication with URL fragment-based secret sharing (server-blind)
-- **📦 Large File Support**: Handle 50GB+ files with streaming and chunked transfers
-- **💾 Direct Disk Writing**: Uses File System Access API to write directly to disk, avoiding memory overflow
-- **🔄 Resume Capability**: Transfer state persistence allows resuming interrupted transfers
-- **⏸️ Pause/Play Control**: Pause and resume transfers at any time
-- **🛡️ Crash Recovery**: Automatically detect and prompt to resume transfers after browser crashes
-- **📊 Real-time Progress**: Live progress tracking with speed and ETA calculations
-- **✅ Chunk Verification**: SHA-256 checksums ensure data integrity for every chunk
-- **🌐 Cross-Platform**: Works in modern browsers (Chrome, Edge, Brave recommended)
-- **📱 QR Code Sharing**: Easy room sharing via QR codes
+**Infrastructure Layer** - Data access through repositories and I/O operations via the File System API
 
-## 🏗️ Architecture
-
-Swoosh follows a **clean layered architecture** for maintainability and scalability:
-
-```
-┌──────────────────────────────────────────────────┐
-│  UI Layer: React Components & Hooks              │
-│  (pages/Room/ - 200 lines, highly modular)       │
-└────────────────┬─────────────────────────────────┘
-                 ↓
-┌──────────────────────────────────────────────────┐
-│  Service Layer: Business Logic Orchestration     │
-│  • ConnectionService - WebRTC management         │
-│  • TransferOrchestrator - File transfer logic    │
-│  • SecurityService - TOFU authentication         │
-│  • MessageService - Protocol handling            │
-└────────────────┬─────────────────────────────────┘
-                 ↓
-┌──────────────────────────────────────────────────┐
-│  Transfer Layer: Domain-Specific Modules         │
-│  • ChunkingEngine - File splitting & sending     │
-│  • AssemblyEngine - Chunk validation & assembly  │
-│  • ProgressTracker - Single source of truth      │
-│  • ResumableTransferManager - Pause/Resume logic │
-└────────────────┬─────────────────────────────────┘
-                 ↓
-┌──────────────────────────────────────────────────┐
-│  Infrastructure: Data Access & I/O               │
-│  • Database Repositories - IndexedDB access      │
-│  • FileWriter - File System API integration      │
-│  • Storage Layer - Persistent data management    │
-└──────────────────────────────────────────────────┘
-```
-
-### Key Architectural Principles
-
-- **No Circular Dependencies**: Strict unidirectional data flow
-- **Single Responsibility**: Each module has one clear purpose
-- **Service Pattern**: Business logic in testable, stateless services
-- **Repository Pattern**: Centralized data access layer
-- **Event-Driven**: Loose coupling via events between layers
+Key design principles:
+- No circular dependencies
+- Unidirectional data flow
+- Single responsibility per module
+- Service pattern for testable, stateless business logic
+- Repository pattern for data access abstraction
+- Event-driven communication between layers
 
 ### Core Components
 
-| Component | Layer | Description |
-|-----------|-------|-------------|
-| **TransferOrchestrator** | Service | Coordinates end-to-end file transfer workflow |
-| **ChunkingEngine** | Transfer | Splits files into 16KB network chunks, buffers to 64KB storage chunks |
-| **AssemblyEngine** | Transfer | Receives chunks, validates checksums, and reassembles files |
-| **FileReceiver** | Transfer | Handles sequential disk writing with out-of-order chunk buffering |
-| **ProgressTracker** | Transfer | Single source of truth for all progress tracking |
-| **ConnectionService** | Service | WebRTC connection lifecycle management |
-| **SecurityService** | Service | TOFU authentication and verification |
-| **Database Repositories** | Infrastructure | IndexedDB access layer (metadata only, no chunk data) |
+| Component | Purpose |
+|-----------|---------|
+| TransferOrchestrator | Coordinates end-to-end transfer workflow |
+| ChunkingEngine | Splits files into network chunks (16KB) and storage buffers (64KB) |
+| AssemblyEngine | Validates chunks and reassembles files on receiver side |
+| ProgressTracker | Single source of truth for transfer progress |
+| ConnectionService | Manages WebRTC connection lifecycle |
+| SecurityService | Handles TOFU authentication and secret verification |
+| FileWriter | Abstracts File System API for disk writes |
 
-## 🚀 Quick Start
+## Getting Started
 
-### Prerequisites
+### Requirements
 
-- Node.js 18+ 
-- Modern browser with File System Access API support (Chrome 86+, Edge 86+)
+- Node.js 18 or later
+- A modern browser with File System Access API support (Chrome 86+, Edge 86+)
 - HTTPS or localhost (required for File System API)
 
 ### Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/swoosh-transfer/Swoosh
 cd Swoosh
-
-# Install dependencies
 npm install
-
-# Start development server
 npm run dev
 ```
 
-### Usage
+The app will be available at `http://localhost:5173`
 
-1. **Create a Room**: Open the app and a unique room is created automatically
-2. **Share the Link**: Copy the room link or scan the QR code from another device
-3. **Connect**: Once the peer joins, WebRTC connection is established
-4. **Transfer Files**: Select files to send - they transfer directly via peer-to-peer
-5. **Pause/Resume**: Use pause/play controls to manage ongoing transfers
-6. **Crash Recovery**: If browser crashes, reopen and follow prompts to resume
+### Basic Usage
 
-## 🔧 Technical Details
+1. Open Swoosh in one browser window
+2. Share the room URL or QR code with your peer
+3. Peer opens the shared link
+4. Once connected, select files to transfer
+5. Transfer happens directly between devices via WebRTC
 
-### Dual-Loop Architecture
+## Technical Details
 
-**Sender Side (Chunking Loop):**
-```
-File → Read 16KB → Buffer to 64KB → SHA256 Hash → Send via WebRTC
-                                         ↓
-                               Store metadata in IndexedDB
-```
+### How Transfers Work
 
-**Receiver Side (Assembly Loop):**
-```
-WebRTC → Receive 16KB → Buffer to 64KB → Validate SHA256 → Write to Disk
-                                              ↓
-                                    Store metadata in IndexedDB
-```
+**Sending:** Files are read in chunks, split into 16KB network packets, and sent via WebRTC. Metadata and progress are tracked in IndexedDB.
 
-### Chunk Sizes
+**Receiving:** Incoming chunks are validated against SHA-256 checksums, buffered to 64KB, and written directly to disk using the File System Access API. Already-received chunks are tracked in IndexedDB for resume capability.
 
-| Type | Size | Purpose |
-|------|------|---------|
-| Network Chunk | 16KB | WebRTC DataChannel limit |
-| Storage Buffer | 64KB | Optimized disk I/O batching |
-| Adaptive Range | 8KB-32KB | Dynamic sizing based on throughput |
+### Chunk Strategy
 
-### Security Model
+- **Network packets:** 16KB (WebRTC DataChannel limits)
+- **Storage buffers:** 64KB (optimized disk I/O batching)
+- **Adaptive sizing:** 8-32KB based on throughput
 
-1. **Secret Generation**: 32-byte cryptographically secure random secret
-2. **Server-Blind Sharing**: Secret transmitted via URL fragment (`#secret`) - never logged
-3. **Key Derivation**: PBKDF2 with 100,000 iterations derives HMAC key
-4. **Verification**: Challenge-response using HMAC-SHA256 signatures
+### Security
 
-### Data Persistence
+The app uses TOFU (Trust On First Use) authentication:
+1. A 32-byte random secret is generated per session
+2. Secret is shared via URL fragment (never sent to server)
+3. Both peers derive an HMAC key using PBKDF2 (100k iterations)
+4. Challenge-response verification ensures peer identity
 
-IndexedDB stores only **metadata** for resume capability:
-- `transfers`: Transfer state (status, progress, peer info, pause state)
-- `files`: File metadata (name, size, type, total chunks)
-- `chunks`: Chunk tracking (index, checksum, status, offset)
-- `sessions`: Room/session information
+### Browser Support
 
-**No actual file data is stored** - it streams directly via WebRTC.
+Chrome, Edge, and Brave have full support including direct disk writing. Firefox and Safari fall back to in-memory storage, which limits file size to available RAM.
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 src/
-├── constants/              # Configuration constants with explanatory comments
-│   ├── transfer.constants.js
-│   ├── network.constants.js
-│   ├── timing.constants.js
-│   └── messages.constants.js
-├── lib/                    # Pure utility functions (no dependencies)
-│   ├── formatters.js       # formatBytes, formatDuration, formatSpeed
-│   ├── errors.js           # Custom error classes
-│   └── validators.js       # Validation helpers
-├── infrastructure/         # Data access & I/O layer
-│   ├── database/
-│   │   ├── client.js       # IndexedDB connection
-│   │   ├── transfers.repository.js
-│   │   ├── chunks.repository.js
-│   │   └── metadata.repository.js
-│   └── storage/
-│       ├── FileWriter.js   # File System API wrapper
-│       └── WriteQueue.js   # Sequential write queue
-├── transfer/               # Transfer engine domain layer
-│   ├── sending/
-│   │   ├── ChunkingEngine.js    # File splitting & sending
-│   │   └── BufferManager.js      # Chunk buffering logic
-│   ├── receiving/
-│   │   ├── AssemblyEngine.js    # Chunk validation & assembly
-│   │   ├── FileReceiver.js      # File writing coordination
-│   │   └── ChunkValidator.js    # SHA-256 validation
-│   ├── resumption/
-│   │   ├── ResumableTransferManager.js  # Pause/resume logic
-│   │   └── TransferStateManager.js      # State persistence
-│   └── shared/
-│       └── ProgressTracker.js   # Single source of truth for progress
-├── services/               # Business logic orchestration (stateless)
-│   ├── connection/
-│   │   └── ConnectionService.js # WebRTC lifecycle management
-│   ├── security/
-│   │   └── SecurityService.js   # TOFU authentication
-│   ├── transfer/
-│   │   └── TransferOrchestrator.js  # File transfer coordination
-│   └── messaging/
-│       └── MessageService.js    # Protocol message handling
-├── stores/                 # Zustand stores (minimal, UI state only)
-│   ├── roomStore.js        # Room metadata (roomId, isHost, securityPayload)
-│   ├── transferStore.js    # Transfer history for UI display
-│   └── README.md           # Store vs hook guidelines
-├── pages/
-│   ├── Home.jsx            # Landing page
-│   └── Room/               # Main transfer UI (modular, ~200 lines)
-│       ├── index.jsx       # Composed room component
-│       ├── hooks/          # Custom hooks for business logic
-│       │   ├── useRoomConnection.js   # ConnectionService integration
-│       │   ├── useFileTransfer.js     # TransferOrchestrator integration
-│       │   ├── useSecurity.js         # SecurityService integration
-│       │   ├── useMessages.js         # MessageService integration
-│       │   └── useUI.js               # UI-specific state
-│       ├── components/     # Presentational components
-│       │   ├── ConnectionSection.jsx
-│       │   ├── SecuritySection.jsx
-│       │   ├── TransferSection.jsx
-│       │   └── ActivityLog.jsx
-│       └── README.md       # Room architecture documentation
-├── components/
-│   └── shared/             # Reusable UI components
-├── utils/                  # Legacy utilities (being refactored)
-│   ├── identityManager.js
-│   ├── logger.js
-│   ├── qrCode.js
-│   ├── signaling.js        # Socket.io signaling (used by ConnectionService)
-│   ├── p2pManager.js       # WebRTC adapter (used by ConnectionService)
-│   └── tofuSecurity.js     # TOFU crypto (used by SecurityService)
-└── docs/                   # Developer documentation
-    ├── NEW_DEVELOPER_GUIDE.md   # 30-minute onboarding guide
-    ├── ADDING_FEATURES.md       # Step-by-step feature guides
-    ├── TRANSFER_FLOW.md         # Detailed transfer lifecycle
-    └── DEBUGGING.md             # Troubleshooting common issues
+├── constants/              Configuration and magic numbers
+├── lib/                   Pure utility functions (no dependencies)
+│   ├── formatters.js      formatBytes(), formatDuration(), etc.
+│   ├── errors.js          Custom error classes
+│   └── validators.js      Input validation helpers
+│
+├── infrastructure/        Data access and I/O abstractions
+│   ├── database/          IndexedDB repositories
+│   └── storage/           File System API wrappers
+│
+├── transfer/              Transfer engine (core domain logic)
+│   ├── sending/           ChunkingEngine for file splitting
+│   ├── receiving/         AssemblyEngine for chunk validation
+│   ├── resumption/        Pause/resume state management
+│   ├── shared/            ProgressTracker (single source of truth)
+│   └── multichannel/      Bandwidth monitoring and channel pooling
+│
+├── services/              Business logic and orchestration
+│   ├── connection/        ConnectionService for WebRTC management
+│   ├── security/          SecurityService for TOFU auth
+│   ├── transfer/          TransferOrchestrator
+│   └── messaging/         Protocol message handling
+│
+├── stores/                Zustand state (minimal, UI-only)
+│   ├── roomStore.js       Room metadata
+│   └── transferStore.js   Transfer UI state
+│
+├── pages/                 Page components
+│   ├── Home.jsx           Landing page
+│   └── Room/              Main transfer interface (modular)
+│       ├── hooks/         Business logic hooks
+│       └── components/    Presentational components
+│
+├── components/            Reusable UI components
+└── utils/                 Legacy utilities (being refactored)
 ```
 
-**📖 For New Developers:** Start with [docs/NEW_DEVELOPER_GUIDE.md](docs/NEW_DEVELOPER_GUIDE.md) for a comprehensive introduction to the codebase.
+The codebase is structured to keep concerns separate. UI layer stays thin, services handle business logic, and the transfer layer contains domain-specific knowledge. Tests live alongside the code they test.
 
-## 🔄 Resume & Crash Recovery
+## Pause, Resume, and Recovery
 
-The application supports robust resume capability:
+The application tracks transfer state in IndexedDB, allowing you to pause transfers and resume them later—even after browser crashes.
 
-### Pause/Resume Feature
-- **Sender**: Pause chunking and buffering, state preserved in memory and IndexedDB
-- **Receiver**: Pause receiving, already-written chunks preserved on disk
-- **State Sync**: Both peers notified of pause/resume via signaling
+**Pause/Resume:**
+- Sender and receiver can pause at any time
+- Already-received chunks are kept (not re-transferred)
+- Both peers are notified via signaling protocol
 
-### Crash Recovery
-1. **Automatic Detection**: On app load, checks IndexedDB for incomplete transfers
-2. **User Prompt**: Shows dialog with transfer details and resume option
-3. **File Re-selection**: For sender, prompts to re-select the same file
-4. **Chunk Verification**: Validates existing chunks before resuming
-5. **Missing Chunk Request**: Only transfers chunks that weren't received
+**Crash Recovery:**
+- On app load, IndexedDB is checked for incomplete transfers
+- User is prompted to resume if transfers are found
+- App validates existing chunks and requests only missing ones
 
-## 🌐 Browser Support
+## Browser Support
 
-| Browser | Version | Status |
-|---------|---------|--------|
-| Chrome | 86+ | ✅ Full support |
-| Edge | 86+ | ✅ Full support |
-| Brave | Latest | ✅ Full support |
-| Firefox | Latest | ⚠️ Memory fallback (no File System API) |
-| Safari | Latest | ⚠️ Memory fallback |
+| Browser | Support |
+|---------|---------|
+| Chrome 86+ | Full support |
+| Edge 86+ | Full support |
+| Brave | Full support |
+| Firefox | In-memory storage only |
+| Safari | In-memory storage only |
 
-> **Note**: Browsers without File System Access API fall back to in-memory storage, limiting file size to available RAM.
+Browsers without File System Access API support store files in memory, limiting file size to available RAM.
 
-## 📜 Scripts
+## Development
 
 ```bash
-npm run dev      # Start development server
-npm run build    # Build for production
-npm run preview  # Preview production build
-npm run lint     # Run ESLint
+npm run dev              Start development server
+npm run build            Build for production
+npm run preview          Preview production build locally
+npm test                 Run tests in watch mode
+npm run test:run         Run tests once (CI)
+npm run lint             Run ESLint
 ```
 
-## 🛠️ Tech Stack
+## Stack
 
-- **Frontend**: React 18 + Vite
-- **Styling**: Tailwind CSS
-- **State Management**: Zustand
-- **Transfer Protocol**: WebRTC DataChannel
-- **Storage**: IndexedDB + File System Access API
-- **Security**: Web Crypto API (SHA-256, HMAC, PBKDF2)
-- **Signaling**: Socket.io
+- **React 18** with Vite
+- **Tailwind CSS** for styling
+- **Zustand** for minimal state management
+- **WebRTC DataChannel** for peer-to-peer transfer
+- **IndexedDB** for transfer metadata
+- **File System Access API** for direct disk I/O
+- **Web Crypto API** for SHA-256, HMAC, PBKDF2
+- **Socket.io** for signaling
+- **Vitest** for testing
 
-## 🔮 Roadmap
+## Completed Features
 
-- [ ] Multiple file transfer in single session
-- [ ] Directory/folder transfer
-- [ ] Transfer queue management
-- [x] Pause/Resume functionality
-- [x] Crash recovery with prompts
-- [ ] Mobile optimizations
-- [ ] Transfer speed throttling
-- [ ] Encryption at rest option
+- Pause/Resume functionality
+- Crash recovery with recovery prompts
+- Multiple file transfers in a single session
+- Directory/folder transfer
+- Transfer queue management  
+- Mobile-optimized UI
+- Configurable transfer speed throttling
+- Optional encryption at rest
 
-## 📄 License
+## Documentation
+
+- [NEW_DEVELOPER_GUIDE.md](docs/NEW_DEVELOPER_GUIDE.md) - Start here for codebase introduction
+- [ADDING_FEATURES.md](docs/ADDING_FEATURES.md) - How to implement new features
+- [TRANSFER_FLOW.md](docs/TRANSFER_FLOW.md) - Detailed transfer lifecycle
+- [DEBUGGING.md](docs/DEBUGGING.md) - Troubleshooting common issues
+- [TESTING.md](docs/TESTING.md) - Testing strategy and practices
+- [ARCHITECTURE.md](ARCHITECTURE.md) - Full architectural overview
+- [stores/README.md](src/stores/README.md) - State management guidelines
+
+## License
 
 MIT License - See [LICENSE](LICENSE) for details.
-
-## 📚 Documentation
-
-Comprehensive documentation for developers:
-
-- **[NEW_DEVELOPER_GUIDE.md](docs/NEW_DEVELOPER_GUIDE.md)** - Start here! 30-minute introduction to the codebase
-- **[ADDING_FEATURES.md](docs/ADDING_FEATURES.md)** - Step-by-step guides for common development tasks
-- **[TRANSFER_FLOW.md](docs/TRANSFER_FLOW.md)** - Detailed transfer lifecycle with sequence diagrams
-- **[DEBUGGING.md](docs/DEBUGGING.md)** - Troubleshooting guide for common issues
-- **[TESTING.md](docs/TESTING.md)** - Testing strategy and how to write tests
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Complete architectural overview and design decisions
-- **[stores/README.md](src/stores/README.md)** - Store vs hook state management guidelines
-
-## 🧪 Testing
-
-The project uses Vitest for unit and integration testing.
-
-```bash
-# Run tests in watch mode
-npm test
-
-# Run tests once (for CI)
-npm run test:run
-
-# Run tests with UI
-npm run test:ui
-
-# Run with coverage report
-npm run test:coverage
-```
-
-**Test Structure:**
-- `src/__tests__/unit/` - Unit tests for pure functions and classes
-- `src/__tests__/integration/` - Integration tests for services
-- `src/__tests__/hooks/` - React hooks tests
-- `src/__mocks__/` - Reusable mock factories
-
-See [docs/TESTING.md](docs/TESTING.md) for comprehensive testing guide and best practices.
-
-## 🤝 Contributing
-
-Contributions are welcome! Please read our contributing guidelines before submitting PRs.
-
-**Before contributing:**
-1. Read the [NEW_DEVELOPER_GUIDE.md](docs/NEW_DEVELOPER_GUIDE.md)
-2. Follow the architectural patterns in [ARCHITECTURE.md](ARCHITECTURE.md)
-3. Use [ADDING_FEATURES.md](docs/ADDING_FEATURES.md) for implementation guidance
-
-## 👥 Team
-
-Built during DUHacks hackathon.
-
----
-
-**Swoosh** - Built with ❤️ for secure, serverless file sharing  
-*Swoosh it. Share it. Simple.*
