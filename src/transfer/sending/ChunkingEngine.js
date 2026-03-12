@@ -41,6 +41,23 @@ export class ChunkingEngine {
   }
 
   /**
+   * Update the transfer profile with a negotiated config from the peer.
+   * Call this after config negotiation completes, before starting a transfer.
+   * @param {Object} negotiatedConfig - { chunkSize, maxChannels, bufferWatermark, constrained }
+   */
+  applyNegotiatedConfig(negotiatedConfig) {
+    if (!negotiatedConfig) return;
+    this.transferProfile = {
+      ...this.transferProfile,
+      chunkSize: negotiatedConfig.chunkSize || this.transferProfile.chunkSize,
+      maxChannels: negotiatedConfig.maxChannels || this.transferProfile.maxChannels,
+      channelBufferLowWatermark: negotiatedConfig.bufferWatermark || this.transferProfile.channelBufferLowWatermark,
+      constrained: negotiatedConfig.constrained ?? this.transferProfile.constrained,
+    };
+    logger.log(`[ChunkingEngine] Applied negotiated config: chunk=${this.transferProfile.chunkSize / 1024}KB, channels=${this.transferProfile.maxChannels}`);
+  }
+
+  /**
    * Get the effective chunk size for a given transfer.
    * On mobile/constrained: uses the per-transfer chunk size (default NETWORK_CHUNK_SIZE).
    * On desktop: uses STORAGE_CHUNK_SIZE.
@@ -162,10 +179,9 @@ export class ChunkingEngine {
     await saveFileMetadata(fileMetadata);
     const transferRecord = await createTransferRecord({ transferId, fileMeta: fileMetadata, peerId });
     
-    // Set chunk size: mobile uses smaller chunks (16KB default), desktop uses 64KB
-    const chunkSize = this.transferProfile.constrained
-      ? (initialChunkSize || NETWORK_CHUNK_SIZE)
-      : STORAGE_CHUNK_SIZE;
+    // Use negotiated chunk size if available, otherwise fall back to profile-based selection
+    const chunkSize = this.transferProfile.chunkSize
+      || (this.transferProfile.constrained ? (initialChunkSize || NETWORK_CHUNK_SIZE) : STORAGE_CHUNK_SIZE);
     this.chunkSizes.set(transferId, chunkSize);
     const totalChunks = Math.ceil(file.size / chunkSize);
     logger.log(`[ChunkingEngine] Starting with chunk size: ${chunkSize / 1024}KB, totalChunks: ${totalChunks}`);

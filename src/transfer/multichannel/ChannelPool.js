@@ -122,13 +122,22 @@ export class ChannelPool {
    * Send data on a specific channel.
    * @param {number} channelIndex
    * @param {string|ArrayBuffer} data
+   * @returns {boolean} true if sent successfully
    */
   send(channelIndex, data) {
     const ch = this._channels.get(channelIndex);
     if (!ch || ch.readyState !== 'open') {
-      throw new Error(`Channel ${channelIndex} not open`);
+      this._emit('channel-error', channelIndex, new Error(`Channel ${channelIndex} not open (state=${ch?.readyState})`));
+      return false;
     }
-    ch.send(data);
+    try {
+      ch.send(data);
+      return true;
+    } catch (e) {
+      logger.error(`[ChannelPool] send error on channel-${channelIndex}:`, e);
+      this._emit('channel-error', channelIndex, e);
+      return false;
+    }
   }
 
   /**
@@ -146,9 +155,10 @@ export class ChannelPool {
   /**
    * Send JSON on channel-0 (control channel).
    * @param {Object} obj
+   * @returns {boolean} true if sent
    */
   sendControl(obj) {
-    this.send(0, JSON.stringify(obj));
+    return this.send(0, JSON.stringify(obj));
   }
 
   /**
@@ -188,17 +198,25 @@ export class ChannelPool {
   waitForDrain(channelIndex) {
     const ch = this._channels.get(channelIndex);
     if (!ch) return Promise.resolve();
+    if (ch.readyState !== 'open') return Promise.resolve();
     if (ch.bufferedAmount <= this._channelBufferLowWatermark) return Promise.resolve();
 
     return new Promise((resolve) => {
       // Use bufferedamountlow event if supported
       if (typeof ch.bufferedAmountLowThreshold === 'number') {
         ch.bufferedAmountLowThreshold = this._channelBufferLowWatermark;
-        const handler = () => {
-          ch.removeEventListener('bufferedamountlow', handler);
-          resolve();
+
+        const cleanup = () => {
+          ch.removeEventListener('bufferedamountlow', onDrain);
+          ch.removeEventListener('close', onClose);
+          ch.removeEventListener('error', onClose);
         };
-        ch.addEventListener('bufferedamountlow', handler);
+        const onDrain = () => { cleanup(); resolve(); };
+        const onClose = () => { cleanup(); resolve(); };
+
+        ch.addEventListener('bufferedamountlow', onDrain);
+        ch.addEventListener('close', onClose);
+        ch.addEventListener('error', onClose);
       } else {
         // Poll fallback
         const poll = setInterval(() => {

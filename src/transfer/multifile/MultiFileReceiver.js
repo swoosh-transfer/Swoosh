@@ -190,7 +190,11 @@ export class MultiFileReceiver {
         state.handle = fileHandle;
         const writable = await fileHandle.createWritable();
         state.writable = writable;
-        state.writeQueue = new WriteQueue(writable);  // Wrap in WriteQueue for out-of-order chunk handling
+        state.writeQueue = new WriteQueue(writable, (chunkIndex, error) => {
+          logger.error(`[MultiFileReceiver] WriteQueue error for file ${idx} chunk ${chunkIndex}:`, error);
+          state.writeError = true;
+          if (this._onError) this._onError(error);
+        });
         
         // Resolve the writeQueueReady promise for this file
         const readyInfo = this._writeQueueReady.get(idx);
@@ -212,7 +216,11 @@ export class MultiFileReceiver {
           state.handle = fileHandle;
           const writable = await fileHandle.createWritable();
           state.writable = writable;
-          state.writeQueue = new WriteQueue(writable);  // Wrap in WriteQueue for out-of-order chunk handling
+          state.writeQueue = new WriteQueue(writable, (chunkIndex, error) => {
+            logger.error(`[MultiFileReceiver] WriteQueue error for file ${idx} chunk ${chunkIndex}:`, error);
+            state.writeError = true;
+            if (this._onError) this._onError(error);
+          });
           
           // Resolve the writeQueueReady promise for this file
           const readyInfo = this._writeQueueReady.get(idx);
@@ -240,7 +248,11 @@ export class MultiFileReceiver {
       state.handle = fileHandle;
       const writable = await fileHandle.createWritable();
       state.writable = writable;
-      state.writeQueue = new WriteQueue(writable);  // Wrap in WriteQueue for out-of-order chunk handling
+      state.writeQueue = new WriteQueue(writable, (chunkIndex, error) => {
+        logger.error(`[MultiFileReceiver] WriteQueue error for single file chunk ${chunkIndex}:`, error);
+        state.writeError = true;
+        if (this._onError) this._onError(error);
+      });
       
       // Resolve the writeQueueReady promise for this file
       const readyInfo = this._writeQueueReady.get(0);
@@ -423,6 +435,11 @@ export class MultiFileReceiver {
     const fileState = this._files.get(fileIndex);
     if (!fileState) {
       logger.error(`[MultiFileReceiver] Unknown fileIndex ${fileIndex}`);
+      return;
+    }
+
+    // Skip chunks for files that already have a write error — avoids cascading failures
+    if (fileState.writeError) {
       return;
     }
 
@@ -938,7 +955,11 @@ export class MultiFileReceiver {
         state.writable = await fileHandle.createWritable({ keepExistingData: true });
         
         // Create WriteQueue for this file
-        state.writeQueue = new WriteQueue(state.writable);
+        state.writeQueue = new WriteQueue(state.writable, (chunkIndex, error) => {
+          logger.error(`[MultiFileReceiver] WriteQueue error for resume file ${idx} chunk ${chunkIndex}:`, error);
+          state.writeError = true;
+          if (this._onError) this._onError(error);
+        });
 
         // Seek to the resume offset so we write after existing data
         if (state.resumeOffset > 0) {

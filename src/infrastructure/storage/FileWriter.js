@@ -246,7 +246,9 @@ export async function initFileWriter(transferId, fileName, fileSize, options = {
     }
 
     const totalChunks = Math.ceil(fileSize / STORAGE_CHUNK_SIZE);
-    const writeQueue = new WriteQueue(writable);
+    const writeQueue = new WriteQueue(writable, (chunkIndex, error) => {
+      logger.error(`[FileWriter] Write failed at chunk ${chunkIndex} for ${transferId}:`, error);
+    });
     
     activeWriters.set(transferId, {
       handle,

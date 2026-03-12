@@ -25,12 +25,13 @@ export const CHUNK_ARRIVAL_DELAY = 300;
 export const COMPLETION_RETRY_DELAY = 1000;
 
 /**
- * PENDING_CHUNKS_WAIT: 3000ms (3 seconds)
+ * PENDING_CHUNKS_WAIT: 10000ms (10 seconds)
  * 
  * Maximum wait time for pending chunks in sequential write queue.
  * Longer than COMPLETION_RETRY_DELAY to handle out-of-order chunk writes.
+ * Increased for high-latency networks where chunk reordering takes longer.
  */
-export const PENDING_CHUNKS_WAIT = 3000;
+export const PENDING_CHUNKS_WAIT = 10000;
 
 /**
  * FILE_WRITE_DELAY: 100ms
@@ -70,11 +71,12 @@ export const CONNECTION_MONITOR_INTERVAL = 1000;
 export const TOFU_VERIFICATION_TIMEOUT = 30 * 1000;
 
 /**
- * RESUME_HANDSHAKE_TIMEOUT: 20 seconds
+ * RESUME_HANDSHAKE_TIMEOUT: 45 seconds
  *
  * Maximum time to wait for resume negotiation before falling back to fresh transfer.
+ * Increased for slow connections where signaling round-trips take longer.
  */
-export const RESUME_HANDSHAKE_TIMEOUT = 20 * 1000;
+export const RESUME_HANDSHAKE_TIMEOUT = 45 * 1000;
 
 /**
  * RESUME_REQUEST_RETRY_DELAY: 1.5 seconds

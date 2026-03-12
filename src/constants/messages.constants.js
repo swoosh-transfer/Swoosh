@@ -51,6 +51,10 @@ export const MESSAGE_TYPE = {
   PONG: 'pong',
   HEARTBEAT: 'heartbeat',                   // Periodic heartbeat to detect stale connections
   HEARTBEAT_ACK: 'heartbeat-ack',           // Heartbeat acknowledgment
+
+  // Config Negotiation
+  CONFIG_EXCHANGE: 'config-exchange',       // Exchange transfer config between peers
+  CONFIG_ACK: 'config-ack',                 // Acknowledge agreed config
   
   // Peer Session Events
   PEER_RECONNECTED: 'peer-reconnected',     // Notify peer of reconnection with session info

@@ -13,7 +13,7 @@ let isPolite = false; // For perfect negotiation pattern
 let makingOffer = false; // Track if we're creating an offer
 let recoveryOfferTimer = null;
 let recoveryOfferAttempts = 0;
-const MAX_RECOVERY_OFFER_ATTEMPTS = 3;
+const MAX_RECOVERY_OFFER_ATTEMPTS = 10;
 
 const rtcConfig = {
   iceServers: [
@@ -148,7 +148,10 @@ function scheduleNegotiationRecovery(socket, roomId) {
     clearTimeout(recoveryOfferTimer);
   }
 
-  const delayMs = 500 * Math.pow(2, recoveryOfferAttempts);
+  // Exponential backoff with random jitter to prevent thundering herd
+  const baseDelay = 500 * Math.pow(2, Math.min(recoveryOfferAttempts, 5));
+  const jitter = Math.floor(Math.random() * 500);
+  const delayMs = baseDelay + jitter;
   recoveryOfferTimer = setTimeout(async () => {
     recoveryOfferTimer = null;
 
@@ -307,16 +310,28 @@ function processIceQueue() {
 // Attempts ICE restart if the connection fails
 async function handleAutoReconnection(socket, roomId) {
   if (!peerConnection) return;
+  if (peerConnection.signalingState === 'closed' || peerConnection.connectionState === 'closed') return;
 
+  // Verify the control channel exists (readyState check, not just id)
   const ch0 = channelPool?.getControlChannel();
-  if (ch0 && ch0.id !== null) {
-     try {
-       const offer = await peerConnection.createOffer({ iceRestart: true });
-       await peerConnection.setLocalDescription(offer);
-       await sendOffer(offer, roomId);
-     } catch (err) {
-       logger.error("Reconnection failed:", err);
-     }
+  const hasChannel = ch0 && (ch0.readyState === 'open' || ch0.readyState === 'connecting');
+
+  if (hasChannel || channelPool) {
+    try {
+      if (peerConnection.signalingState !== 'stable') {
+        logger.warn(`[P2P] ICE restart deferred, signalingState=${peerConnection.signalingState}`);
+        // Schedule a retry with backoff
+        scheduleNegotiationRecovery(socket, roomId);
+        return;
+      }
+      const offer = await peerConnection.createOffer({ iceRestart: true });
+      await peerConnection.setLocalDescription(offer);
+      await sendOffer(offer, roomId);
+      logger.log('[P2P] ICE restart offer sent');
+    } catch (err) {
+      logger.error('[P2P] ICE restart failed:', err);
+      scheduleNegotiationRecovery(socket, roomId);
+    }
   }
 }
 

@@ -29,6 +29,7 @@ import {
   getPeerConnection,
   requestIceRestart,
 } from '../../../utils/p2pManager.js';
+import { heartbeatMonitor } from '../../../utils/heartbeatMonitor.js';
 import { deriveEncryptionKey } from '../../../utils/tofuSecurity.js';
 import { useRoomStore } from '../../../stores/roomStore.js';
 import { getTransferReliabilityProfile } from '../../../constants/transfer.constants.js';
@@ -264,6 +265,12 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
             setConnInfo(prev => ({ ...prev, dataChannelState: 'closed' }));
             logger.log('[Room] Data channel closed');
             handshakeSentRef.current = false;
+            // Attempt ICE restart when channel closes unexpectedly
+            requestIceRestart(roomId).catch(() => {});
+          };
+          channel.onerror = (e) => {
+            logger.error('[Room] Data channel error:', e);
+            requestIceRestart(roomId).catch(() => {});
           };
         };
         const guestOnStateChange = (state) => {
@@ -314,6 +321,14 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
         };
 
         createGuestPeerConnection();
+
+        // Wire heartbeat loss to ICE restart
+        heartbeatMonitor.onLost((lostRoomId) => {
+          if (lostRoomId === roomId) {
+            logger.warn('[Room] Heartbeat lost, triggering ICE restart...');
+            requestIceRestart(roomId).catch(() => {});
+          }
+        });
 
         setupSignalingListeners({
           onUserJoined: async (data) => {
@@ -433,6 +448,12 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
         setConnInfo(prev => ({ ...prev, dataChannelState: 'closed' }));
         logger.log('[Room] Data channel closed');
         handshakeSentRef.current = false;
+        // Attempt ICE restart when channel closes unexpectedly
+        requestIceRestart(roomId).catch(() => {});
+      };
+      channel.onerror = (e) => {
+        logger.error('[Room] Data channel error:', e);
+        requestIceRestart(roomId).catch(() => {});
       };
     };
 
@@ -488,6 +509,14 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
 
     // Initialize peer connection
     createFreshPeerConnection();
+
+    // Wire heartbeat loss to ICE restart
+    heartbeatMonitor.onLost((lostRoomId) => {
+      if (lostRoomId === roomId) {
+        logger.warn('[Room] Heartbeat lost, triggering ICE restart...');
+        requestIceRestart(roomId).catch(() => {});
+      }
+    });
 
     // Handle socket reconnection
     const handleReconnection = async (rejoinedRoomId) => {

@@ -14,13 +14,16 @@ import logger from '../../utils/logger.js';
 export class WriteQueue {
   /**
    * @param {FileSystemWritableFileStream} writable - Writable stream
+   * @param {Function} [onWriteError] - Callback when a write fails: (chunkIndex, error) => void
    */
-  constructor(writable) {
+  constructor(writable, onWriteError) {
     this.writable = writable;
+    this.onWriteError = onWriteError || null;
     this.queue = new Map(); // chunkIndex -> data
     this.nextExpected = 0;
     this.processing = false;
     this.bytesWritten = 0;
+    this.writeError = null; // Set on first write failure
   }
 
   /**
@@ -34,6 +37,11 @@ export class WriteQueue {
    * @returns {Promise<Object>} Write result with index and size
    */
   async add(chunkIndex, data) {
+    // Reject new chunks if a write error already occurred
+    if (this.writeError) {
+      throw this.writeError;
+    }
+
     this.queue.set(chunkIndex, data);
     
     // Log early out-of-order arrivals
@@ -71,6 +79,17 @@ export class WriteQueue {
           logger.log(`[WriteQueue] Writing early chunk ${this.nextExpected} (${data.byteLength} bytes, total written: ${this.bytesWritten})`);
         }
 
+        // Guard against writing to an explicitly closed stream.
+        // NOTE: Do NOT check `locked === false` — FileSystemWritableFileStream
+        // is normally unlocked between write() calls, so that check causes
+        // false positives that kill otherwise healthy transfers.
+        if (typeof this.writable.closed !== 'undefined' && this.writable.closed) {
+          const err = new Error('Write stream is closed');
+          this.writeError = err;
+          if (this.onWriteError) this.onWriteError(this.nextExpected, err);
+          throw err;
+        }
+
         // Simple sequential append - no position tracking needed
         // Data is already a Uint8Array from the DataChannel message handler,
         // so we can write it directly without copying.
@@ -80,6 +99,8 @@ export class WriteQueue {
       }
     } catch (err) {
       logger.error('[WriteQueue] Write error:', err);
+      this.writeError = err;
+      if (this.onWriteError) this.onWriteError(this.nextExpected, err);
       throw err;
     } finally {
       this.processing = false;

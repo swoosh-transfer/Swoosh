@@ -329,15 +329,22 @@ export class MultiFileTransferManager {
             await this._pool.waitForDrain(chIdx);
 
             // Send chunk metadata with fileIndex
-            this._pool.send(chIdx, JSON.stringify({
+            const metaSent = this._pool.send(chIdx, JSON.stringify({
               type: MESSAGE_TYPE.CHUNK_METADATA,
               fileIndex,
               channelIndex: chIdx,
               ...metadata,
             }));
 
+            if (!metaSent) {
+              throw new Error(`Channel ${chIdx} closed during metadata send`);
+            }
+
             // Send binary — use the Uint8Array directly (avoid copying via .buffer.slice)
-            this._pool.send(chIdx, binaryData);
+            const binarySent = this._pool.send(chIdx, binaryData);
+            if (!binarySent) {
+              throw new Error(`Channel ${chIdx} closed during binary send`);
+            }
             bytesSent = binaryData.byteLength;
           } finally {
             // Release the channel lock

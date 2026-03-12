@@ -6,8 +6,9 @@
  * 
  * Features:
  * - Periodic heartbeat messages (every 10 seconds)
- * - Automatic reconnection detection
- * - Stale connection detection (2 missed heartbeats)
+ * - RTT-adaptive timeout (adjusts to real network latency)
+ * - Stale connection detection (3 missed heartbeats)
+ * - Automatic ICE restart trigger on connection loss
  * - Event-based notifications for connection status changes
  */
 
@@ -19,10 +20,19 @@ import { notifyHeartbeatLost, notifyHeartbeatRecovered } from './transferNotific
 const HEARTBEAT_INTERVAL = 10000;
 
 /** Maximum missed heartbeats before considering connection stale */
-const MAX_MISSED_HEARTBEATS = 2;
+const MAX_MISSED_HEARTBEATS = 3;
 
-/** Heartbeat timeout (slightly more than interval to account for latency) */
-const HEARTBEAT_TIMEOUT = HEARTBEAT_INTERVAL * 1.5;
+/** Minimum heartbeat timeout regardless of RTT (15 seconds) */
+const MIN_HEARTBEAT_TIMEOUT = 15000;
+
+/** Default heartbeat timeout before RTT is measured */
+const DEFAULT_HEARTBEAT_TIMEOUT = 20000;
+
+/** Number of RTT samples to keep for rolling average */
+const RTT_HISTORY_SIZE = 10;
+
+/** RTT multiplier for adaptive timeout (timeout = avg RTT * multiplier) */
+const RTT_TIMEOUT_MULTIPLIER = 5;
 
 export class HeartbeatMonitor {
   constructor() {
@@ -51,6 +61,11 @@ export class HeartbeatMonitor {
       missedHeartbeats: 0,
       isConnected: true,
       intervalId: null,
+      // RTT tracking for adaptive timeout
+      rttHistory: [],
+      averageRtt: 0,
+      adaptiveTimeout: DEFAULT_HEARTBEAT_TIMEOUT,
+      pendingHeartbeatTimestamp: null,
     };
 
     // Start periodic heartbeat
@@ -85,21 +100,45 @@ export class HeartbeatMonitor {
   }
 
   /**
-   * Record received heartbeat from peer
+   * Record received heartbeat from peer.
+   * Handles both HEARTBEAT (from peer) and HEARTBEAT_ACK (response to ours).
    * 
    * @param {string} roomId - Room identifier
+   * @param {number} [originalTimestamp] - Timestamp from HEARTBEAT_ACK to calculate RTT
    */
-  recordHeartbeat(roomId) {
+  recordHeartbeat(roomId, originalTimestamp) {
     const monitor = this.activeMonitors.get(roomId);
     if (!monitor) {
       return;
     }
 
     const wasDisconnected = !monitor.isConnected;
+    const now = Date.now();
     
-    monitor.lastHeartbeatReceived = Date.now();
+    monitor.lastHeartbeatReceived = now;
     monitor.missedHeartbeats = 0;
     monitor.isConnected = true;
+
+    // Calculate RTT if this is an ACK with our original timestamp
+    if (originalTimestamp && originalTimestamp > 0) {
+      const rtt = now - originalTimestamp;
+      if (rtt > 0 && rtt < 30000) { // Sanity check (0-30s)
+        monitor.rttHistory.push(rtt);
+        if (monitor.rttHistory.length > RTT_HISTORY_SIZE) {
+          monitor.rttHistory.shift();
+        }
+        // Calculate rolling average RTT
+        monitor.averageRtt = Math.round(
+          monitor.rttHistory.reduce((sum, v) => sum + v, 0) / monitor.rttHistory.length
+        );
+        // Adaptive timeout: RTT * multiplier, but never below minimum
+        monitor.adaptiveTimeout = Math.max(
+          MIN_HEARTBEAT_TIMEOUT,
+          monitor.averageRtt * RTT_TIMEOUT_MULTIPLIER
+        );
+        logger.log(`[Heartbeat] RTT=${rtt}ms avg=${monitor.averageRtt}ms timeout=${monitor.adaptiveTimeout}ms`);
+      }
+    }
 
     // Notify if connection was restored
     if (wasDisconnected) {
@@ -122,24 +161,27 @@ export class HeartbeatMonitor {
     }
 
     try {
-      // Send heartbeat message
+      const timestamp = Date.now();
+      
+      // Send heartbeat message with timestamp for RTT measurement
       monitor.sendMessage({
         type: MESSAGE_TYPE.HEARTBEAT,
-        timestamp: Date.now(),
+        timestamp,
       });
 
-      monitor.lastHeartbeatSent = Date.now();
+      monitor.lastHeartbeatSent = timestamp;
+      monitor.pendingHeartbeatTimestamp = timestamp;
 
-      // Check if we've received a heartbeat recently
-      const timeSinceLastReceived = Date.now() - monitor.lastHeartbeatReceived;
+      // Check if we've received a heartbeat recently (using adaptive timeout)
+      const timeSinceLastReceived = timestamp - monitor.lastHeartbeatReceived;
       
-      if (timeSinceLastReceived > HEARTBEAT_TIMEOUT) {
+      if (timeSinceLastReceived > monitor.adaptiveTimeout) {
         monitor.missedHeartbeats++;
         
         // Check if connection should be considered stale
         if (monitor.missedHeartbeats >= MAX_MISSED_HEARTBEATS && monitor.isConnected) {
           monitor.isConnected = false;
-          logger.warn(`[Heartbeat] Connection appears stale for room ${roomId} (${monitor.missedHeartbeats} missed heartbeats)`);
+          logger.warn(`[Heartbeat] Connection appears stale for room ${roomId} (${monitor.missedHeartbeats} missed, timeout=${monitor.adaptiveTimeout}ms)`);
           notifyHeartbeatLost();
           
           if (this.onConnectionLost) {
@@ -150,6 +192,16 @@ export class HeartbeatMonitor {
     } catch (error) {
       logger.error(`[Heartbeat] Failed to send heartbeat for room ${roomId}:`, error);
     }
+  }
+
+  /**
+   * Get current measured RTT for a room
+   * @param {string} roomId
+   * @returns {number} average RTT in ms, or 0 if not yet measured
+   */
+  getRtt(roomId) {
+    const monitor = this.activeMonitors.get(roomId);
+    return monitor?.averageRtt || 0;
   }
 
   /**
@@ -165,6 +217,7 @@ export class HeartbeatMonitor {
         monitoring: false,
         connected: false,
         missedHeartbeats: 0,
+        rtt: 0,
       };
     }
 
@@ -175,6 +228,8 @@ export class HeartbeatMonitor {
       lastHeartbeatSent: monitor.lastHeartbeatSent,
       lastHeartbeatReceived: monitor.lastHeartbeatReceived,
       timeSinceLastReceived: Date.now() - monitor.lastHeartbeatReceived,
+      rtt: monitor.averageRtt,
+      adaptiveTimeout: monitor.adaptiveTimeout,
     };
   }
 

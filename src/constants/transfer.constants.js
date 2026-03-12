@@ -65,13 +65,14 @@ export function resetUserSettings() {
 const _user = loadUserSettings();
 
 /**
- * NETWORK_CHUNK_SIZE: 16KB
+ * NETWORK_CHUNK_SIZE: 64KB (desktop) or 16KB (mobile)
  * 
  * Used for WebRTC DataChannel transmission.
- * Limited by browser DataChannel message size constraints.
- * Smaller chunks enable better real-time progress updates and adaptive bandwidth management.
+ * Uses desktop chunk size by default; mobile detection applies in getTransferReliabilityProfile().
  */
-export const NETWORK_CHUNK_SIZE = _user.mobileChunkSizeKB * 1024;
+export const NETWORK_CHUNK_SIZE = isConstrainedMobileEnvironment()
+  ? _user.mobileChunkSizeKB * 1024
+  : _user.chunkSizeKB * 1024;
 
 /**
  * STORAGE_CHUNK_SIZE: 64KB
@@ -90,9 +91,9 @@ export const STORAGE_CHUNK_SIZE = _user.chunkSizeKB * 1024;
  * - Slow connection: decreases toward MIN_CHUNK_SIZE
  * - Default: INITIAL_CHUNK_SIZE
  */
-export const INITIAL_CHUNK_SIZE = 16 * 1024; // 16KB - starting size
-export const MAX_CHUNK_SIZE = 64 * 1024;     // 64KB - ceiling for good connections
-export const MIN_CHUNK_SIZE = 8 * 1024;      // 8KB - floor for poor connections
+export const INITIAL_CHUNK_SIZE = 64 * 1024; // 64KB - starting size (increased for modern networks)
+export const MAX_CHUNK_SIZE = 256 * 1024;    // 256KB - ceiling for fast connections
+export const MIN_CHUNK_SIZE = 16 * 1024;     // 16KB - floor for poor connections
 
 /**
  * Speed Thresholds for Adaptive Chunking
@@ -129,24 +130,24 @@ export const INITIAL_CHANNELS = 1;
 
 /**
  * Channel scaling thresholds.
- * CHANNEL_SCALE_UP_THRESHOLD: sustained throughput above this triggers adding a channel (~500 KB/s)
- * CHANNEL_SCALE_DOWN_THRESHOLD: sustained throughput below this triggers removing a channel (~100 KB/s)
+ * CHANNEL_SCALE_UP_THRESHOLD: sustained throughput above this triggers adding a channel (~2 MB/s)
+ * CHANNEL_SCALE_DOWN_THRESHOLD: sustained throughput below this triggers removing a channel (~200 KB/s)
  * CHANNEL_SCALE_INTERVAL: how often (ms) to evaluate scaling decisions
  * CHANNEL_SCALE_SUSTAIN_COUNT: how many consecutive intervals the threshold must be sustained
  */
-export const CHANNEL_SCALE_UP_THRESHOLD = _user.scaleUpThresholdKBs * 1024;            // user-configurable
-export const CHANNEL_SCALE_DOWN_THRESHOLD = 100 * 1024;          // 100 KB/s
+export const CHANNEL_SCALE_UP_THRESHOLD = Math.max(_user.scaleUpThresholdKBs * 1024, 2 * 1024 * 1024); // minimum 2 MB/s
+export const CHANNEL_SCALE_DOWN_THRESHOLD = 200 * 1024;          // 200 KB/s
 export const CHANNEL_SCALE_INTERVAL = _user.scaleIntervalMs;                      // user-configurable
-export const CHANNEL_SCALE_SUSTAIN_COUNT = 2;                    // consecutive intervals
+export const CHANNEL_SCALE_SUSTAIN_COUNT = 1;                    // single interval (faster response)
 
 /** Prefix for data channel labels: file-transfer-0, file-transfer-1, etc. */
 export const CHANNEL_LABEL_PREFIX = 'file-transfer-';
 
 /** Low watermark for per-channel bufferedAmount before sending more data */
-export const CHANNEL_BUFFER_LOW_WATERMARK = 64 * 1024;  // 64KB
+export const CHANNEL_BUFFER_LOW_WATERMARK = 128 * 1024;  // 128KB (increased for throughput)
 
 /** High watermark — pause sending on a channel when bufferedAmount exceeds this */
-export const CHANNEL_BUFFER_HIGH_WATERMARK = 256 * 1024; // 256KB
+export const CHANNEL_BUFFER_HIGH_WATERMARK = 512 * 1024; // 512KB (increased for high-latency)
 
 /**
  * Mobile/constrained-network reliability profile.
@@ -157,6 +158,8 @@ export const MOBILE_MIN_PARALLEL_WORKERS = 2;
 export const MOBILE_CHANNEL_SCALE_INTERVAL = _user.mobileScaleIntervalMs;
 export const MOBILE_CHANNEL_BUFFER_LOW_WATERMARK = _user.mobileBufferWatermarkKB * 1024;
 export const DESKTOP_CHANNEL_BUFFER_LOW_WATERMARK = _user.bufferWatermarkKB * 1024;
+
+// ── Hoisted mobile detection (needed before NETWORK_CHUNK_SIZE) ──
 
 /**
  * Detect likely mobile/constrained environment.
@@ -199,6 +202,38 @@ export function getTransferReliabilityProfile() {
     channelBufferLowWatermark: constrained
       ? MOBILE_CHANNEL_BUFFER_LOW_WATERMARK
       : DESKTOP_CHANNEL_BUFFER_LOW_WATERMARK,
+    chunkSize: constrained ? (_user.mobileChunkSizeKB * 1024) : STORAGE_CHUNK_SIZE,
+  };
+}
+
+/**
+ * Build a serializable transfer config for exchange with the remote peer.
+ * Both peers send their config; the negotiated config uses conservative (minimum) values.
+ */
+export function getLocalTransferConfig() {
+  const profile = getTransferReliabilityProfile();
+  return {
+    chunkSize: profile.chunkSize,
+    maxChannels: profile.maxChannels,
+    bufferWatermark: profile.channelBufferLowWatermark,
+    constrained: profile.constrained,
+  };
+}
+
+/**
+ * Negotiate a shared config from local and remote configs.
+ * Uses the more conservative (smaller) values so both peers can handle the load.
+ *
+ * @param {Object} localConfig  - from getLocalTransferConfig()
+ * @param {Object} remoteConfig - received from peer
+ * @returns {Object} agreed config
+ */
+export function negotiateTransferConfig(localConfig, remoteConfig) {
+  return {
+    chunkSize: Math.min(localConfig.chunkSize, remoteConfig.chunkSize),
+    maxChannels: Math.min(localConfig.maxChannels, remoteConfig.maxChannels),
+    bufferWatermark: Math.min(localConfig.bufferWatermark, remoteConfig.bufferWatermark),
+    constrained: localConfig.constrained || remoteConfig.constrained,
   };
 }
 

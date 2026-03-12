@@ -18,6 +18,7 @@ import { progressTracker } from '../../../transfer/shared/ProgressTracker.js';
 import { useTransferStore } from '../../../stores/transferStore.js';
 import { formatBytes } from '../../../lib/formatters.js';
 import { STORAGE_CHUNK_SIZE } from '../../../constants/transfer.constants.js';
+import { heartbeatMonitor } from '../../../utils/heartbeatMonitor.js';
 import logger from '../../../utils/logger.js';
 
 /**
@@ -85,6 +86,61 @@ export function useFileTransfer(
       }
     };
   }, []);
+
+  // Auto-pause active transfers when heartbeat detects connection loss
+  useEffect(() => {
+    const handleConnectionLost = (lostRoomId) => {
+      if (lostRoomId !== roomId) return;
+      const transferId = transferIdRef.current;
+      if (!transferId || transferState === 'idle' || transferState === 'completed' || transferState === 'failed') return;
+      if (isPaused) return; // Already paused
+
+      logger.warn(`[FileTransfer] Connection lost, auto-pausing transfer ${transferId}`);
+      addLog('Connection lost — transfer auto-paused', 'warning');
+
+      // Pause locally without sending message (connection is down)
+      if (isHost) {
+        chunkingEngineRef.current.pause(transferId).catch(() => {});
+      } else {
+        assemblyEngineRef.current.pause?.(transferId)?.catch?.(() => {});
+      }
+      setIsPaused(true);
+      setPausedBy('connection-lost');
+      setTransferState('paused');
+    };
+
+    const handleConnectionRestored = (restoredRoomId) => {
+      if (restoredRoomId !== roomId) return;
+      if (pausedBy !== 'connection-lost') return;
+      const transferId = transferIdRef.current;
+      if (!transferId) return;
+
+      logger.log(`[FileTransfer] Connection restored, auto-resuming transfer ${transferId}`);
+      addLog('Connection restored — resuming transfer', 'success');
+
+      if (isHost) {
+        chunkingEngineRef.current.resume(transferId).catch(() => {});
+      } else {
+        assemblyEngineRef.current.resume?.(transferId)?.catch?.(() => {});
+      }
+      setIsPaused(false);
+      setPausedBy(null);
+      setTransferState('transferring');
+    };
+
+    heartbeatMonitor.onLost(handleConnectionLost);
+    heartbeatMonitor.onRestored(handleConnectionRestored);
+
+    return () => {
+      // Only clear if the callbacks are still ours
+      if (heartbeatMonitor.onConnectionLost === handleConnectionLost) {
+        heartbeatMonitor.onConnectionLost = null;
+      }
+      if (heartbeatMonitor.onConnectionRestored === handleConnectionRestored) {
+        heartbeatMonitor.onConnectionRestored = null;
+      }
+    };
+  }, [roomId, isHost, transferState, isPaused, pausedBy, addLog]);
 
   /**
    * Compute a deterministic file fingerprint used by resume protocol.
@@ -950,6 +1006,11 @@ export function useFileTransfer(
     setPausedBy(null);
   }, []);
 
+  // Apply negotiated config to the chunking engine before a transfer starts
+  const applyNegotiatedConfig = useCallback((config) => {
+    chunkingEngineRef.current.applyNegotiatedConfig(config);
+  }, []);
+
   return {
     // State
     transferState,
@@ -966,6 +1027,7 @@ export function useFileTransfer(
     startTransfer,
     initializeResume,
     sendFileChunks,
+    applyNegotiatedConfig,
     handleRetransmitRequest,
     
     // Receiving

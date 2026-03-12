@@ -12,6 +12,7 @@
 import { useEffect, useCallback, useRef } from 'react';
 import { MESSAGE_TYPE } from '../../../constants/messages.constants.js';
 import { getChannelPool } from '../../../utils/p2pManager.js';
+import { getLocalTransferConfig, negotiateTransferConfig } from '../../../constants/transfer.constants.js';
 import {
   deserializeBitmap,
   getFirstMissingChunk,
@@ -80,6 +81,7 @@ export function useMessages(
     handleRemotePause,
     handleRemoteResume,
     handleRemoteCancel,
+    applyNegotiatedConfig,
   } = transfer;
 
   const {
@@ -102,6 +104,10 @@ export function useMessages(
   const pendingBinaryQueueRef = useRef([]);
   /** Track whether we're in a multi-file transfer */
   const isMultiFileRef = useRef(false);
+  /** Track file indices that have errored, to stop processing further chunks */
+  const failedFilesRef = useRef(new Set());
+  // Negotiated transfer config between peers
+  const negotiatedConfigRef = useRef(null);
   /** Per-channel metadata queues for correct binary↔metadata matching in multi-channel mode */
   const perChannelMetaRef = useRef(new Map());
   /** Per-channel pending binary queues (for chunks arriving before metadata) */
@@ -183,12 +189,18 @@ export function useMessages(
       const meta = queue?.length > 0 ? queue.shift() : null;
       
       if (meta) {
+        // Skip chunks for files that already have a write error
+        if (failedFilesRef.current.has(meta.fileIndex)) {
+          return;
+        }
         // Fire-and-forget: DON'T await the disk write.
         // WriteQueue handles ordering and sequential writes internally.
         // Awaiting here serialized ALL chunk processing across ALL channels,
         // which was the #1 receiver-side throughput bottleneck.
         handleMultiBinaryChunk(data, meta.fileIndex, meta).catch(err => {
           logger.error(`[Room] Chunk write error file=${meta.fileIndex} chunk=${meta.chunkIndex}:`, err);
+          // Mark this file as failed to stop processing more chunks for it
+          failedFilesRef.current.add(meta.fileIndex);
         });
       } else {
         // No metadata yet — this should rarely happen due to message serialization,
@@ -233,6 +245,8 @@ export function useMessages(
       switch (msg.type) {
         case 'handshake':
           await handleHandshake(msg);
+          // Send local transfer config for negotiation
+          sendJSON({ type: MESSAGE_TYPE.CONFIG_EXCHANGE, config: getLocalTransferConfig() });
           if (pendingResumeRequestRef.current && peerSessionToken?.current) {
             const pendingRequest = pendingResumeRequestRef.current;
             dispatchResumeRequest(pendingRequest, { fromQueue: true });
@@ -245,6 +259,7 @@ export function useMessages(
           // Clear per-channel metadata & pending binary queues for new transfer
           perChannelMetaRef.current.clear();
           perChannelPendingBinaryRef.current.clear();
+          failedFilesRef.current.clear();
           await handleMultiFileManifest(msg);
           break;
 
@@ -302,6 +317,10 @@ export function useMessages(
             // Signal the MultiFileTransferManager to start sending data
             handleMultiReceiverReady();
           } else {
+            // Apply negotiated transfer config before starting
+            if (applyNegotiatedConfig && negotiatedConfigRef.current) {
+              applyNegotiatedConfig(negotiatedConfigRef.current);
+            }
             await sendFileChunks();
           }
           break;
@@ -385,8 +404,8 @@ export function useMessages(
 
         // ─── Heartbeat ────────────────────────────────────────
         case MESSAGE_TYPE.HEARTBEAT:
-          // Respond to heartbeat
-          sendJSON({ type: MESSAGE_TYPE.HEARTBEAT_ACK, timestamp: Date.now() });
+          // Respond with ACK that echoes the original timestamp for RTT measurement
+          sendJSON({ type: MESSAGE_TYPE.HEARTBEAT_ACK, timestamp: Date.now(), originalTimestamp: msg.timestamp });
           // Record that we received a heartbeat from peer
           if (roomId) {
             heartbeatMonitor.recordHeartbeat(roomId);
@@ -394,11 +413,28 @@ export function useMessages(
           break;
 
         case MESSAGE_TYPE.HEARTBEAT_ACK:
-          // Heartbeat acknowledged - record successful heartbeat for monitor
+          // Heartbeat acknowledged - pass original timestamp for RTT calculation
           if (roomId) {
-            heartbeatMonitor.recordHeartbeat(roomId);
+            heartbeatMonitor.recordHeartbeat(roomId, msg.originalTimestamp);
           }
           break;
+
+        // ─── Config negotiation ──────────────────────────────
+        case MESSAGE_TYPE.CONFIG_EXCHANGE: {
+          const localConfig = getLocalTransferConfig();
+          const agreed = negotiateTransferConfig(localConfig, msg.config);
+          negotiatedConfigRef.current = agreed;
+          sendJSON({ type: MESSAGE_TYPE.CONFIG_ACK, config: agreed });
+          logger.log(`[Room] Config negotiated: chunk=${agreed.chunkSize / 1024}KB, channels=${agreed.maxChannels}, constrained=${agreed.constrained}`);
+          addLog(`Synced config: ${agreed.chunkSize / 1024}KB chunks, ${agreed.maxChannels} channels`, 'success');
+          break;
+        }
+
+        case MESSAGE_TYPE.CONFIG_ACK: {
+          negotiatedConfigRef.current = msg.config;
+          logger.log(`[Room] Config acknowledged: chunk=${msg.config.chunkSize / 1024}KB, channels=${msg.config.maxChannels}`);
+          break;
+        }
 
         // ─── Resume protocol ─────────────────────────────────
         case MESSAGE_TYPE.RESUME_TRANSFER: {
@@ -583,6 +619,7 @@ export function useMessages(
   }, [
     handleHandshake,
     sendFileChunks,
+    applyNegotiatedConfig,
     initializeReceive,
     handleChunkData,
     completeReceive,
@@ -697,5 +734,6 @@ export function useMessages(
   return {
     handleMessage,
     setMultiFileMode,
+    negotiatedConfigRef,
   };
 }
