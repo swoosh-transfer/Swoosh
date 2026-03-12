@@ -52,22 +52,6 @@ function reportError(error, context = {}) {
     // Example for LogRocket:
     // import LogRocket from 'logrocket';
     // LogRocket.captureException(error);
-    
-    // Fallback: Send to analytics endpoint (optional)
-    try {
-      navigator.sendBeacon?.(
-        '/api/errors',
-        JSON.stringify({
-          timestamp: new Date().toISOString(),
-          message: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
-          context,
-          userAgent: navigator.userAgent,
-        })
-      );
-    } catch (err) {
-      // Silently fail if reporting fails
-    }
   }
 }
 

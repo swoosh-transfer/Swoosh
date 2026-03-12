@@ -283,8 +283,13 @@ export class AssemblyEngine {
    */
   async _calculateChecksum(data) {
     const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    // Base64 encode to match ChunkingEngine's format
+    const bytes = new Uint8Array(hashBuffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
   }
 
   /**

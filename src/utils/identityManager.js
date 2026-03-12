@@ -36,7 +36,9 @@ export function getLocalUUID(roomId) {
   });
   
   // Fresh tab detected: Clear stale sessions (older than 24h)
-  clearStaleSessions(MAX_SESSION_AGE_MS);
+  clearStaleSessions(MAX_SESSION_AGE_MS).catch((err) => {
+    logger.warn('[Identity] Failed to clear stale sessions:', err);
+  });
   
   logger.log(`[Identity] Generated new UUID for room ${roomId.slice(0, 8)}...`);
   return uuid;

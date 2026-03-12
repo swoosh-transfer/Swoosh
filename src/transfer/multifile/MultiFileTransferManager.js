@@ -371,8 +371,22 @@ export class MultiFileTransferManager {
               throw new Error(`Channel ${chIdx} closed during metadata send`);
             }
 
-            // Send binary — use the Uint8Array directly (avoid copying via .buffer.slice)
-            const binarySent = this._pool.send(chIdx, binaryData);
+            // Prepend 8-byte header [fileIndex(4B LE), chunkIndex(4B LE)] to binary
+            // payload so the receiver can match binary↔metadata by content instead
+            // of FIFO order. Required because data channels use ordered:false to
+            // avoid SCTP head-of-line blocking, which means messages on the same
+            // channel can arrive out of order.
+            const header = new Uint8Array(8);
+            const hv = new DataView(header.buffer);
+            hv.setUint32(0, fileIndex, true);
+            hv.setUint32(4, metadata.chunkIndex, true);
+            const src = binaryData instanceof Uint8Array ? binaryData : new Uint8Array(binaryData);
+            const tagged = new Uint8Array(8 + src.byteLength);
+            tagged.set(header, 0);
+            tagged.set(src, 8);
+
+            // Send tagged binary
+            const binarySent = this._pool.send(chIdx, tagged.buffer);
             if (!binarySent) {
               throw new Error(`Channel ${chIdx} closed during binary send`);
             }
@@ -417,8 +431,11 @@ export class MultiFileTransferManager {
       if (this._onFileComplete) this._onFileComplete(fileIndex);
 
       // Cleanup engine
-      engine.cleanup(transferId);
-      this._engines.delete(fileIndex);
+      try {
+        engine.cleanup(transferId);
+      } finally {
+        this._engines.delete(fileIndex);
+      }
 
     } catch (err) {
       this._queue.markFailed(fileIndex, err.message);

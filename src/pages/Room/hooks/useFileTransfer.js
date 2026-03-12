@@ -620,14 +620,14 @@ export function useFileTransfer(
 
       const result = await assemblyEngineRef.current.receiveChunk(
         transferIdRef.current,
+        data,
         {
           chunkIndex: metadata.chunkIndex,
           checksum: metadata.checksum,
           size: metadata.size,
           fileOffset: metadata.fileOffset,
           isFinal: metadata.isFinal,
-        },
-        data
+        }
       );
 
       if (!result.success) {
@@ -860,6 +860,10 @@ export function useFileTransfer(
       chunkingEngineRef.current.cleanup(transferId);
     } else {
       assemblyEngineRef.current.cancelTransfer(transferId);
+    }
+    if (progressUnsubRef.current) {
+      progressUnsubRef.current();
+      progressUnsubRef.current = null;
     }
     setTransferState('idle');
     setTransferProgress(0);

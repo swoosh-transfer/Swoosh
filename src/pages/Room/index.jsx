@@ -256,14 +256,14 @@ export default function Room() {
         addLog('Connection heartbeat restored', 'success');
       };
 
-      heartbeatMonitor.onLost(handleHeartbeatLost);
-      heartbeatMonitor.onRestored(handleHeartbeatRestored);
+      const unsubLost = heartbeatMonitor.onLost(handleHeartbeatLost);
+      const unsubRestored = heartbeatMonitor.onRestored(handleHeartbeatRestored);
       heartbeatMonitor.start(roomId, sendHeartbeatMessage);
       addLog('Connection health monitoring active', 'info');
 
       return () => {
-        heartbeatMonitor.onLost(null);
-        heartbeatMonitor.onRestored(null);
+        unsubLost();
+        unsubRestored();
         heartbeatMonitor.stop(roomId);
       };
     }

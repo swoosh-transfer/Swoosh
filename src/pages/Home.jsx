@@ -32,7 +32,15 @@ export default function Home() {
   const [stats, setStats] = useState(null);
   const [incompleteTransfers, setIncompleteTransfers] = useState([]);
   
-  const { selectedFiles, addFiles, removeFile, clearFiles, setSelectedFiles, setIsHost, setSecurityPayload, setRoomId, setResumeContext } = useRoomStore();
+  const { selectedFiles, addFiles, removeFile, clearFiles, setSelectedFiles, setIsHost, setSecurityPayload, setRoomId, setResumeContext, resetRoom, roomId: staleRoomId } = useRoomStore();
+
+  // Clear leftover room state when Home mounts (handles browser back, URL navigation, etc.
+  // without breaking React StrictMode like an unmount cleanup in Room would)
+  useEffect(() => {
+    if (staleRoomId) {
+      resetRoom();
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Settings panel state ──────────────────────────────────────────
   const [showSettings, setShowSettings] = useState(false);

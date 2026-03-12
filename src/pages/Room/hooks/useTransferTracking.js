@@ -325,6 +325,14 @@ export function useTransferTracking({
    */
   const trackTransferCancel = useCallback(async (transferId) => {
     activeTransferIdRef.current = null;
+    bitmapRef.current = null;
+    bitmapDirtyRef.current = false;
+    fileBitmapsRef.current = null;
+    fileManifestRef.current = null;
+    if (bitmapFlushTimerRef.current) {
+      clearTimeout(bitmapFlushTimerRef.current);
+      bitmapFlushTimerRef.current = null;
+    }
 
     try {
       await cleanupTransferData(transferId);

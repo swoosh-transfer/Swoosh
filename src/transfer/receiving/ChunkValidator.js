@@ -38,7 +38,7 @@ export class ChunkValidator {
    * @returns {Object} Validation result
    * @throws {ValidationError} If validation fails
    */
-  validate(transferId, chunk, totalChunks) {
+  async validate(transferId, chunk, totalChunks) {
     const { index, data, size, checksum } = chunk;
 
     // 1. Validate chunk index
@@ -94,7 +94,7 @@ export class ChunkValidator {
 
     // 5. Verify checksum if provided
     if (checksum) {
-      const actualChecksum = this._calculateChecksum(data);
+      const actualChecksum = await this._calculateChecksum(data);
       if (actualChecksum !== checksum) {
         throw new ValidationError(
           `Chunk ${index} checksum mismatch`,
@@ -207,25 +207,20 @@ export class ChunkValidator {
   }
 
   /**
-   * Calculate simple checksum for chunk data
-   * 
-   * Uses a simple hash for performance.
-   * For production, consider more robust checksums (CRC32, MD5, etc.)
+   * Calculate SHA-256 checksum (matches ChunkingEngine format)
    * 
    * @private
    * @param {ArrayBuffer} data - Chunk data
-   * @returns {string} Checksum
+   * @returns {Promise<string>} Base64-encoded SHA-256 checksum
    */
-  _calculateChecksum(data) {
-    const view = new Uint8Array(data);
-    let hash = 0;
-    
-    for (let i = 0; i < view.length; i++) {
-      hash = ((hash << 5) - hash) + view[i];
-      hash = hash & hash; // Convert to 32bit integer
+  async _calculateChecksum(data) {
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const bytes = new Uint8Array(hashBuffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) {
+      binary += String.fromCharCode(bytes[i]);
     }
-    
-    return hash.toString(36);
+    return btoa(binary);
   }
 }
 

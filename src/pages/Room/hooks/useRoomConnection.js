@@ -208,6 +208,9 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
 
     let cancelled = false;
     let guestUnsubHeartbeat = null;
+    let guestSocket = null;
+    let guestOnConnect = null;
+    let guestOnDisconnect = null;
 
     const init = async () => {
       try {
@@ -226,19 +229,23 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
 
         // Initialize socket
         const socket = initSocket();
+        guestSocket = socket;
 
-        socket.on('connect', () => {
+        guestOnConnect = () => {
           setSocketConnected(true);
           setSocketId(socket.id);
           setConnInfo(prev => ({ ...prev, socketConnected: true, socketId: socket.id }));
           addLog(`Socket connected: ${socket.id}`, 'success');
-        });
+        };
 
-        socket.on('disconnect', () => {
+        guestOnDisconnect = () => {
           setSocketConnected(false);
           setConnInfo(prev => ({ ...prev, socketConnected: false }));
           addLog('Socket disconnected', 'warning');
-        });
+        };
+
+        socket.on('connect', guestOnConnect);
+        socket.on('disconnect', guestOnDisconnect);
 
         // Wait for connection before joining
         await waitForConnection();
@@ -394,6 +401,10 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     return () => {
       cancelled = true;
       if (guestUnsubHeartbeat) guestUnsubHeartbeat();
+      if (guestSocket) {
+        if (guestOnConnect) guestSocket.off('connect', guestOnConnect);
+        if (guestOnDisconnect) guestSocket.off('disconnect', guestOnDisconnect);
+      }
     };
   }, [roomId, isHost, setSecurityPayload, setRoomId, addLog]);
 

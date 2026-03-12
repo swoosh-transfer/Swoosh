@@ -63,6 +63,7 @@ export class BandwidthMonitor {
     this._history = [];
     this._sustainUpCount = 0;
     this._sustainDownCount = 0;
+    this._lastTickTime = null;
   }
 
   // ─── Recording ────────────────────────────────────────────────────

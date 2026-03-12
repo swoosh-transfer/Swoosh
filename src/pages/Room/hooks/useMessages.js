@@ -182,35 +182,52 @@ export function useMessages(
    */
   const handleChunkData = useCallback(async (data, channelIndex = 0) => {
     if (isMultiFileRef.current) {
-      // Multi-file: match binary to metadata from the SAME channel.
-      // This prevents cross-channel interleaving from corrupting file data.
-      // Since messages are serialized, metadata should always be in the queue when binary arrives.
-      const queue = perChannelMetaRef.current.get(channelIndex);
-      const meta = queue?.length > 0 ? queue.shift() : null;
-      
-      if (meta) {
-        // Skip chunks for files that already have a write error
-        if (failedFilesRef.current.has(meta.fileIndex)) {
-          return;
-        }
-        // Fire-and-forget: DON'T await the disk write.
-        // WriteQueue handles ordering and sequential writes internally.
-        // Awaiting here serialized ALL chunk processing across ALL channels,
-        // which was the #1 receiver-side throughput bottleneck.
-        handleMultiBinaryChunk(data, meta.fileIndex, meta).catch(err => {
-          logger.error(`[Room] Chunk write error file=${meta.fileIndex} chunk=${meta.chunkIndex}:`, err);
-          // Mark this file as failed to stop processing more chunks for it
-          failedFilesRef.current.add(meta.fileIndex);
-        });
-      } else {
-        // No metadata yet — this should rarely happen due to message serialization,
-        // but queue the binary just in case of out-of-order network delivery
-        if (!perChannelPendingBinaryRef.current.has(channelIndex)) {
-          perChannelPendingBinaryRef.current.set(channelIndex, []);
-        }
-        perChannelPendingBinaryRef.current.get(channelIndex).push(data);
-        logger.warn(`[Room] Binary arrived before metadata on channel ${channelIndex}, queued`);
+      // Read 8-byte header [fileIndex(4B LE), chunkIndex(4B LE)] from binary
+      // payload for content-based metadata matching. Required because data
+      // channels use ordered:false, so FIFO matching would pair wrong chunks.
+      if (data.byteLength < 8) {
+        logger.warn('[Room] Binary chunk too small for header, dropping');
+        return;
       }
+      const hv = new DataView(data.buffer, data.byteOffset, 8);
+      const headerFileIndex = hv.getUint32(0, true);
+      const headerChunkIndex = hv.getUint32(4, true);
+      const actualData = data.subarray(8);
+
+      if (failedFilesRef.current.has(headerFileIndex)) {
+        return;
+      }
+
+      // Find matching metadata by fileIndex + chunkIndex (content-based, not FIFO)
+      let meta = null;
+      const queue = perChannelMetaRef.current.get(channelIndex);
+      if (queue) {
+        const idx = queue.findIndex(m => m.fileIndex === headerFileIndex && m.chunkIndex === headerChunkIndex);
+        if (idx >= 0) {
+          meta = queue.splice(idx, 1)[0];
+        }
+      }
+      // Fallback: search all channel queues (metadata may arrive on control channel)
+      if (!meta) {
+        for (const [, q] of perChannelMetaRef.current) {
+          const idx = q.findIndex(m => m.fileIndex === headerFileIndex && m.chunkIndex === headerChunkIndex);
+          if (idx >= 0) {
+            meta = q.splice(idx, 1)[0];
+            break;
+          }
+        }
+      }
+      // If metadata hasn't arrived yet, use header info as minimal metadata
+      if (!meta) {
+        meta = { fileIndex: headerFileIndex, chunkIndex: headerChunkIndex };
+      }
+
+      // Fire-and-forget: DON'T await the disk write.
+      // WriteQueue handles ordering and sequential writes internally.
+      handleMultiBinaryChunk(actualData, headerFileIndex, meta).catch(err => {
+        logger.error(`[Room] Chunk write error file=${headerFileIndex} chunk=${headerChunkIndex}:`, err);
+        failedFilesRef.current.add(headerFileIndex);
+      });
       return;
     }
 
@@ -282,23 +299,15 @@ export function useMessages(
 
         case 'chunk-metadata':
           if (isMultiFileRef.current) {
-            // Store in per-channel queue so the next binary on this channel
-            // matches the correct metadata (prevents cross-channel corruption)
+            // Store in per-channel queue for content-based binary matching.
+            // Binary payloads carry an 8-byte header with fileIndex+chunkIndex,
+            // so the receiver matches by content — no FIFO drain needed here.
             const chIdx = channelIndex;
             if (!perChannelMetaRef.current.has(chIdx)) {
               perChannelMetaRef.current.set(chIdx, []);
             }
             perChannelMetaRef.current.get(chIdx).push(msg);
             handleMultiChunkMetadata(msg);
-            
-            // Drain any pending binaries on this channel that were waiting for metadata
-            const pendingQueue = perChannelPendingBinaryRef.current.get(chIdx);
-            if (pendingQueue?.length > 0) {
-              let nextBinary;
-              while ((nextBinary = pendingQueue.shift()) !== undefined) {
-                await handleChunkData(nextBinary, chIdx);
-              }
-            }
           } else {
             chunkMetaQueueRef.current.push(msg);
             // Drain any pending binaries waiting for metadata

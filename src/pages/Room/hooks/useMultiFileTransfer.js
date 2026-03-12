@@ -123,6 +123,9 @@ export function useMultiFileTransfer({
       addLog(`Transfer error: ${err.message}`, 'error');
     };
 
+    if (managerRef.current) {
+      managerRef.current.destroy();
+    }
     managerRef.current = manager;
     setMultiTransferState('sending');
 
@@ -136,7 +139,11 @@ export function useMultiFileTransfer({
     const wasCompleted = receiverRef.current != null;
     if (wasCompleted) {
       // Destroy old receiver before creating new one
-      receiverRef.current?.destroy();
+      try {
+        receiverRef.current?.destroy();
+      } catch (e) {
+        logger.warn('[MultiFileTransfer] Error destroying old receiver:', e);
+      }
       receiverRef.current = null;
       addLog('📦 Sender wants to send more files!', 'info');
     }
