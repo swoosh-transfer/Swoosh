@@ -37,8 +37,8 @@ const RTT_TIMEOUT_MULTIPLIER = 5;
 export class HeartbeatMonitor {
   constructor() {
     this.activeMonitors = new Map(); // roomId -> monitor state
-    this.onConnectionLost = null; // Callback for connection loss
-    this.onConnectionRestored = null; // Callback for connection restoration
+    this._onLostCallbacks = new Set();
+    this._onRestoredCallbacks = new Set();
   }
 
   /**
@@ -144,8 +144,8 @@ export class HeartbeatMonitor {
     if (wasDisconnected) {
       logger.log(`[Heartbeat] Connection restored for room ${roomId}`);
       notifyHeartbeatRecovered();
-      if (this.onConnectionRestored) {
-        this.onConnectionRestored(roomId);
+      for (const cb of this._onRestoredCallbacks) {
+        try { cb(roomId); } catch (e) { logger.error('[Heartbeat] onRestored callback error:', e); }
       }
     }
   }
@@ -184,8 +184,8 @@ export class HeartbeatMonitor {
           logger.warn(`[Heartbeat] Connection appears stale for room ${roomId} (${monitor.missedHeartbeats} missed, timeout=${monitor.adaptiveTimeout}ms)`);
           notifyHeartbeatLost();
           
-          if (this.onConnectionLost) {
-            this.onConnectionLost(roomId);
+          for (const cb of this._onLostCallbacks) {
+            try { cb(roomId); } catch (e) { logger.error('[Heartbeat] onLost callback error:', e); }
           }
         }
       }
@@ -245,21 +245,25 @@ export class HeartbeatMonitor {
   }
 
   /**
-   * Set callback for connection loss events
+   * Subscribe to connection loss events.
    * 
    * @param {Function} callback - Called with (roomId) when connection is lost
+   * @returns {Function} Unsubscribe function
    */
   onLost(callback) {
-    this.onConnectionLost = callback;
+    this._onLostCallbacks.add(callback);
+    return () => this._onLostCallbacks.delete(callback);
   }
 
   /**
-   * Set callback for connection restoration events
+   * Subscribe to connection restoration events.
    * 
    * @param {Function} callback - Called with (roomId) when connection is restored
+   * @returns {Function} Unsubscribe function
    */
   onRestored(callback) {
-    this.onConnectionRestored = callback;
+    this._onRestoredCallbacks.add(callback);
+    return () => this._onRestoredCallbacks.delete(callback);
   }
 
   /**

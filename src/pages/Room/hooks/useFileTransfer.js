@@ -128,17 +128,12 @@ export function useFileTransfer(
       setTransferState('transferring');
     };
 
-    heartbeatMonitor.onLost(handleConnectionLost);
-    heartbeatMonitor.onRestored(handleConnectionRestored);
+    const unsubLost = heartbeatMonitor.onLost(handleConnectionLost);
+    const unsubRestored = heartbeatMonitor.onRestored(handleConnectionRestored);
 
     return () => {
-      // Only clear if the callbacks are still ours
-      if (heartbeatMonitor.onConnectionLost === handleConnectionLost) {
-        heartbeatMonitor.onConnectionLost = null;
-      }
-      if (heartbeatMonitor.onConnectionRestored === handleConnectionRestored) {
-        heartbeatMonitor.onConnectionRestored = null;
-      }
+      unsubLost();
+      unsubRestored();
     };
   }, [roomId, isHost, transferState, isPaused, pausedBy, addLog]);
 

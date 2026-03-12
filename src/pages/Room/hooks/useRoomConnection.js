@@ -207,6 +207,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     if (webrtcSetupRef.current) return;
 
     let cancelled = false;
+    let guestUnsubHeartbeat = null;
 
     const init = async () => {
       try {
@@ -323,12 +324,13 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
         createGuestPeerConnection();
 
         // Wire heartbeat loss to ICE restart
-        heartbeatMonitor.onLost((lostRoomId) => {
+        const unsubHeartbeatLost = heartbeatMonitor.onLost((lostRoomId) => {
           if (lostRoomId === roomId) {
             logger.warn('[Room] Heartbeat lost, triggering ICE restart...');
             requestIceRestart(roomId).catch(() => {});
           }
         });
+        guestUnsubHeartbeat = unsubHeartbeatLost;
 
         setupSignalingListeners({
           onUserJoined: async (data) => {
@@ -389,7 +391,10 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     };
 
     init();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (guestUnsubHeartbeat) guestUnsubHeartbeat();
+    };
   }, [roomId, isHost, setSecurityPayload, setRoomId, addLog]);
 
   // WebRTC setup - wait until room is joined
@@ -511,7 +516,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     createFreshPeerConnection();
 
     // Wire heartbeat loss to ICE restart
-    heartbeatMonitor.onLost((lostRoomId) => {
+    const unsubHeartbeatLost = heartbeatMonitor.onLost((lostRoomId) => {
       if (lostRoomId === roomId) {
         logger.warn('[Room] Heartbeat lost, triggering ICE restart...');
         requestIceRestart(roomId).catch(() => {});
@@ -582,6 +587,7 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     
     return () => {
       offReconnect(handleReconnection);
+      unsubHeartbeatLost();
     };
     // Functions (onDataChannelReady) are captured in closure and shouldn't be dependencies
     // eslint-disable-next-line react-hooks/exhaustive-deps

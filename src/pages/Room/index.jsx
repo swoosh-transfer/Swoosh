@@ -41,6 +41,7 @@ export default function Room() {
   const { isHost, securityPayload, selectedFiles, addFiles, removeFile, clearFiles, resetRoom, error: roomError } = useRoomStore();
   const [showQRCode, setShowQRCode] = useState(false);
   const pendingResumeRef = useRef(null); // No longer used — file re-selection removed
+  const resumeFallbackFiredRef = useRef(false); // Prevent repeated auto-start on resume failure
 
   // Derive selectedFile from selectedFiles (first file or null)
   const selectedFile = selectedFiles.length > 0 ? selectedFiles[0].file : null;
@@ -184,6 +185,10 @@ export default function Room() {
   // This effect detects when resume fails and triggers a fresh start automatically
   useEffect(() => {
     if (resumeFlow.resumeState === 'timeout' || resumeFlow.resumeState === 'rejected') {
+      // Prevent repeated auto-starts if this effect fires multiple times
+      if (resumeFallbackFiredRef.current) return;
+      resumeFallbackFiredRef.current = true;
+
       // Resume failed — fall back to fresh transfer start
       addLog('Auto-starting fresh transfer after resume failed', 'info');
       
@@ -206,6 +211,13 @@ export default function Room() {
       }
     }
   }, [resumeFlow.resumeState, isMultiFile, isHost, selectedFiles, selectedFile, addLog, startTransfer, multiTransfer, setMultiFileMode]);
+
+  // Reset resume fallback guard when resume state resets to idle
+  useEffect(() => {
+    if (resumeFlow.resumeState === 'idle') {
+      resumeFallbackFiredRef.current = false;
+    }
+  }, [resumeFlow.resumeState]);
 
   // ============ HEARTBEAT & NOTIFICATIONS ============
   // Initialize notifications on mount and set up heartbeat monitor for connection health

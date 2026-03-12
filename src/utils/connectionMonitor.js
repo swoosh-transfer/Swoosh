@@ -29,7 +29,7 @@ export function startHealthMonitoring(pc, onStats) {
   if (monitorInterval) clearInterval(monitorInterval);
 
   monitorInterval = setInterval(async () => {
-    if (!pc || pc.connectionState !== 'connected') return;
+    if (!pc || pc.connectionState === 'closed' || pc.connectionState !== 'connected') return;
 
     try {
       const stats = await pc.getStats();

@@ -82,6 +82,9 @@ export class MultiFileTransferManager {
     this._receiverReadyResolve = null;
     this._receiverReady = false;
 
+    /** Channels currently being scaled down — excluded from getAvailableChannel() */
+    this._pendingRemoval = new Set();
+
     /** Callbacks */
     this._onProgress = null;      // (progressObj) => void
     this._onFileStart = null;     // (fileIndex) => void
@@ -298,6 +301,16 @@ export class MultiFileTransferManager {
 
           // Pick best data channel (never use channel-0 for chunks)
           let chIdx = this._pool.getAvailableChannel();
+
+          // Skip channels pending removal by auto-scaler
+          if (chIdx !== null && this._pendingRemoval.has(chIdx)) {
+            chIdx = null;
+            // Try once more to get a different channel
+            const candidate = this._pool.getAvailableChannel();
+            if (candidate !== null && !this._pendingRemoval.has(candidate)) {
+              chIdx = candidate;
+            }
+          }
           
           // Wait for data channels to open if needed
           let retries = 0;
@@ -319,7 +332,7 @@ export class MultiFileTransferManager {
 
           // Set lock before sending metadata+binary pair
           let releaseLock;
-          const lockPromise = new Promise(resolve => { releaseLock = resolve; });
+          let lockPromise = new Promise(resolve => { releaseLock = resolve; });
           this._channelLocks.set(chIdx, lockPromise);
 
           let bytesSent = 0;
@@ -327,6 +340,24 @@ export class MultiFileTransferManager {
             // Only wait for drain once — before the binary payload.
             // Metadata JSON is tiny (~200 bytes), no need to wait before it.
             await this._pool.waitForDrain(chIdx);
+
+            // Re-verify channel is still open after drain (may have closed while waiting)
+            const ch = this._pool.getChannel(chIdx);
+            if (!ch || ch.readyState !== 'open') {
+              // Channel closed while waiting — try another one
+              const altIdx = this._pool.getAvailableChannel();
+              if (altIdx === null) {
+                throw new Error(`Channel ${chIdx} closed and no alternatives available`);
+              }
+              // Release old lock, re-lock on new channel
+              this._channelLocks.delete(chIdx);
+              releaseLock();
+              chIdx = altIdx;
+              releaseLock = null;
+              const newLockPromise = new Promise(resolve => { releaseLock = resolve; });
+              this._channelLocks.set(chIdx, newLockPromise);
+              lockPromise = newLockPromise;
+            }
 
             // Send chunk metadata with fileIndex
             const metaSent = this._pool.send(chIdx, JSON.stringify({
@@ -465,11 +496,17 @@ export class MultiFileTransferManager {
           const ch = this._pool.getChannel(remove);
           // Only remove if channel has no buffered data and no active lock
           if (ch && ch.bufferedAmount === 0 && !this._channelLocks.has(remove)) {
-            // Wait for any in-flight drain before removing
-            await this._pool.waitForDrain(remove);
-            this._pool.removeChannel(remove);
-            this._addLog(`↓ Scaled to ${currentDataCount - 1} channels`, 'info');
-            logger.log(`[MultiFileTransferManager] Scaled DOWN to ${currentDataCount - 1} channels`);
+            // Mark pending removal so getAvailableChannel() won't pick it
+            this._pendingRemoval.add(remove);
+            try {
+              // Wait for any in-flight drain before removing
+              await this._pool.waitForDrain(remove);
+              this._pool.removeChannel(remove);
+              this._addLog(`↓ Scaled to ${currentDataCount - 1} channels`, 'info');
+              logger.log(`[MultiFileTransferManager] Scaled DOWN to ${currentDataCount - 1} channels`);
+            } finally {
+              this._pendingRemoval.delete(remove);
+            }
           } else {
             logger.log(`[MultiFileTransferManager] Skipping scale-down: channel ${remove} still in use`);
           }

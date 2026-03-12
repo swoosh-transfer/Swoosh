@@ -289,6 +289,40 @@ export class ChannelPool {
     return true;
   }
 
+  // ─── Recovery ──────────────────────────────────────────────────────
+
+  /**
+   * Recreate any data channels that are closed or closing.
+   * Called after ICE restart when the peer connection recovers.
+   * Only recreates channels that were previously tracked (preserves indices).
+   * @returns {number} count of channels recreated
+   */
+  recreateChannels() {
+    if (!this._pc || this._pc.signalingState === 'closed' || this._pc.connectionState === 'closed') {
+      return 0;
+    }
+
+    let recreated = 0;
+    const closedIndices = [];
+
+    for (const [idx, ch] of this._channels) {
+      if (ch.readyState === 'closed' || ch.readyState === 'closing') {
+        closedIndices.push(idx);
+      }
+    }
+
+    for (const idx of closedIndices) {
+      this._channels.delete(idx);
+      const newCh = this.addChannel(idx);
+      if (newCh) {
+        recreated++;
+        logger.log(`[ChannelPool] Recreated channel ${idx} after ICE restart`);
+      }
+    }
+
+    return recreated;
+  }
+
   // ─── Cleanup ──────────────────────────────────────────────────────
 
   /** Close and remove all channels. */

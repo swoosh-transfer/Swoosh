@@ -1,6 +1,7 @@
 import { startHealthMonitoring, stopHealthMonitoring } from './connectionMonitor';
-import { sendOffer, sendAnswer, sendIceCandidate } from './signaling.js';
+import { sendOffer, sendAnswer, sendIceCandidate, getSocket } from './signaling.js';
 import { ChannelPool } from '../transfer/multichannel/ChannelPool.js';
+import { RTC_CONFIGURATION } from '../constants/network.constants.js';
 import logger from './logger.js';
 
 let peerConnection = null;
@@ -13,15 +14,13 @@ let isPolite = false; // For perfect negotiation pattern
 let makingOffer = false; // Track if we're creating an offer
 let recoveryOfferTimer = null;
 let recoveryOfferAttempts = 0;
+let disconnectedTimer = null;
+/** Cached socket and roomId for deferred recovery (e.g., requestIceRestart) */
+let _cachedSocket = null;
+let _cachedRoomId = null;
 const MAX_RECOVERY_OFFER_ATTEMPTS = 10;
-
-const rtcConfig = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-  ],
-  iceCandidatePoolSize: 10
-};
+/** Grace period before treating 'disconnected' as a real failure (seconds) */
+const DISCONNECTED_GRACE_MS = 5000;
 
 /**
  * Set whether this peer is polite (for perfect negotiation)
@@ -85,9 +84,15 @@ export function initializePeerConnection(socket, roomId, onChannelReady, onState
     clearTimeout(recoveryOfferTimer);
     recoveryOfferTimer = null;
   }
+  if (disconnectedTimer) {
+    clearTimeout(disconnectedTimer);
+    disconnectedTimer = null;
+  }
 
-  peerConnection = new RTCPeerConnection(rtcConfig);
+  peerConnection = new RTCPeerConnection(RTC_CONFIGURATION);
   channelPool = new ChannelPool(peerConnection);
+  _cachedSocket = socket;
+  _cachedRoomId = roomId;
 
   // Send local ICE candidates to the remote peer via signaling (encrypted)
   peerConnection.onicecandidate = (event) => {
@@ -108,14 +113,60 @@ export function initializePeerConnection(socket, roomId, onChannelReady, onState
         clearTimeout(recoveryOfferTimer);
         recoveryOfferTimer = null;
       }
+      if (disconnectedTimer) {
+        clearTimeout(disconnectedTimer);
+        disconnectedTimer = null;
+      }
       startHealthMonitoring(peerConnection, onStats);
+      
+      // After ICE restart, recreate any closed data channels
+      if (channelPool) {
+        const recreated = channelPool.recreateChannels();
+        if (recreated > 0) {
+          logger.log(`[P2P] Recreated ${recreated} data channel(s) after reconnection`);
+        }
+      }
     } 
-    else if (state === 'disconnected' || state === 'failed') {
+    else if (state === 'disconnected') {
+      // Browser ICE agent often self-recovers from 'disconnected' within a few seconds.
+      // Only trigger ICE restart if it doesn't recover after a grace period.
+      if (!disconnectedTimer) {
+        disconnectedTimer = setTimeout(() => {
+          disconnectedTimer = null;
+          if (peerConnection && peerConnection.connectionState === 'disconnected') {
+            logger.warn('[P2P] Connection still disconnected after grace period, attempting ICE restart');
+            handleAutoReconnection(socket, roomId);
+          }
+        }, DISCONNECTED_GRACE_MS);
+      }
+    }
+    else if (state === 'failed') {
       stopHealthMonitoring();
+      if (disconnectedTimer) {
+        clearTimeout(disconnectedTimer);
+        disconnectedTimer = null;
+      }
       handleAutoReconnection(socket, roomId);
     }
     else if (state === 'closed') {
       stopHealthMonitoring();
+      if (disconnectedTimer) {
+        clearTimeout(disconnectedTimer);
+        disconnectedTimer = null;
+      }
+    }
+  };
+
+  // Monitor ICE connection state — fires sooner than connectionState
+  // and catches 'failed' state on some browsers that don't update connectionState
+  peerConnection.oniceconnectionstatechange = () => {
+    const iceState = peerConnection.iceConnectionState;
+    logger.log(`[P2P] ICE connection state: ${iceState}`);
+    
+    if (iceState === 'failed') {
+      // ICE failed — attempt restart immediately (connectionState may lag behind)
+      logger.warn('[P2P] ICE connection failed, attempting restart');
+      handleAutoReconnection(socket, roomId);
     }
   };
 
@@ -312,6 +363,14 @@ async function handleAutoReconnection(socket, roomId) {
   if (!peerConnection) return;
   if (peerConnection.signalingState === 'closed' || peerConnection.connectionState === 'closed') return;
 
+  // Verify socket is connected before attempting signaling
+  const activeSocket = getSocket();
+  if (!activeSocket || !activeSocket.connected) {
+    logger.warn('[P2P] ICE restart deferred — socket not connected');
+    // Socket will trigger reconnection flow when it reconnects
+    return;
+  }
+
   // Verify the control channel exists (readyState check, not just id)
   const ch0 = channelPool?.getControlChannel();
   const hasChannel = ch0 && (ch0.readyState === 'open' || ch0.readyState === 'connecting');
@@ -383,6 +442,10 @@ export function closePeerConnection() {
     clearTimeout(recoveryOfferTimer);
     recoveryOfferTimer = null;
   }
+  if (disconnectedTimer) {
+    clearTimeout(disconnectedTimer);
+    disconnectedTimer = null;
+  }
   logger.log('[P2P] Peer connection closed and cleaned up');
 }
 
@@ -403,7 +466,11 @@ export async function requestIceRestart(roomId) {
   }
 
   if (peerConnection.signalingState !== 'stable') {
-    logger.warn(`[P2P] Skipping manual ICE restart in signalingState=${peerConnection.signalingState}`);
+    logger.warn(`[P2P] Deferring manual ICE restart, signalingState=${peerConnection.signalingState}`);
+    // Schedule retry instead of silently failing
+    if (_cachedSocket) {
+      scheduleNegotiationRecovery(_cachedSocket, roomId);
+    }
     return false;
   }
 
