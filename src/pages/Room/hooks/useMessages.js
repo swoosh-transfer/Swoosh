@@ -20,6 +20,7 @@ import {
   markChunk,
   serializeBitmap,
   getMissingChunks,
+  getCompletedCount,
 } from '../../../infrastructure/database/chunkBitmap.js';
 import { updateTransfer } from '../../../infrastructure/database/transfers.repository.js';
 import logger from '../../../utils/logger.js';
@@ -50,6 +51,7 @@ import { resumeEventBus } from './resumeEventBus.js';
  * @param {string} localUuid - Local UUID
  * @param {Object} sessionToken - Ref to local session token
  * @param {Object} peerSessionToken - Ref to peer's session token
+ * @param {import('react').MutableRefObject|null} [externalNegotiatedConfigRef] - Optional shared negotiated config ref
  * @returns {Object} Message handlers
  */
 export function useMessages(
@@ -65,7 +67,8 @@ export function useMessages(
   roomId,
   localUuid,
   sessionToken,
-  peerSessionToken
+  peerSessionToken,
+  externalNegotiatedConfigRef = null
 ) {
   const {
     handleHandshake,
@@ -107,7 +110,8 @@ export function useMessages(
   /** Track file indices that have errored, to stop processing further chunks */
   const failedFilesRef = useRef(new Set());
   // Negotiated transfer config between peers
-  const negotiatedConfigRef = useRef(null);
+  const internalNegotiatedConfigRef = useRef(null);
+  const negotiatedConfigRef = externalNegotiatedConfigRef || internalNegotiatedConfigRef;
   /** Per-channel metadata queues for correct binary↔metadata matching in multi-channel mode */
   const perChannelMetaRef = useRef(new Map());
   /** Per-channel pending binary queues (for chunks arriving before metadata) */
@@ -392,7 +396,7 @@ export function useMessages(
 
             // Periodically flush sender bitmap to IndexedDB
             const lastFlush = lastSenderFlushRef.current.get(transferId) || 0;
-            const currentCount = chunkIndices.length;
+            const currentCount = getCompletedCount(senderBitmap);
             
             if (currentCount - lastFlush >= SENDER_BITMAP_FLUSH_INTERVAL) {
               try {

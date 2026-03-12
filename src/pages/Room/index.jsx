@@ -42,6 +42,7 @@ export default function Room() {
   const [showQRCode, setShowQRCode] = useState(false);
   const pendingResumeRef = useRef(null); // No longer used — file re-selection removed
   const resumeFallbackFiredRef = useRef(false); // Prevent repeated auto-start on resume failure
+  const negotiatedConfigRef = useRef(null);
 
   // Derive selectedFile from selectedFiles (first file or null)
   const selectedFile = selectedFiles.length > 0 ? selectedFiles[0].file : null;
@@ -126,6 +127,7 @@ export default function Room() {
     waitForDrain,
     addLog,
     trackChunkProgress: tracking.trackChunkProgress,
+    negotiatedConfigRef,
   });
 
   // Determine if we're in multi-file mode
@@ -152,7 +154,8 @@ export default function Room() {
     roomId,
     security.myUUID?.current,
     security.sessionToken,
-    security.peerSessionToken
+    security.peerSessionToken,
+    negotiatedConfigRef
   );
 
   // Resume Transfer (handles resume handshake when entering with resume context)

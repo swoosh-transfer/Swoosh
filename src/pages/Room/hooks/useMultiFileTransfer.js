@@ -33,6 +33,7 @@ import logger from '../../../utils/logger.js';
  * @param {Function} params.waitForDrain — wait for channel-0 drain
  * @param {Function} params.addLog
  * @param {Function} [params.trackChunkProgress] — track chunk completion in bitmap
+ * @param {import('react').MutableRefObject} [params.negotiatedConfigRef] — negotiated config ref from useMessages
  */
 export function useMultiFileTransfer({
   roomId,
@@ -44,6 +45,7 @@ export function useMultiFileTransfer({
   waitForDrain,
   addLog,
   trackChunkProgress,
+  negotiatedConfigRef,
 }) {
   // ─── State ──────────────────────────────────────────────────────
 
@@ -97,6 +99,7 @@ export function useMultiFileTransfer({
       addLog,
       trackChunkProgress,
       mode: transferMode,
+      negotiatedConfig: negotiatedConfigRef?.current || null,
     });
 
     // Wire callbacks

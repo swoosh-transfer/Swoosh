@@ -58,6 +58,17 @@ export class MultiFileTransferManager {
     /** Effective chunk size: 16KB on mobile, 64KB on desktop */
     this._chunkSize = this._profile.constrained ? NETWORK_CHUNK_SIZE : STORAGE_CHUNK_SIZE;
 
+    /** Apply negotiated config if available (peer agreement takes priority) */
+    this._negotiatedConfig = options.negotiatedConfig || null;
+    if (this._negotiatedConfig) {
+      if (this._negotiatedConfig.chunkSize) {
+        this._chunkSize = Math.min(this._chunkSize, this._negotiatedConfig.chunkSize);
+      }
+      if (this._negotiatedConfig.maxChannels) {
+        this._maxAutoChannels = Math.min(this._maxAutoChannels, this._negotiatedConfig.maxChannels);
+      }
+    }
+
     /** @type {FileQueue|null} */
     this._queue = null;
 
@@ -263,6 +274,9 @@ export class MultiFileTransferManager {
     });
 
     const engine = new ChunkingEngine();
+    if (this._negotiatedConfig) {
+      engine.applyNegotiatedConfig(this._negotiatedConfig);
+    }
     this._engines.set(fileIndex, engine);
     const transferId = `multi-${Date.now()}-${fileIndex}`;
 
