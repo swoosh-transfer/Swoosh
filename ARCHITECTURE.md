@@ -12,13 +12,14 @@ The application follows a **layered architecture** with clear separation of conc
 ├─────────────────────────────────────┤
 │   Domain/Transfer Layer              │  Transfer Engines, Protocols
 ├─────────────────────────────────────┤
-│         Utility Layer                │  Helpers, Adapters
+│    Utility / Infrastructure Layer    │  Helpers, Storage, Database, I/O
 ├─────────────────────────────────────┤
-│    Infrastructure Layer              │  Storage, Database, I/O
-├─────────────────────────────────────┤
-│      Library Layer                   │  Pure Functions
+│      Library Layer                   │  Pure Functions, Constants
 └─────────────────────────────────────┘
 ```
+
+> **Note:** Business logic orchestration (connection management, messaging, security verification)
+> lives in React hooks under `src/pages/Room/hooks/`, not in a separate services layer.
 
 ## Folder Structure
 
@@ -108,7 +109,7 @@ Core file transfer logic: chunking, assembly, validation, resumption.
 - `resumption/` - ResumableTransferManager
 - `shared/` - ProgressTracker (single source of truth)
 - `multichannel/` - ChannelPool, BandwidthMonitor
-- `multifile/` - MultiFileTransferManager, MultiFileReceiver, FileQueue
+- `multifile/` - MultiFileTransferManager, MultiFileReceiver, ZipStreamWriter, FileQueue
 - `metadata/` - fileMetadata (canonical metadata utilities)
 
 **Rules:**
@@ -130,8 +131,11 @@ Single-purpose helper modules that don't fit infrastructure or lib.
 - `p2pManager.js` - WebRTC connection setup
 - `tofuSecurity.js` - Encrypted signaling (AES-GCM key derivation)
 - `identityManager.js` - Device identity & session verification
-- `connectionMonitor.js` - Connection health monitoring
-- `bandwidthTester.js` - Network bandwidth testing
+- `connectionMonitor.js` - Connection health monitoring (RTT, packet loss, quality badge)
+- `transferNotifications.js` - Activity log events + browser notifications
+- `heartbeatMonitor.js` - WebRTC heartbeat for disconnection detection
+- `bandwidthTester.js` - Network bandwidth testing *(currently unused)*
+- `networkSpeedTest.js` - Speed measurement utilities *(currently unused)*
 - `logger.js` - Logging utility
 - `qrCode.js` - QR code generation
 
@@ -172,8 +176,13 @@ Top-level route components.
 - `Home.jsx` - Landing page
 - `Room/` - Transfer room (decomposed into hooks + components)
   - `index.jsx` - Main component (compositional)
-  - `hooks/` - Custom React hooks (useRoomConnection, useFileTransfer, etc.)
+  - `hooks/` - Custom React hooks (useRoomConnection, useFileTransfer, useMultiFileTransfer, useMessages, useSecurity, etc.)
   - `components/` - Page-specific UI components
+    - `TransferSection.jsx` - File selection, progress, completion, error states, ZIP toggle
+    - `SpeedGraph.jsx` - Canvas-based real-time throughput chart (30-second window)
+    - `TextShareSection.jsx` - Chat-style text/clipboard sharing between peers
+    - `ConnectionSection.jsx` - Connection status display *(currently unused — status rendered inline)*
+    - `SecuritySection.jsx` - Security info display *(currently unused — rendered inline)*
 
 **Rules:**
 - ✅ Composition over complexity (< 200 lines main component)
@@ -421,14 +430,16 @@ Each piece of state should have ONE owner:
 ## Performance Considerations
 
 ### Chunk Sizes
-- **Network:** 16KB (WebRTC DataChannel limit)
-- **Storage:** 64KB (optimal disk I/O)
-- **Adaptive:** 8KB-32KB based on connection speed
+- **Default chunk:** 64KB (adaptive 16KB–256KB based on throughput)
+- **Mobile default:** 64KB with 256KB buffer watermark
+- **ACK batching:** Every 50 chunks to reduce overhead
+- **Scale-up threshold:** 500KB/s throughput triggers larger chunks
 
 ### Memory Management
 - Buffer maximum 100 chunks (~6.4MB)
 - Stream large files (don't load all into memory)
 - Clean up IndexedDB after successful transfers
+- ZIP mode: files written sequentially to avoid buffering entire archive
 
 ### Progress Updates
 - Throttle UI updates (every 100ms)
@@ -439,10 +450,11 @@ Each piece of state should have ONE owner:
 
 ## Architecture Notes
 
-The Service Layer (ConnectionService, SecurityService, TransferOrchestrator, MessageService)
-was planned but never adopted by the UI. All business logic lives in custom React hooks
-(`pages/Room/hooks/`) that directly use the transfer layer and utilities. This keeps the
-codebase simpler with fewer abstraction layers.
+The codebase was originally planned to have a Service Layer (ConnectionService, SecurityService,
+TransferOrchestrator, MessageService) but this was never implemented. All business logic lives
+in custom React hooks (`pages/Room/hooks/`) that directly use the transfer layer and utilities.
+This keeps the codebase simpler with fewer abstraction layers. The `src/services/` directory
+does not exist.
 
 ---
 

@@ -4,7 +4,7 @@
  * 
  * Down from 1,401 lines to ~200 lines ✨
  */
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useRoomStore } from '../../stores/roomStore.js';
 import { ErrorDisplay } from '../../components/RoomUI.jsx';
@@ -33,6 +33,8 @@ import {
 import {
   TransferSection,
   ActivityLogSection,
+  TextShareSection,
+  SpeedGraph,
 } from './components/index.js';
 
 export default function Room() {
@@ -40,6 +42,7 @@ export default function Room() {
   const navigate = useNavigate();
   const { isHost, securityPayload, selectedFiles, addFiles, removeFile, clearFiles, resetRoom, error: roomError } = useRoomStore();
   const [showQRCode, setShowQRCode] = useState(false);
+  const [textMessages, setTextMessages] = useState([]);
   const pendingResumeRef = useRef(null); // No longer used — file re-selection removed
   const resumeFallbackFiredRef = useRef(false); // Prevent repeated auto-start on resume failure
   const negotiatedConfigRef = useRef(null);
@@ -140,6 +143,17 @@ export default function Room() {
     multiTransfer.multiTransferState === 'completed' ||
     multiTransfer.multiTransferState === 'error';
 
+  // Text message handler — receives text from peer
+  const handleTextMessageReceived = useCallback((content) => {
+    setTextMessages(prev => [...prev, { content, fromSelf: false, timestamp: Date.now() }]);
+  }, []);
+
+  // Send text message to peer
+  const handleSendTextMessage = useCallback((content) => {
+    sendJSON({ type: 'text-message', content });
+    setTextMessages(prev => [...prev, { content, fromSelf: true, timestamp: Date.now() }]);
+  }, [sendJSON]);
+
   // Message Protocol (routes messages to appropriate handlers)
   const { setMultiFileMode } = useMessages(
     dataChannelRef,
@@ -155,7 +169,8 @@ export default function Room() {
     security.myUUID?.current,
     security.sessionToken,
     security.peerSessionToken,
-    negotiatedConfigRef
+    negotiatedConfigRef,
+    handleTextMessageReceived
   );
 
   // Resume Transfer (handles resume handshake when entering with resume context)
@@ -786,6 +801,8 @@ export default function Room() {
               onRemoveFile={(idx) => removeFile(idx)}
               onClearFiles={() => clearFiles()}
               onReset={handleReset}
+              saveAsZip={multiTransfer.saveAsZip}
+              onSaveAsZipChange={multiTransfer.setSaveAsZip}
             />
 
             {/* Error Display */}
@@ -798,19 +815,37 @@ export default function Room() {
             <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
               <div className="flex items-center justify-between mb-3">
                 <h2 className="text-sm font-medium text-zinc-400">Connection</h2>
-                {/* Mini status dots */}
-                <div className="flex items-center gap-1.5">
-                  {[
-                    { label: 'Socket', done: socketConnected },
-                    { label: 'P2P', done: dataChannelReady },
-                    { label: 'Verified', done: tofuVerified },
-                  ].map((s) => (
-                    <div
-                      key={s.label}
-                      title={`${s.label}: ${s.done ? 'Connected' : 'Pending'}`} 
-                      className={`w-2.5 h-2.5 rounded-full transition-colors ${s.done ? 'bg-emerald-500' : 'bg-zinc-700'}`}
-                    />
-                  ))}
+                <div className="flex items-center gap-2">
+                  {/* Connection quality badge */}
+                  {connInfo && connInfo.rtt > 0 && (() => {
+                    const rtt = connInfo.rtt;
+                    const loss = parseFloat(connInfo.packetLoss) || 0;
+                    let quality, color, bg;
+                    if (rtt < 30 && loss < 0.5) { quality = 'Excellent'; color = 'text-emerald-400'; bg = 'bg-emerald-500/15'; }
+                    else if (rtt < 100 && loss < 2) { quality = 'Good'; color = 'text-green-400'; bg = 'bg-green-500/15'; }
+                    else if (rtt < 250 && loss < 5) { quality = 'Fair'; color = 'text-yellow-400'; bg = 'bg-yellow-500/15'; }
+                    else { quality = 'Poor'; color = 'text-red-400'; bg = 'bg-red-500/15'; }
+                    return (
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${color} ${bg}`}
+                        title={`RTT: ${rtt}ms | Loss: ${loss}%`}>
+                        {quality}
+                      </span>
+                    );
+                  })()}
+                  {/* Mini status dots */}
+                  <div className="flex items-center gap-1.5">
+                    {[
+                      { label: 'Socket', done: socketConnected },
+                      { label: 'P2P', done: dataChannelReady },
+                      { label: 'Verified', done: tofuVerified },
+                    ].map((s) => (
+                      <div
+                        key={s.label}
+                        title={`${s.label}: ${s.done ? 'Connected' : 'Pending'}`} 
+                        className={`w-2.5 h-2.5 rounded-full transition-colors ${s.done ? 'bg-emerald-500' : 'bg-zinc-700'}`}
+                      />
+                    ))}
+                  </div>
                 </div>
               </div>
 
@@ -878,6 +913,24 @@ export default function Room() {
                 <p className="text-xs text-zinc-600">Establishing connection...</p>
               )}
             </div>
+
+            {/* Speed Graph — shown during active transfers */}
+            <SpeedGraph
+              speed={isMultiFile ? multiTransfer.speed : transferSpeed}
+              isActive={
+                (isMultiFile
+                  ? (multiTransfer.multiTransferState === 'sending' || multiTransfer.multiTransferState === 'receiving')
+                  : (transferState === 'sending' || transferState === 'receiving'))
+                && !(isMultiFile ? multiTransfer.isPaused : isPaused)
+              }
+            />
+
+            {/* Text Sharing */}
+            <TextShareSection
+              messages={textMessages}
+              onSend={handleSendTextMessage}
+              disabled={!dataChannelReady}
+            />
 
             {/* Activity Log */}
             <ActivityLogSection logs={logs} />

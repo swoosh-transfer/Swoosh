@@ -241,7 +241,7 @@ export default function Home() {
     }
 
     if (file.size !== transfer.fileSize) {
-      setResumeError(`File size mismatch: expected ${formatFileSize(transfer.fileSize)}, got ${formatFileSize(file.size)}. Please select the original file.`);
+      setResumeError(`File size mismatch: expected ${formatBytes(transfer.fileSize)}, got ${formatBytes(file.size)}. Please select the original file.`);
       setPendingResumeTransfer(null);
       return;
     }
@@ -353,9 +353,6 @@ export default function Home() {
         peerID: tofuSetup.peerID,
       });
 
-      // Generate the share URL with security token in fragment
-      const shareUrl = tofuSetup.createURL(`${window.location.origin}/${roomId}`);
-      
       // Navigate to room with security info in hash
       navigate(`/${roomId}#${btoa(JSON.stringify({
         secret: tofuSetup.secret,
@@ -371,9 +368,7 @@ export default function Home() {
     }
   };
 
-  const selectedFile = selectedFiles.length > 0 ? selectedFiles[0].file : null;
   const hasFiles = selectedFiles.length > 0;
-  const totalSize = selectedFiles.reduce((s, f) => s + f.file.size, 0);
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col items-center justify-center p-4 sm:p-6">
@@ -448,7 +443,7 @@ export default function Home() {
                           <div className="h-full bg-amber-500" style={{ width: `${t.progress}%` }} />
                         </div>
                         <span className="text-[10px] text-zinc-500 tabular-nums whitespace-nowrap">
-                          {t.progress}% · {formatFileSize(t.fileSize)}
+                          {t.progress}% · {formatBytes(t.fileSize)}
                         </span>
                       </div>
                     </div>
@@ -731,14 +726,6 @@ function formatNumber(num) {
   if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
   if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
   return num.toString();
-}
-
-function formatFileSize(bytes) {
-  if (bytes === 0) return '0 B';
-  const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
 function calculateTotal(dailyStats, field) {

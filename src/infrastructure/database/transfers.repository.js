@@ -6,6 +6,7 @@
  */
 
 import { STORE_NAMES, getDatabase, withTransaction } from './client.js';
+import { deleteChunksByTransfer } from './chunks.repository.js';
 import logger from '../../utils/logger.js';
 
 /**
@@ -140,7 +141,6 @@ export async function cleanupOldTransfers(maxAgeMs = 7 * 24 * 60 * 60 * 1000) {
   if (toDelete.length === 0) return 0;
 
   // For each old transfer, also delete associated chunks and file metadata
-  const { deleteChunksByTransfer } = await import('./chunks.repository.js');
   const db = await getDatabase();
 
   for (const t of toDelete) {

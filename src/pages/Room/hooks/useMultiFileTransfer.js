@@ -16,6 +16,7 @@
 import { useState, useRef, useCallback } from 'react';
 import { MultiFileTransferManager } from '../../../transfer/multifile/MultiFileTransferManager.js';
 import { MultiFileReceiver } from '../../../transfer/multifile/MultiFileReceiver.js';
+import { ZipStreamWriter } from '../../../transfer/multifile/ZipStreamWriter.js';
 import { getChannelPool } from '../../../utils/p2pManager.js';
 import { getSocket } from '../../../utils/signaling.js';
 import { TRANSFER_MODE } from '../../../constants/transfer.constants.js';
@@ -63,11 +64,13 @@ export function useMultiFileTransfer({
   // Receive-side state
   const [incomingManifest, setIncomingManifest] = useState(null);
   const [awaitingDirectory, setAwaitingDirectory] = useState(false);
+  const [saveAsZip, setSaveAsZip] = useState(false);
 
   // ─── Refs ───────────────────────────────────────────────────────
 
   const managerRef = useRef(null);   // MultiFileTransferManager (sender)
   const receiverRef = useRef(null);  // MultiFileReceiver (receiver)
+  const saveAsZipRef = useRef(false); // tracks saveAsZip for async callbacks
 
   // ─── Sender: start transfer ─────────────────────────────────────
 
@@ -192,12 +195,22 @@ export function useMultiFileTransfer({
     receiver.onAllComplete = () => {
       setMultiTransferState('completed');
       setOverallProgress(100);
-      addLog('All files received!', 'success');
+      if (saveAsZipRef.current && manifest.totalFiles > 1) {
+        addLog(`✅ ZIP archive complete — ${manifest.totalFiles} files bundled`, 'success');
+      } else {
+        addLog('All files received!', 'success');
+      }
     };
 
     receiver.onError = (err) => {
       setMultiTransferState('error');
-      addLog(`Receive error: ${err.message}`, 'error');
+      const isZipError = err.message?.includes('ZIP');
+      addLog(
+        isZipError
+          ? `ZIP error: ${err.message}`
+          : `Receive error: ${err.message}`,
+        'error'
+      );
     };
 
     receiverRef.current = receiver;
@@ -210,11 +223,33 @@ export function useMultiFileTransfer({
     const receiver = receiverRef.current;
     if (!receiver) return;
 
+    // Sync ref so async callbacks (onAllComplete) see the latest value
+    saveAsZipRef.current = saveAsZip;
+
     let fileSystemSelected = false;
     const isSingleFile = receiver.manifest?.totalFiles === 1;
 
     try {
-      if (isSingleFile && typeof window.showSaveFilePicker === 'function') {
+      if (saveAsZip && !isSingleFile) {
+        // ─── ZIP mode: save all files into a single .zip archive ───
+        const archiveName = receiver.manifest?.archiveName || 'transfer';
+        if (typeof window.showSaveFilePicker === 'function') {
+          const fileHandle = await window.showSaveFilePicker({
+            suggestedName: `${archiveName}.zip`,
+            types: [{ description: 'ZIP Archive', accept: { 'application/zip': ['.zip'] } }],
+          });
+          const writable = await fileHandle.createWritable();
+          const zipWriter = new ZipStreamWriter(writable);
+          receiver.setZipWriter(zipWriter);
+          addLog('Save location selected — files will be saved as ZIP archive', 'success');
+          fileSystemSelected = true;
+        } else {
+          // Blob fallback — build ZIP in memory
+          const zipWriter = new ZipStreamWriter(null);
+          receiver.setZipWriter(zipWriter);
+          addLog('Saving as ZIP archive (in-memory fallback)', 'info');
+        }
+      } else if (isSingleFile && typeof window.showSaveFilePicker === 'function') {
         // Single file: use showSaveFilePicker for cleaner UX (no folder prompt)
         const fileName = receiver.manifest.files[0].name;
         const fileHandle = await window.showSaveFilePicker({
@@ -233,10 +268,11 @@ export function useMultiFileTransfer({
       }
     } catch (err) {
       if (err.name === 'AbortError') {
-        addLog('Save location cancelled — files will be downloaded individually via browser', 'info');
-      } else {
-        addLog(`File picker error: ${err.message} — files will be downloaded individually`, 'error');
+        // User cancelled the file/directory picker — stay on the prompt so they can retry
+        addLog('Save location cancelled — you can try again or change options', 'info');
+        return;
       }
+      addLog(`File picker error: ${err.message} — files will be downloaded individually`, 'error');
     }
 
     setAwaitingDirectory(false);
@@ -247,7 +283,7 @@ export function useMultiFileTransfer({
     addLog(fileSystemSelected
       ? 'Ready to receive — saving via File System API'
       : 'Ready to receive — will prompt to save each file individually', 'info');
-  }, [sendJSON, addLog]);
+  }, [sendJSON, addLog, saveAsZip]);
 
   // ─── Receiver: chunk routing ─────────────────────────────────────
 
@@ -370,6 +406,8 @@ export function useMultiFileTransfer({
     // Incoming (receiver)
     incomingManifest,
     awaitingDirectory,
+    saveAsZip,
+    setSaveAsZip,
 
     // Sender actions
     startMultiTransfer,

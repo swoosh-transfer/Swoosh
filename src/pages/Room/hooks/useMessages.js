@@ -26,14 +26,12 @@ import { updateTransfer } from '../../../infrastructure/database/transfers.repos
 import logger from '../../../utils/logger.js';
 import { heartbeatMonitor } from '../../../utils/heartbeatMonitor.js';
 import { 
-  notifyPeerJoined, 
-  notifyPeerDisconnected,
   notifyPeerReconnected,
   notifyResumeSuccess,
   notifyResumeFailed,
   notifySessionMismatch,
 } from '../../../utils/transferNotifications.js';
-import { verifyPeer, getPeerSessionMetadata, isNewSession } from '../../../utils/identityManager.js';
+import { verifyPeer, getPeerSessionMetadata } from '../../../utils/identityManager.js';
 import { resumeEventBus } from './resumeEventBus.js';
 
 /**
@@ -68,7 +66,8 @@ export function useMessages(
   localUuid,
   sessionToken,
   peerSessionToken,
-  externalNegotiatedConfigRef = null
+  externalNegotiatedConfigRef = null,
+  onTextMessage = null
 ) {
   const {
     handleHandshake,
@@ -536,40 +535,50 @@ export function useMessages(
             let missingChunks = [];
             
             if (msg.chunkBitmap && msg.totalChunks) {
-              const receiverBitmap = deserializeBitmap(msg.chunkBitmap);
-              startFromChunk = getFirstMissingChunk(receiverBitmap, msg.totalChunks);
-              missingChunks = getMissingChunks(receiverBitmap, msg.totalChunks);
+              try {
+                const receiverBitmap = deserializeBitmap(msg.chunkBitmap);
+                startFromChunk = getFirstMissingChunk(receiverBitmap, msg.totalChunks);
+                missingChunks = getMissingChunks(receiverBitmap, msg.totalChunks);
+                
+                if (startFromChunk === -1) {
+                  startFromChunk = msg.totalChunks; // All complete
+                  missingChunks = [];
+                }
+              } catch (bitmapError) {
+                logger.warn('[Room] Failed to deserialize resume bitmap:', bitmapError);
+                accepted = false;
+                reason = 'Corrupt resume bitmap';
+              }
+            }
+
+            if (accepted) {
+              // Get sender bitmap if available (tracks which chunks were already sent)
+              let senderBitmapSerialized = null;
+              try {
+                const transferRecord = await transfer.getTransferRecord?.(msg.transferId);
+                if (transferRecord?.chunkBitmap) {
+                  senderBitmapSerialized = transferRecord.chunkBitmap;
+                }
+              } catch (error) {
+                logger.warn('[Room] Failed to load sender bitmap:', error);
+              }
+
+              sendJSON({
+                type: MESSAGE_TYPE.RESUME_ACCEPTED,
+                transferId: msg.transferId,
+                startFromChunk,
+                totalChunks: msg.totalChunks,
+                missingChunks: missingChunks.length > 100 ? [] : missingChunks, // Send list if reasonable size
+                senderBitmap: senderBitmapSerialized,
+              });
               
-              if (startFromChunk === -1) {
-                startFromChunk = msg.totalChunks; // All complete
-                missingChunks = [];
-              }
+              const chunkCount = missingChunks.length || (msg.totalChunks - startFromChunk);
+              addLog(`Resume accepted — ${chunkCount} chunks to send from ${startFromChunk}`, 'success');
+              notifyResumeSuccess(msg.fileName, chunkCount);
             }
-
-            // Get sender bitmap if available (tracks which chunks were already sent)
-            let senderBitmapSerialized = null;
-            try {
-              const transferRecord = await transfer.getTransferRecord?.(msg.transferId);
-              if (transferRecord?.chunkBitmap) {
-                senderBitmapSerialized = transferRecord.chunkBitmap;
-              }
-            } catch (error) {
-              logger.warn('[Room] Failed to load sender bitmap:', error);
-            }
-
-            sendJSON({
-              type: MESSAGE_TYPE.RESUME_ACCEPTED,
-              transferId: msg.transferId,
-              startFromChunk,
-              totalChunks: msg.totalChunks,
-              missingChunks: missingChunks.length > 100 ? [] : missingChunks, // Send list if reasonable size
-              senderBitmap: senderBitmapSerialized,
-            });
-            
-            const chunkCount = missingChunks.length || (msg.totalChunks - startFromChunk);
-            addLog(`Resume accepted — ${chunkCount} chunks to send from ${startFromChunk}`, 'success');
-            notifyResumeSuccess(msg.fileName, chunkCount);
-          } else {
+          }
+          
+          if (!accepted) {
             sendJSON({
               type: MESSAGE_TYPE.RESUME_REJECTED,
               transferId: msg.transferId,
@@ -623,6 +632,13 @@ export function useMessages(
           break;
         }
 
+        // ─── Text/Clipboard Sharing ──────────────────────────
+        case MESSAGE_TYPE.TEXT_MESSAGE:
+          if (onTextMessage && msg.content) {
+            onTextMessage(msg.content);
+          }
+          break;
+
         default:
           logger.log('[Room] Unknown message:', msg.type);
       }
@@ -655,6 +671,7 @@ export function useMessages(
     roomId,
     peerSessionToken,
     dispatchResumeRequest,
+    onTextMessage,
   ]);
 
   /**
@@ -675,7 +692,10 @@ export function useMessages(
       isProcessingRef.current = false;
     };
 
-    drain();
+    drain().catch(err => {
+      isProcessingRef.current = false;
+      logger.error('[Messages] Message processing error:', err);
+    });
   }, [processMessage]);
 
   /**

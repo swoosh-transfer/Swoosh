@@ -478,6 +478,7 @@ export class MultiFileTransferManager {
   resume() {
     this._isPaused = false;
     this._pauseResolve?.();
+    this._pauseResolve = null;
     for (const [, engine] of this._engines) {
       engine.resume?.();
     }
@@ -488,6 +489,7 @@ export class MultiFileTransferManager {
     this._isCancelled = true;
     this._isPaused = false;
     this._pauseResolve?.();
+    this._pauseResolve = null;
     // Unblock receiver-ready wait if still pending
     this._receiverReadyResolve?.();
     this._receiverReadyResolve = null;
@@ -657,7 +659,11 @@ export class MultiFileTransferManager {
       engine.cleanup?.(tid);
     }
     this._engines.clear();
+    this._fileBitmaps?.clear();
+    this._channelLocks?.clear();
+    this._pendingRemoval?.clear();
     this._queue = null;
+    this._pauseResolve = null;
   }
 
   // ─── Resume from saved manifest ──────────────────────────────────

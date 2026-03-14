@@ -32,7 +32,11 @@ export function startHealthMonitoring(pc, onStats) {
     if (!pc || pc.connectionState === 'closed' || pc.connectionState !== 'connected') return;
 
     try {
-      const stats = await pc.getStats();
+      const statsPromise = pc.getStats();
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('getStats timeout')), 5000)
+      );
+      const stats = await Promise.race([statsPromise, timeoutPromise]);
       let rtt = 0;
       let packetsLost = 0;
       let packetsTotal = 0;

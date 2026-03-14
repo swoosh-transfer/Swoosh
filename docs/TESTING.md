@@ -16,15 +16,23 @@ Our testing approach focuses on:
 src/
 ├── __tests__/              # Test files
 │   ├── unit/               # Unit tests
-│   │   ├── ProgressTracker.test.js
-│   │   ├── formatters.test.js
-│   │   └── chunkBitmap.test.js
-│   └── hooks/              # React hooks tests
-│       ├── useFileTransfer.test.js
-│       └── useRoomConnection.test.js
+│   │   ├── formatters.test.js          (18 tests)
+│   │   ├── chunkBitmap.test.js         (33 tests)
+│   │   ├── ProgressTracker.test.js     (26 tests)
+│   │   ├── validators.test.js          (~40 tests)
+│   │   ├── errors.test.js             (~30 tests)
+│   │   ├── qrCode.test.js            (13 tests)
+│   │   ├── transferConstants.test.js   (~20 tests)
+│   │   ├── ZipStreamWriter.test.js    (14 tests)
+│   │   ├── transferNotifications.test.js (~20 tests)
+│   │   ├── transferStore.test.js      (~14 tests)
+│   │   └── connectionMonitor.test.js  (~10 tests)
+│   └── setup.js            # Test setup (mocks for IndexedDB, FileSystem API, WebRTC, Crypto)
 └── __mocks__/              # Mock implementations
-    └── testUtils.js
+    └── testUtils.js         # createMockDataChannel, createMockFile, flushPromises, etc.
 ```
+
+**Total: 254 tests across 11 files**
 
 ## Setup
 

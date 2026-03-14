@@ -120,10 +120,15 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
         return;
       }
 
+      const cleanup = () => {
+        channel.removeEventListener('bufferedamountlow', check);
+        clearInterval(poll);
+        clearTimeout(timeout);
+      };
+
       const check = () => {
-        if (channel.bufferedAmount <= lowWatermark) {
-          channel.removeEventListener('bufferedamountlow', check);
-          clearInterval(poll);
+        if (!channel || channel.readyState !== 'open' || channel.bufferedAmount <= lowWatermark) {
+          cleanup();
           resolve();
         }
       };
@@ -131,6 +136,8 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
       channel.bufferedAmountLowThreshold = lowWatermark;
       channel.addEventListener('bufferedamountlow', check);
       const poll = setInterval(check, 10);
+      // Safety timeout: resolve after 10s to prevent hanging forever
+      const timeout = setTimeout(() => { cleanup(); resolve(); }, 10000);
     });
   }, []);
 

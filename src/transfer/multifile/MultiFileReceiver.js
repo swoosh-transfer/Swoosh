@@ -58,6 +58,15 @@ export class MultiFileReceiver {
     
     // Periodic sync to update bytesWritten from WriteQueues
     this._progressSyncInterval = null;
+
+    /** @type {import('./ZipStreamWriter.js').ZipStreamWriter|null} */
+    this._zipWriter = null;
+    /** Track which file index is currently being written to the ZIP */
+    this._zipCurrentFileIndex = -1;
+    /** Buffer chunks for zip files that arrive out of order: Map<fileIndex, Map<chunkIndex, data>> */
+    this._zipChunkBuffers = new Map();
+    /** Next expected chunk index per file for ordered zip writing */
+    this._zipNextChunk = new Map();
   }
 
   // ─── Configuration ────────────────────────────────────────────────
@@ -259,6 +268,27 @@ export class MultiFileReceiver {
       if (readyInfo) {
         readyInfo.resolve();
         logger.log(`[MultiFileReceiver] WriteQueue ready for single file`);
+      }
+    }
+  }
+
+  /**
+   * Set a ZipStreamWriter to receive all files as a single ZIP archive.
+   * When set, chunks are routed to the zip writer instead of individual WriteQueues.
+   * @param {import('./ZipStreamWriter.js').ZipStreamWriter} zipWriter
+   */
+  setZipWriter(zipWriter) {
+    this._zipWriter = zipWriter;
+    this._zipCurrentFileIndex = 0; // Start with the first file
+
+    // Mark all files as write-ready
+    for (const [idx] of this._files) {
+      this._zipNextChunk.set(idx, 0);
+      this._zipChunkBuffers.set(idx, new Map());
+      const readyInfo = this._writeQueueReady.get(idx);
+      if (readyInfo) {
+        readyInfo.resolve();
+        logger.log(`[MultiFileReceiver] ZIP mode: file ${idx} ready`);
       }
     }
   }
@@ -497,8 +527,13 @@ export class MultiFileReceiver {
         new Promise(resolve => setTimeout(resolve, 5000)) // 5 second timeout
       ]);
     }
-    
-    if (fileState.writeQueue) {
+
+    // ─── ZIP mode: route to ZipStreamWriter ─────────────────────────
+    if (this._zipWriter) {
+      await this._writeChunkToZip(fileIndex, chunkIndex, data);
+      fileState.bytesWritten = fileState.bytesReceived;
+      this._totalBytesWritten = this._totalBytesReceived;
+    } else if (fileState.writeQueue) {
       try {
         // Use WriteQueue to handle out-of-order chunk arrival
         // WriteQueue buffers chunks and writes them sequentially, even if they arrive out of order
@@ -553,18 +588,21 @@ export class MultiFileReceiver {
     // This handles late arrivals after FILE_COMPLETE was already sent
     const allChunksReceived = fileState.receivedChunks.size >= fileState.totalChunks;
     
-    if (allChunksReceived && fileState.fileCompleteSent && !fileState.completed && fileState.writeQueue) {
-      // FILE_COMPLETE already sent and now all chunks have finally arrived
-      // Flush and complete the file
-      const timeoutMs = 10000;
-      await fileState.writeQueue.flush(timeoutMs);
-      
-      const queueProgress = fileState.writeQueue.getProgress();
-      const allChunksWritten = queueProgress.written >= fileState.totalChunks && queueProgress.pending === 0;
-      
-      if (allChunksWritten && queueProgress.bytesWritten === fileState.size) {
-        // All late chunks written successfully
+    if (allChunksReceived && fileState.fileCompleteSent && !fileState.completed && (fileState.writeQueue || this._zipWriter)) {
+      if (this._zipWriter) {
         await this._completeFile(fileIndex);
+      } else {
+        // FILE_COMPLETE already sent and now all chunks have finally arrived
+        // Flush and complete the file
+        const timeoutMs = 10000;
+        await fileState.writeQueue.flush(timeoutMs);
+        
+        const queueProgress = fileState.writeQueue.getProgress();
+        const allChunksWritten = queueProgress.written >= fileState.totalChunks && queueProgress.pending === 0;
+        
+        if (allChunksWritten && queueProgress.bytesWritten === fileState.size) {
+          await this._completeFile(fileIndex);
+        }
       }
     }
   }
@@ -591,7 +629,10 @@ export class MultiFileReceiver {
     logger.log(`[MultiFileReceiver] FILE_COMPLETE for file ${fileIndex}: all chunks present`);
     
     // All chunks have arrived - complete the file
-    if (state.writeQueue) {
+    if (this._zipWriter) {
+      // ZIP mode: no WriteQueue flush needed, chunks written directly
+      await this._completeFile(fileIndex);
+    } else if (state.writeQueue) {
       // Flush writeQueue with generous timeout for mobile
       const timeoutMs = 10000;
       await state.writeQueue.flush(timeoutMs);
@@ -626,6 +667,72 @@ export class MultiFileReceiver {
     }
   }
 
+  // ─── ZIP chunk writing ───────────────────────────────────────────
+
+  /**
+   * Write a chunk to the ZIP archive, buffering out-of-order chunks.
+   * ZIP entries must be written file-by-file in order (0→1→2→N).
+   * Chunks for later files are buffered until previous files complete.
+   */
+  async _writeChunkToZip(fileIndex, chunkIndex, data) {
+    try {
+      const buffer = this._zipChunkBuffers.get(fileIndex);
+      if (!buffer) {
+        logger.warn(`[MultiFileReceiver] ZIP: no buffer for file ${fileIndex}, creating one`);
+        this._zipChunkBuffers.set(fileIndex, new Map());
+        this._zipChunkBuffers.get(fileIndex).set(chunkIndex, data);
+      } else {
+        buffer.set(chunkIndex, data);
+      }
+
+      // Only write chunks for the current ZIP file (strict sequential ordering)
+      // If this chunk belongs to a later file, it stays buffered until we get there
+      if (fileIndex !== this._zipCurrentFileIndex) return;
+
+      this._flushZipBuffer(fileIndex);
+    } catch (err) {
+      logger.error(`[MultiFileReceiver] ZIP write error for file ${fileIndex}, chunk ${chunkIndex}:`, err);
+      if (this._onError) {
+        this._onError(new Error(`ZIP archive error on file ${fileIndex}: ${err.message}`));
+      }
+    }
+  }
+
+  /**
+   * Flush buffered chunks for a file to the ZIP entry, in order.
+   */
+  _flushZipBuffer(fileIndex) {
+    const buffer = this._zipChunkBuffers.get(fileIndex);
+    if (!buffer) return;
+
+    try {
+      // Start this file's ZIP entry if not already started
+      const fileState = this._files.get(fileIndex);
+      if (!fileState._zipEntryStarted) {
+        const zipPath = fileState.relativePath
+          ? `${fileState.relativePath}/${fileState.name}`
+          : fileState.name;
+        this._zipWriter.addFile(zipPath, fileState.size);
+        fileState._zipEntryStarted = true;
+      }
+
+      // Write sequential chunks starting from nextExpected
+      let next = this._zipNextChunk.get(fileIndex);
+      while (buffer.has(next)) {
+        const chunk = buffer.get(next);
+        buffer.delete(next);
+        this._zipWriter.pushChunk(chunk);
+        next++;
+      }
+      this._zipNextChunk.set(fileIndex, next);
+    } catch (err) {
+      logger.error(`[MultiFileReceiver] ZIP flush error for file ${fileIndex}:`, err);
+      if (this._onError) {
+        this._onError(new Error(`ZIP archive corrupted on file ${fileIndex}: ${err.message}`));
+      }
+    }
+  }
+
   // ─── File completion ──────────────────────────────────────────────
 
   async _completeFile(fileIndex) {
@@ -640,6 +747,49 @@ export class MultiFileReceiver {
     logger.log(`[MultiFileReceiver] File ${fileIndex} complete: ${state.bytesReceived}/${state.size} bytes, ` +
               `${state.receivedChunks.size}/${state.totalChunks} chunks`);
     state.completed = true;
+
+    // ─── ZIP mode: end this file's entry in the archive ────────────
+    if (this._zipWriter) {
+      try {
+        // Flush any remaining buffered chunks for this file
+        this._flushZipBuffer(fileIndex);
+        this._zipWriter.endFile();
+
+        // Advance to the next file and flush any buffered chunks for it
+        this._zipCurrentFileIndex = fileIndex + 1;
+        if (this._zipChunkBuffers.has(this._zipCurrentFileIndex)) {
+          this._flushZipBuffer(this._zipCurrentFileIndex);
+        }
+
+        logger.log(`[MultiFileReceiver] ZIP: file ${fileIndex} entry complete (${fileIndex + 1}/${this._manifest.totalFiles}): ${state.name}`);
+        if (this._onFileComplete) this._onFileComplete(fileIndex, state.name);
+
+        // Check if all files done → finalize the ZIP
+        if (this._allFilesComplete()) {
+          this._stopProgressSync();
+          const blob = await this._zipWriter.finish();
+          logger.log('[MultiFileReceiver] ZIP archive finalized');
+          if (blob) {
+            // Blob fallback — trigger download
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = (this._manifest?.archiveName || 'transfer') + '.zip';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
+          }
+          if (this._onAllComplete) this._onAllComplete();
+        }
+      } catch (err) {
+        logger.error(`[MultiFileReceiver] ZIP finalization error:`, err);
+        if (this._onError) {
+          this._onError(new Error(`ZIP archive failed: ${err.message}. The archive may be incomplete.`));
+        }
+      }
+      return;
+    }
 
     // Close writable stream if using File System API
     if (state.writable) {
@@ -861,10 +1011,15 @@ export class MultiFileReceiver {
     this._pendingMeta.clear();
     if (this._pendingMetaQueues) this._pendingMetaQueues.clear();
     if (this._metaOrder) this._metaOrder.length = 0;
+    if (this._transferIdsByFileIndex) this._transferIdsByFileIndex.clear();
+    if (this._writeQueueReady) this._writeQueueReady.clear();
     this._manifest = null;
     this._totalBytesReceived = 0;
     this._totalBytesWritten = 0;
     this._dirHandle = null;
+    this._zipWriter = null;
+    this._zipChunkBuffers.clear();
+    this._zipNextChunk.clear();
   }
 
   // ─── Resume manifest handling ─────────────────────────────────────

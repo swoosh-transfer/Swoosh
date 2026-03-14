@@ -40,11 +40,11 @@ export function loadUserSettings() {
   const overrides = _loadUserOverrides();
   return {
     chunkSizeKB:                  overrides.chunkSizeKB ?? 64,
-    mobileChunkSizeKB:            overrides.mobileChunkSizeKB ?? 16,
+    mobileChunkSizeKB:            overrides.mobileChunkSizeKB ?? 64,
     maxChannels:                  overrides.maxChannels ?? 8,
     mobileMaxChannels:            overrides.mobileMaxChannels ?? 4,
     bufferWatermarkKB:            overrides.bufferWatermarkKB ?? 256,
-    mobileBufferWatermarkKB:      overrides.mobileBufferWatermarkKB ?? 128,
+    mobileBufferWatermarkKB:      overrides.mobileBufferWatermarkKB ?? 256,
     scaleUpThresholdKBs:          overrides.scaleUpThresholdKBs ?? 500,
     scaleIntervalMs:              overrides.scaleIntervalMs ?? 2000,
     mobileScaleIntervalMs:        overrides.mobileScaleIntervalMs ?? 3000,
@@ -65,10 +65,11 @@ export function resetUserSettings() {
 const _user = loadUserSettings();
 
 /**
- * NETWORK_CHUNK_SIZE: 64KB (desktop) or 16KB (mobile)
+ * NETWORK_CHUNK_SIZE: 64KB
  * 
  * Used for WebRTC DataChannel transmission.
- * Uses desktop chunk size by default; mobile detection applies in getTransferReliabilityProfile().
+ * Modern WebRTC SCTP supports messages up to 256KB.
+ * Mobile detection applies in getTransferReliabilityProfile().
  */
 export const NETWORK_CHUNK_SIZE = isConstrainedMobileEnvironment()
   ? _user.mobileChunkSizeKB * 1024
@@ -135,7 +136,7 @@ export const INITIAL_CHANNELS = 1;
  * CHANNEL_SCALE_INTERVAL: how often (ms) to evaluate scaling decisions
  * CHANNEL_SCALE_SUSTAIN_COUNT: how many consecutive intervals the threshold must be sustained
  */
-export const CHANNEL_SCALE_UP_THRESHOLD = Math.max(_user.scaleUpThresholdKBs * 1024, 2 * 1024 * 1024); // minimum 2 MB/s
+export const CHANNEL_SCALE_UP_THRESHOLD = _user.scaleUpThresholdKBs * 1024; // user-configurable (default 500 KB/s)
 export const CHANNEL_SCALE_DOWN_THRESHOLD = 200 * 1024;          // 200 KB/s
 export const CHANNEL_SCALE_INTERVAL = _user.scaleIntervalMs;                      // user-configurable
 export const CHANNEL_SCALE_SUSTAIN_COUNT = 1;                    // single interval (faster response)

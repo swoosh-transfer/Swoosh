@@ -56,6 +56,9 @@ export const MESSAGE_TYPE = {
   CONFIG_EXCHANGE: 'config-exchange',       // Exchange transfer config between peers
   CONFIG_ACK: 'config-ack',                 // Acknowledge agreed config
   
+  // Text/Clipboard Sharing
+  TEXT_MESSAGE: 'text-message',             // Send text snippet to peer
+
   // Peer Session Events
   PEER_RECONNECTED: 'peer-reconnected',     // Notify peer of reconnection with session info
   SESSION_VERIFICATION: 'session-verification' // Request session verification for resume

@@ -32,51 +32,45 @@ The data channel is configured for reliable, ordered delivery with a maximum of 
 
 ### 2. File Chunking System
 
-**Dual-Loop Architecture:**
-The system implements a sophisticated dual-loop architecture optimizing for both network efficiency and storage management:
+**Architecture:**
+The system uses adaptive chunk sizing optimized for both network efficiency and storage management:
 
 **CHUNKING LOOP (Sender Side):**
 ```
-1. Initialize chunking state and storage buffer (64KB)
+1. Initialize chunking state (default 64KB chunks)
 2. Start file stream reader
-3. Read 16KB chunks from file (WebRTC DataChannel limit)
-4. Append chunks to storage buffer
-5. When storage buffer full (64KB):
-   - Calculate SHA-256 checksum for entire storage chunk
-   - Store chunk metadata in IndexedDB (NOT actual data)
-   - Send chunk metadata via WebRTC
-   - Send binary data via WebRTC DataChannel
-   - Monitor performance and adapt chunk sizes
-   - Reset storage buffer
-6. Repeat until EOF
-7. Process final partial buffer if needed
+3. Read chunks from file (adaptive 16KB–256KB)
+4. Calculate SHA-256 checksum for each chunk
+5. Send chunk metadata via WebRTC (JSON)
+6. Send binary data via WebRTC DataChannel
+7. Monitor throughput and adapt chunk sizes
+8. Repeat until EOF
+9. Process final partial chunk if needed
 ```
 
 **RECEIVING LOOP (Receiver Side):**
 ```
 1. Initialize assembly state and receive buffer
-2. Receive 16KB chunks via WebRTC
-3. Append chunks to receive buffer
-4. When receive buffer complete:
-   - Calculate SHA-256 checksum for validation
-   - Validate checksum against received metadata
-   - Store validated metadata in IndexedDB
-   - Write chunk directly to file system
-   - Reset receive buffer
-5. Repeat until transfer complete
-6. Close file handle and mark assembly complete
+2. Receive chunks via WebRTC
+3. Validate SHA-256 checksum against received metadata
+4. Write validated chunk directly to file system (or ZIP archive)
+5. Send ACK (batched every 50 chunks)
+6. Repeat until transfer complete
+7. Close file handle and mark assembly complete
 ```
 
-**Storage Buffer Management:**
-- **Chunking Side**: 64KB storage buffers accumulate multiple 16KB network chunks before processing
-- **Assembly Side**: 64KB receive buffers validate and write chunks in optimized batches
-- **Memory Efficiency**: No storage of actual chunk data - only metadata cached in IndexedDB
-- **Direct Streaming**: File data flows directly from disk → WebRTC → disk without intermediate storage
+**Chunk Configuration (from `transfer.constants.js`):**
+- **Default chunk size:** 64KB
+- **Mobile chunk size:** 64KB (optimized from 16KB)
+- **Adaptive range:** 16KB–256KB based on throughput
+- **ACK batch size:** 50 chunks
+- **Mobile buffer watermark:** 256KB
+- **Scale-up threshold:** 500KB/s throughput
 
 **Adaptive Performance Optimization:**
-- **Dynamic Chunk Sizing**: Monitors throughput and adjusts chunk sizes (8KB-32KB range)
-- **Performance Metrics**: Tracks bytes/second, adapts based on network conditions
-- **Buffer Optimization**: Balances memory usage with transfer efficiency
+- Monitors throughput and adjusts chunk sizes dynamically
+- Scales up above 500KB/s (removed 2MB/s hard floor)
+- ACK batching reduces overhead on fast connections
 
 ### 3. File System API Integration
 
@@ -163,13 +157,16 @@ Handles file transfer operations and progress tracking. Maintains a list of acti
 ### 8. Message Protocol Design
 
 **Message Categories:**
-The communication protocol defines six core message types:
+The communication protocol defines these core message types:
 - **HANDSHAKE**: Initial connection establishment and peer verification
 - **FILE_METADATA**: File information transmission before chunks (name, size, hash, etc.)
 - **FILE_CHUNK**: Individual file chunk data with metadata
-- **CHUNK_ACK**: Acknowledgment of successful chunk receipt and verification
+- **CHUNK_ACK**: Acknowledgment of successful chunk receipt (batched every 50)
 - **TRANSFER_COMPLETE**: Notification when entire file transfer finishes
+- **TEXT_MESSAGE**: Peer-to-peer text/clipboard sharing
 - **ERROR**: Error reporting and handling information
+- **Multi-file types**: MULTI_FILE_MANIFEST, FILE_START, FILE_COMPLETE, ALL_FILES_COMPLETE
+- **Resume types**: RESUME_TRANSFER, RESUME_ACCEPTED, RESUME_REJECTED, RECEIVER_READY
 
 **Message Format:**
 All messages follow a consistent structure containing the message type, unique transfer identifier for tracking, timestamp for ordering and debugging, and a payload section containing type-specific data. This standardized format enables reliable message parsing and routing.
@@ -195,17 +192,16 @@ Each error type has a corresponding recovery strategy:
 ### 10. Performance Optimization Techniques
 
 **Dual-Buffer Memory Management:**
-- **Storage Buffers**: 64KB buffers accumulate multiple 16KB network chunks for efficient processing
-- **Receive Buffers**: 64KB validation buffers ensure data integrity before file writing
 - **Zero-Copy Architecture**: Data streams directly from file system through WebRTC to destination file system
 - **Buffer Recycling**: Reuse buffer memory across chunks to minimize garbage collection
 - **No Chunk Caching**: Never store actual chunk data locally - only metadata and checksums
+- **waitForDrain**: 10s timeout + readyState check to prevent hanging
 
 **Adaptive Transfer Optimization:**
-- **Dynamic Chunk Sizing**: Real-time adjustment of chunk sizes (8KB-32KB) based on network performance
+- **Dynamic Chunk Sizing**: Real-time adjustment of chunk sizes (16KB-256KB) based on network performance
 - **Performance Monitoring**: Track bytes/second, connection quality, and buffer efficiency
-- **Network-Aware Adaptation**: Increase chunk sizes for high-throughput connections, decrease for unreliable networks
-- **Buffer Size Optimization**: Adjust storage buffer sizes based on device capabilities and transfer patterns
+- **Network-Aware Adaptation**: Increase chunk sizes for high-throughput connections
+- **ACK Batching**: Every 50 chunks to reduce protocol overhead
 
 **Storage Efficiency Strategy:**
 - **Metadata-Only IndexedDB**: Store only checksums, transfer state, and progress - never binary data
@@ -271,4 +267,81 @@ This ensures basic functionality across a wide range of browsers and devices.
 - Secure context requirements
 
 ---
-This implementation documentation provides the technical foundation for building your P2P file transfer application with all the specified features.
+
+### 14. Multi-File & ZIP Transfer
+
+**Multi-File Architecture:**
+The multi-file system uses `MultiFileTransferManager` (sender) and `MultiFileReceiver` (receiver) to handle batches of files. The sender sends a MULTI_FILE_MANIFEST listing all files, then transfers them sequentially or in parallel.
+
+**Streamed ZIP Download:**
+The receiver can optionally bundle all incoming files into a single ZIP archive:
+
+```
+ZipStreamWriter (fflate)
+├── addFile(name, size)    → Creates ZipPassThrough entry (store mode, no compression)
+├── pushChunk(data)        → Pushes chunk to current ZIP entry
+├── endFile()              → Finalizes current ZIP entry
+└── finish()               → Returns Promise<Blob|null> or writes to File System API writable
+```
+
+**Critical ZIP Constraint:**
+Files MUST be written to the ZIP sequentially (file 0 → 1 → 2 → N). When chunks arrive for a later file, they are buffered in `_zipChunkBuffers` Map and flushed when the current file completes.
+
+**ZIP Output Modes:**
+1. **File System API writable** (preferred) — streamed directly to disk via `showSaveFilePicker()`
+2. **In-memory Blob** (fallback) — for browsers without File System API
+
+**ZIP Error Handling:**
+- try/catch in `_writeChunkToZip` — calls `onError` on failure
+- try/catch in `_flushZipBuffer` — calls `onError` on flush failure
+- try/catch in `_completeFile` ZIP path — calls `onError` on finalize failure
+- ZIP-specific error messages suggest retrying without ZIP mode
+
+### 15. Text/Clipboard Sharing
+
+**Protocol:**
+Text messages use the `TEXT_MESSAGE` type over the existing DataChannel. Messages contain `{ text, timestamp }` payloads. The `TextShareSection` component provides a chat-style interface with copy-to-clipboard buttons.
+
+**Implementation:**
+- `useMessages.js` handles `TEXT_MESSAGE` type and forwards to `onTextMessage` callback
+- Room component maintains `textMessages` state array
+- Messages are displayed chronologically with "You" / "Peer" labels
+
+### 16. Real-Time Speed Graph
+
+**SpeedGraph Component:**
+Canvas-based real-time throughput visualization rendering the last 30 seconds of transfer speed data. Uses `requestAnimationFrame` for smooth rendering and auto-scales the Y-axis based on peak speed.
+
+**Implementation:**
+- Samples speed every second while transfer is active
+- Maintains circular buffer of 30 data points
+- Renders filled area chart with grid lines and axis labels
+- Shows current speed, peak speed, and average speed
+
+### 17. Connection Quality Indicator
+
+**Quality Assessment:**
+The `connectionMonitor.js` tracks RTT (round-trip time) and packet loss from WebRTC stats (`getStats()` with 5s timeout). Quality is classified as:
+
+| Quality | RTT | Packet Loss | Color |
+|---------|-----|-------------|-------|
+| Excellent | < 50ms | < 1% | Green |
+| Good | < 150ms | < 3% | Yellow |
+| Fair | < 300ms | < 5% | Orange |
+| Poor | ≥ 300ms | ≥ 5% | Red |
+
+The badge is rendered in the Room page's connection status card.
+
+### 18. Browser Notifications
+
+**Transfer Notifications:**
+`transferNotifications.js` uses the browser Notification API to alert users when:
+- A transfer completes (sender and receiver sides)
+- Notifications fire only when the tab is not focused
+
+**Integration:**
+- `notifyTransferComplete(fileName)` called in both `useFileTransfer.js` and `useMultiFileTransfer.js` completion paths
+- Permission requested on first use via `Notification.requestPermission()`
+
+---
+This implementation documentation provides the technical foundation for the P2P file transfer application.

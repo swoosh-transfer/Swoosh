@@ -226,7 +226,7 @@ Home Page
          │    ├──► Create file metadata
          │    ├──► Send metadata to peer
          │    ├──► Start chunking loop
-         │    │    ├──► Read 16KB from file
+         │    │    ├──► Read 64KB from file (adaptive 16KB–256KB)
          │    │    ├──► Buffer to 64KB storage chunks
          │    │    ├──► Calculate SHA-256 hash
          │    │    ├──► Send chunk metadata (JSON)
@@ -548,7 +548,7 @@ Host                                                        Guest
 
 File → FileReader.getReader()
   │
-  ├──► Loop: Read 16KB chunks
+  ├──► Loop: Read 64KB chunks (adaptive)
   │     │
   │     ├──► Append to 64KB storage buffer
   │     │
@@ -1006,7 +1006,7 @@ Fallback:
 Strategy: Stream-to-Disk (Zero Memory)
 
 Sender:
-  ├──► Read file in 16KB chunks (streaming)
+  ├──► Read file in 64KB chunks (streaming, adaptive)
   ├──► Buffer to 64KB storage chunks
   ├──► Send immediately via DataChannel
   └──► No file kept in memory
@@ -1209,7 +1209,7 @@ ChunkingEngine Performance Monitoring:
   ├──► Adjust chunk size dynamically
   │    ├─► If fast: increase to MAX_CHUNK_SIZE (32KB)
   │    ├─► If slow: decrease to MIN_CHUNK_SIZE (8KB)
-  │    └─► Default: INITIAL_CHUNK_SIZE (16KB)
+  │    └─► Default: INITIAL_CHUNK_SIZE (64KB)
   └──► Balance between:
        ├─► Throughput (larger chunks)
        └─► Latency (smaller chunks)

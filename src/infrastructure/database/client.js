@@ -167,7 +167,7 @@ async function initDB() {
  */
 export async function getDatabase() {
   // Return cached instance if valid
-  if (dbInstance && !dbInstance._closed && validateStores(dbInstance)) {
+  if (dbInstance && validateStores(dbInstance)) {
     return dbInstance;
   }
 

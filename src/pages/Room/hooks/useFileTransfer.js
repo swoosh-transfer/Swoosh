@@ -19,6 +19,7 @@ import { useTransferStore } from '../../../stores/transferStore.js';
 import { formatBytes } from '../../../lib/formatters.js';
 import { STORAGE_CHUNK_SIZE } from '../../../constants/transfer.constants.js';
 import { heartbeatMonitor } from '../../../utils/heartbeatMonitor.js';
+import { notifyTransferComplete } from '../../../utils/transferNotifications.js';
 import logger from '../../../utils/logger.js';
 
 /**
@@ -394,15 +395,12 @@ export function useFileTransfer(
         selectedFile,
         securityPayload?.peerID,
         async ({ metadata, binaryData }) => {
-          // Wait for buffer drain (backpressure)
-          await waitForDrain();
-
           const authTag = await createChunkAuthTag(metadata, binaryData);
 
-          // Send chunk metadata
+          // Send chunk metadata (tiny JSON, no backpressure needed)
           sendJSON({ type: 'chunk-metadata', ...metadata, authTag });
 
-          // Wait again then send binary
+          // Wait for buffer drain before sending binary payload
           await waitForDrain();
 
           // Send binary data
@@ -431,6 +429,13 @@ export function useFileTransfer(
       setTransferState('completed');
       setTransferProgress(100);
       addLog('Transfer complete!', 'success');
+      notifyTransferComplete(selectedFile.name);
+
+      // Record completion in transfer history
+      completeStoreTransfer(transferIdRef.current, {
+        fileName: selectedFile.name,
+        fileSize: selectedFile.size,
+      });
 
       // Emit analytics event
       const socket = getSocket();
@@ -467,7 +472,7 @@ export function useFileTransfer(
         addLog('Analytics: Transfer failed', 'error');
       }
     }
-  }, [selectedFile, tofuVerified, securityPayload, roomId, sendJSON, sendBinary, waitForDrain, addLog, ensureFileHash, createChunkAuthTag]);
+  }, [selectedFile, tofuVerified, securityPayload, roomId, sendJSON, sendBinary, waitForDrain, addLog, ensureFileHash, createChunkAuthTag, completeStoreTransfer]);
 
   /**
    * Handle retransmission request from receiver
@@ -487,7 +492,6 @@ export function useFileTransfer(
         chunkIndices,
         selectedFile,
         async ({ metadata, binaryData }) => {
-          await waitForDrain();
           const authTag = await createChunkAuthTag(metadata, binaryData);
           sendJSON({ type: 'chunk-metadata', ...metadata, authTag });
           await waitForDrain();
@@ -665,6 +669,13 @@ export function useFileTransfer(
           blob: result.blob,
         });
         addLog('File saved!', 'success');
+        notifyTransferComplete(result.fileName || 'file');
+
+        // Record completion in transfer history
+        completeStoreTransfer(transferIdRef.current, {
+          fileName: result.fileName,
+          fileSize: result.fileSize,
+        });
 
         // Clean up - mark transfer as complete in resumable manager, catching "not found" errors
         try {
@@ -703,7 +714,7 @@ export function useFileTransfer(
     } catch (err) {
       addLog(`Complete error: ${err.message}`, 'error');
     }
-  }, [sendJSON, addLog]);
+  }, [sendJSON, addLog, completeStoreTransfer]);
 
   /**
    * Handle pending chunks retry (internal)

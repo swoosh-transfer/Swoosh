@@ -36,7 +36,7 @@ export class AssemblyEngine {
     
     // Bitmap persistence settings
     this.BITMAP_FLUSH_INTERVAL = 50; // Flush bitmap every 50 chunks
-    this.ACK_BATCH_SIZE = 10; // Send ACK every 10 chunks received
+    this.ACK_BATCH_SIZE = 50; // Send ACK every 50 chunks received
   }
 
   /**
@@ -544,6 +544,7 @@ export class AssemblyEngine {
     this.fileWriters.delete(transferId);
     this.chunkBitmaps.delete(transferId);
     this.lastFlushCount.delete(transferId);
+    this.pendingAcks.delete(transferId);
     chunkValidator.clear(transferId);
     progressTracker.clear(transferId);
     

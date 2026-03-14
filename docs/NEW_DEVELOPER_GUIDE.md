@@ -33,7 +33,7 @@ The codebase follows a **layered architecture** from UI → Services → Domain 
 │  ├── sending/ - ChunkingEngine                       │
 │  ├── receiving/ - AssemblyEngine, ChunkValidator      │
 │  ├── resumption/ - ResumableTransferManager          │
-│  ├── multifile/ - MultiFileTransferManager           │
+│  ├── multifile/ - MultiFileTransferManager, ZipStreamWriter │
 │  └── shared/ - ProgressTracker (single source!)      │
 └──────────────────────────────────────────────────────┘
                         ↓ uses
@@ -60,7 +60,7 @@ Let's follow what happens when a user sends a file:
    - Returns progress callbacks and control functions
 
 3. **Transfer Layer** ([transfer/sending/ChunkingEngine.js](../src/transfer/sending/ChunkingEngine.js))
-   - Reads file in 16KB chunks (WebRTC DataChannel limit)
+   - Reads file in 64KB chunks (adaptive 16KB–256KB based on throughput)
    - Accumulates chunks into 64KB storage buffers
    - Calculates SHA-256 checksums
    - Sends chunks via DataChannel
@@ -269,7 +269,7 @@ const chunkSize = 16384; // What is this number?
 ✅ **Good:**
 ```javascript
 import { NETWORK_CHUNK_SIZE } from '@/constants/transfer.constants';
-// NETWORK_CHUNK_SIZE = 16KB (WebRTC DataChannel maximum)
+// DEFAULT_CHUNK_SIZE = 64KB (adaptive based on throughput)
 ```
 
 ### Repository Pattern for Data Access

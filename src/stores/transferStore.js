@@ -23,7 +23,43 @@ export const useTransferStore = create((set, get) => ({
 
   // ============ ACTIONS ============
 
+  /**
+   * Record an initiated upload in history
+   * @param {Object} metadata - Transfer metadata (transferId, fileName, fileSize, fileType, totalChunks)
+   */
+  initiateUpload: (metadata = {}) => {
+    set((state) => ({
+      transferHistory: [
+        ...state.transferHistory,
+        {
+          id: metadata.transferId,
+          status: 'uploading',
+          direction: 'upload',
+          startedAt: Date.now(),
+          ...metadata,
+        },
+      ],
+    }));
+  },
 
+  /**
+   * Record an initiated download in history
+   * @param {Object} metadata - Transfer metadata (transferId, fileName, fileSize, fileType, totalChunks)
+   */
+  initiateDownload: (metadata = {}) => {
+    set((state) => ({
+      transferHistory: [
+        ...state.transferHistory,
+        {
+          id: metadata.transferId,
+          status: 'downloading',
+          direction: 'download',
+          startedAt: Date.now(),
+          ...metadata,
+        },
+      ],
+    }));
+  },
 
   /**
    * Record a completed transfer in history
@@ -31,17 +67,32 @@ export const useTransferStore = create((set, get) => ({
    * @param {Object} metadata - Transfer metadata
    */
   completeTransfer: (transferId, metadata = {}) => {
-    set((state) => ({
-      transferHistory: [
-        ...state.transferHistory,
-        {
-          id: transferId,
+    set((state) => {
+      const existing = state.transferHistory.findIndex((t) => t.id === transferId);
+      if (existing !== -1) {
+        // Update existing entry
+        const updated = [...state.transferHistory];
+        updated[existing] = {
+          ...updated[existing],
           status: 'completed',
           completedAt: Date.now(),
           ...metadata,
-        },
-      ],
-    }));
+        };
+        return { transferHistory: updated };
+      }
+      // Fallback: create new entry if not found
+      return {
+        transferHistory: [
+          ...state.transferHistory,
+          {
+            id: transferId,
+            status: 'completed',
+            completedAt: Date.now(),
+            ...metadata,
+          },
+        ],
+      };
+    });
   },
 
   /**

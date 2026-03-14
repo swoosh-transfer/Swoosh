@@ -176,4 +176,90 @@
 2. Consider adding retry/timeout handling for individual chunk delivery (beyond connection-level recovery).
 3. Add transfer state persistence checkpointing (periodic bitmap flush during active transfer).
 
+---
 
+## Update: Bug Fixes, Performance Tuning & New Features
+
+### 11) Transfer store bug fixes
+- Added missing `initiateUpload` and `initiateDownload` actions to `transferStore.js`
+- Wired `completeStoreTransfer` calls in `useFileTransfer.js` completion paths
+- Fixed `completeTransfer` creating duplicate entries (uses `findIndex` to update existing)
+
+### 12) Performance tuning (mobile transfers)
+- Mobile chunk size: 16KB → 64KB
+- Removed 2MB/s hard floor on scale-up threshold (now 500KB/s)
+- ACK batch size: 10 → 50
+- Removed redundant `waitForDrain`
+- Mobile buffer watermark: 128KB → 256KB
+
+### 13) Stability fixes
+- `AssemblyEngine`: Fixed `pendingAcks` memory leak
+- `waitForDrain`: Added 10s timeout + `readyState` check to prevent hanging
+- `connectionMonitor.getStats()`: Added 5s `Promise.race` timeout
+- `useMessages drain()`: Added unhandled rejection handling
+
+### 14) Multi-file & resume fixes
+- `MultiFileTransferManager`/`MultiFileReceiver`: Fixed `destroy()` memory leaks (5 Maps not cleared)
+- Fixed `_pauseResolve` stale promise
+- `TransferSection`: Removed dead rendering condition
+- `deserializeBitmap`: Wrapped in try-catch for corrupt data
+- Resume logic: Reject first if bitmap corrupt, before sending `RESUME_ACCEPTED`
+
+### 15) Dead code & misc fixes
+- Removed unused variables in `Home.jsx`
+- Replaced duplicate `formatFileSize` with imported `formatBytes`
+- Made `chunks.repository.js` import static (was dynamic)
+- Removed non-existent `_closed` property check in `database/client.js`
+- Removed unused imports in `useMessages.js`
+
+### 16) New features implemented
+- **Drag & Drop**: Already existed in `FileDropZone` — verified working
+- **Connection Quality Badge**: Excellent/Good/Fair/Poor based on RTT + packet loss (Room/index.jsx)
+- **Browser Notifications**: `notifyTransferComplete()` wired to sender and receiver completion paths
+- **Text/Clipboard Sharing**: `TextShareSection` component + `TEXT_MESSAGE` handler in `useMessages`
+- **Speed Graph**: `SpeedGraph` canvas component showing last 30s throughput
+- **Streamed ZIP Download**: `ZipStreamWriter` using fflate, `MultiFileReceiver` ZIP mode, UI toggle
+
+### 17) ZIP UX improvements
+- Sequential-only warning when ZIP toggle is checked
+- ZIP badge during active transfer
+- ZIP-specific completion card showing archive name and file count
+- ZIP-specific error messaging with retry-without-ZIP suggestion
+- Receiver-side error handling: try/catch in `_writeChunkToZip`, `_flushZipBuffer`, `_completeFile`
+- File picker cancel (`AbortError`) no longer triggers `RECEIVER_READY`
+- Sender-side ZIP info note in transfer mode section
+- Fixed stale `saveAsZip` closure with `saveAsZipRef`
+
+### 18) Test expansion
+- Expanded from 77 tests (3 files) to **254 tests** (11 files)
+- New test files: validators, errors, qrCode, transferConstants, ZipStreamWriter, transferNotifications, transferStore, connectionMonitor
+
+**Files changed (rounds 11-18):**
+- `src/stores/transferStore.js`
+- `src/pages/Room/hooks/useFileTransfer.js`
+- `src/pages/Room/hooks/useMessages.js`
+- `src/pages/Room/hooks/useRoomConnection.js`
+- `src/pages/Room/hooks/useMultiFileTransfer.js`
+- `src/pages/Room/index.jsx`
+- `src/pages/Room/components/TransferSection.jsx`
+- `src/pages/Room/components/SpeedGraph.jsx` (new)
+- `src/pages/Room/components/TextShareSection.jsx` (new)
+- `src/pages/Room/components/index.js`
+- `src/pages/Home.jsx`
+- `src/transfer/receiving/AssemblyEngine.js`
+- `src/transfer/multifile/MultiFileTransferManager.js`
+- `src/transfer/multifile/MultiFileReceiver.js`
+- `src/transfer/multifile/ZipStreamWriter.js` (new)
+- `src/constants/transfer.constants.js`
+- `src/constants/messages.constants.js`
+- `src/utils/connectionMonitor.js`
+- `src/infrastructure/database/transfers.repository.js`
+- `src/infrastructure/database/client.js`
+- 8 new test files in `src/__tests__/unit/`
+
+---
+
+## Validation (Latest)
+- Build: ✅ passes (132 modules, 488KB / 148KB gzip)
+- Tests: ✅ 254/254 passing across 11 test files
+- All documentation updated

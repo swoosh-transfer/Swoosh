@@ -57,6 +57,8 @@ export function TransferSection({
   onRemoveFile,
   onClearFiles,
   onReset,
+  saveAsZip = false,
+  onSaveAsZipChange,
 }) {
   const isTransferring = transferState === 'sending' || transferState === 'receiving' || transferState === 'preparing';
   const isIdle = transferState === 'idle';
@@ -145,6 +147,15 @@ export function TransferSection({
               ? 'One at a time — more reliable'
               : 'Simultaneous — faster'}
           </p>
+          {/* Sender-side ZIP info */}
+          <div className="mt-2 flex items-start gap-2 bg-indigo-950/20 border border-indigo-800/30 rounded-lg px-2.5 py-2">
+            <svg className="w-3.5 h-3.5 text-indigo-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <p className="text-xs text-indigo-300/70">
+              The receiver can choose to save all files as a single ZIP archive. ZIP mode uses sequential transfer.
+            </p>
+          </div>
         </div>
       )}
 
@@ -152,7 +163,8 @@ export function TransferSection({
       {isIdle && selectedFiles.length > 0 && (selectedFiles.some(f => f.file.size > 100 * 1024 * 1024) || selectedFiles.length > 5) && (
         <div className="bg-amber-950/40 border border-amber-700/50 rounded-xl p-3">
           <p className="text-xs text-amber-300/90">
-            ⚠️ For {selectedFiles.length > 5 ? 'many files' : 'large files'}, compressing into a ZIP first can improve speed & reliability.
+            ⚠️ For {selectedFiles.length > 5 ? 'many files' : 'large files'}, consider using sequential mode for reliability.
+            The receiver will have the option to bundle everything into a single ZIP download.
           </p>
         </div>
       )}
@@ -166,7 +178,7 @@ export function TransferSection({
       )}
 
       {/* Host: Single-file info (legacy) */}
-      {isHost && !isMultiFile && selectedFile && isIdle && !onAddFiles && (
+      {isHost && !isMultiFile && selectedFile && isIdle && (
         <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-4">
           <FileInfo file={selectedFile} />
         </div>
@@ -216,11 +228,35 @@ export function TransferSection({
               </div>
             ))}
           </div>
+          {/* Save as ZIP toggle (only for multi-file) */}
+          {incomingManifest.totalFiles > 1 && onSaveAsZipChange && (
+            <div className="mb-3">
+              <label className="flex items-center gap-2 px-1 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={saveAsZip}
+                  onChange={(e) => onSaveAsZipChange(e.target.checked)}
+                  className="w-4 h-4 rounded border-zinc-600 bg-zinc-800 text-emerald-500 focus:ring-emerald-500 focus:ring-offset-0"
+                />
+                <span className="text-xs text-zinc-400">Save as single ZIP archive</span>
+              </label>
+              {saveAsZip && (
+                <div className="mt-2 flex items-start gap-2 px-1">
+                  <svg className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                  <p className="text-xs text-amber-300/80">
+                    ZIP mode processes files sequentially (one at a time) to build the archive correctly. This may be slightly slower than parallel mode but produces a single downloadable file.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
           <button
             onClick={onAcceptMultiFile}
             className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white rounded-xl font-semibold transition-colors"
           >
-            Accept & Choose Save Location
+            {saveAsZip && incomingManifest.totalFiles > 1 ? 'Accept & Save as ZIP' : 'Accept & Choose Save Location'}
           </button>
         </div>
       )}
@@ -246,6 +282,14 @@ export function TransferSection({
               <span className="text-xs px-2 py-0.5 bg-zinc-800 rounded-full text-zinc-400">
                 {transferMode === TRANSFER_MODE.PARALLEL ? 'Parallel' : 'Sequential'}
               </span>
+              {saveAsZip && (
+                <span className="text-xs px-2 py-0.5 bg-indigo-900/60 border border-indigo-700/40 rounded-full text-indigo-300 flex items-center gap-1">
+                  <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" />
+                  </svg>
+                  ZIP
+                </span>
+              )}
             </div>
           )}
 
@@ -294,6 +338,27 @@ export function TransferSection({
             fileName={pendingFile?.name}
             fileCount={isMultiFile ? (incomingManifest?.totalFiles || selectedFiles.length || 1) : 1}
           />
+          {/* ZIP completion info for receiver */}
+          {!isHost && saveAsZip && isMultiFile && (
+            <div className="mt-3 bg-indigo-950/30 border border-indigo-800/40 rounded-lg p-3">
+              <div className="flex items-center gap-2">
+                <svg className="w-5 h-5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" />
+                </svg>
+                <div>
+                  <p className="text-sm font-medium text-indigo-300">
+                    {downloadResult?.savedToFileSystem
+                      ? 'ZIP archive saved to disk'
+                      : 'ZIP archive downloaded'}
+                  </p>
+                  <p className="text-xs text-zinc-500 mt-0.5">
+                    {incomingManifest?.totalFiles || 0} files bundled into{' '}
+                    <span className="text-zinc-400">{(incomingManifest?.archiveName || 'transfer')}.zip</span>
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
           {dataChannelReady && onReset && (
             <button
               onClick={onReset}
@@ -310,7 +375,16 @@ export function TransferSection({
         <div className="bg-zinc-900 border border-red-800/50 rounded-xl p-4">
           <div className="text-center">
             <p className="text-red-400 font-medium mb-1">Transfer Failed</p>
-            <p className="text-xs text-zinc-500 mb-3">Something went wrong during the transfer.</p>
+            <p className="text-xs text-zinc-500 mb-3">
+              {saveAsZip && isMultiFile
+                ? 'Something went wrong while building the ZIP archive. The archive may be incomplete or corrupt.'
+                : 'Something went wrong during the transfer.'}
+            </p>
+            {saveAsZip && isMultiFile && (
+              <p className="text-xs text-amber-400/80 mb-3">
+                💡 Try again without ZIP mode — files will be saved individually instead.
+              </p>
+            )}
             {dataChannelReady && onReset && (
               <button
                 onClick={onReset}

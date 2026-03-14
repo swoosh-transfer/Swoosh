@@ -47,7 +47,7 @@ The P2P file transfer follows a multi-phase process:
 ### Key Principles
 
 - **WebRTC DataChannel:** Enables P2P communication without server intermediary
-- **Chunking:** Files split into 16KB network chunks, assembled into 64KB storage chunks
+- **Chunking:** Files split into 64KB chunks (adaptive 16KB–256KB based on throughput)
 - **TOFU Security:** Trust On First Use prevents MITM attacks
 - **Progress Tracking:** Single source of truth via `ProgressTracker`
 - **Crash Recovery:** Transfer state persisted to IndexedDB
