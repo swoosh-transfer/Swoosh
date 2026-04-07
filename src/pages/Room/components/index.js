@@ -7,3 +7,4 @@ export { TransferSection } from './TransferSection.jsx';
 export { ActivityLogSection } from './ActivityLogSection.jsx';
 export { default as TextShareSection } from './TextShareSection.jsx';
 export { default as SpeedGraph } from './SpeedGraph.jsx';
+export { BandwidthTestPanel } from './BandwidthTestPanel.jsx';

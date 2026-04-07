@@ -627,6 +627,9 @@ export function useRoomConnection(roomId, isHost, onDataChannelReady, addLog) {
     waitForDrain,
     requestConnectionRecovery,
     
+    // Peer connection accessor (for bandwidth testing)
+    getPeerConnection,
+    
     // Handshake tracking
     handshakeSentRef,
   };

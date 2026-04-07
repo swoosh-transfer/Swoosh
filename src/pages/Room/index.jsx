@@ -35,6 +35,7 @@ import {
   ActivityLogSection,
   TextShareSection,
   SpeedGraph,
+  BandwidthTestPanel,
 } from './components/index.js';
 
 export default function Room() {
@@ -43,6 +44,7 @@ export default function Room() {
   const { isHost, securityPayload, selectedFiles, addFiles, removeFile, clearFiles, resetRoom, error: roomError } = useRoomStore();
   const [showQRCode, setShowQRCode] = useState(false);
   const [textMessages, setTextMessages] = useState([]);
+  const [bandwidthTestResult, setBandwidthTestResult] = useState(null);
   const pendingResumeRef = useRef(null); // No longer used — file re-selection removed
   const resumeFallbackFiredRef = useRef(false); // Prevent repeated auto-start on resume failure
   const negotiatedConfigRef = useRef(null);
@@ -79,6 +81,7 @@ export default function Room() {
     waitForDrain,
     dataChannelRef,
     requestConnectionRecovery,
+    getPeerConnection,
   } = connection;
 
   // Security (encrypted signaling verification)
@@ -913,6 +916,24 @@ export default function Room() {
                 <p className="text-xs text-zinc-600">Establishing connection...</p>
               )}
             </div>
+
+            {/* Bandwidth Test Panel — shown when connected but not transferring */}
+            {dataChannelReady && tofuVerified && (
+              (isMultiFile ? multiTransfer.multiTransferState : transferState) === 'idle'
+            ) && (
+              <BandwidthTestPanel
+                dataChannel={dataChannelRef.current}
+                peerConnection={getPeerConnection()}
+                totalFileSize={selectedFiles.reduce((sum, f) => sum + (f.size || f.file?.size || 0), 0)}
+                isHost={isHost}
+                sendJSON={sendJSON}
+                onTestComplete={(result) => {
+                  setBandwidthTestResult(result);
+                  addLog(`Speed test: ${result.megabitsPerSecond} Mbps, RTT: ${result.rtt}ms, Type: ${result.connectionType}`, 
+                    result.quality?.rating === 'poor' ? 'warning' : 'success');
+                }}
+              />
+            )}
 
             {/* Speed Graph — shown during active transfers */}
             <SpeedGraph
